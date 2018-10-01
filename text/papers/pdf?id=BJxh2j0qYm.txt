@@ -1,0 +1,463 @@
+Under review as a conference paper at ICLR 2019
+Dynamic Channel Pruning:
+Feature Boosting and Suppression
+Anonymous Authors Paper under double-blind review
+Abstract
+Making deep convolutional neural networks more accurate typically comes at the cost of increased computational and memory resources. In this paper, we exploit the fact that the importance of features computed by convolutional layers is highly input-dependent, and propose feature boosting and suppression (FBS), a new method to predictively amplify salient convolutional channels and skip unimportant ones at run-time. FBS introduces small auxiliary connections to existing convolutional layers. In contrast to channel pruning methods which permanently remove channels, it preserves the full network structures and accelerates convolution by dynamically skipping unimportant input and output channels. FBS-augmented networks are trained with conventional stochastic gradient descent, making it readily available for many state-of-the-art CNNs. We compare FBS to a range of existing channel pruning and dynamic execution schemes and demonstrate large improvements on ImageNet classification. Experiments show that FBS can accelerate VGG-16 by 5× and improve the speed of ResNet-18 by 2×, both with less than 0.6% top-5 accuracy loss.
+1 Introduction
+State-of-the-art vision and image-based tasks such as image classification (Krizhevsky et al., 2012; Simonyan & Zisserman, 2015; He et al., 2016), object detection (Ren et al., 2017; Huang et al., 2017) and segmentation (Long et al., 2015) are all built upon deep convolutional neural networks (CNNs). While CNN architectures have evolved to become more efficient, the general trend has been to use larger models with greater memory and compute requirements to achieve higher accuracy.
+One common approach to reduce costs is to prune over-parameterized CNNs. If performed in a coarse-grain manner this approach is known as channel pruning (Ye et al., 2018; He et al., 2017; Liu et al., 2017; Wen et al., 2016; Alvarez & Salzmann, 2016). Channel pruning evaluates channel saliency measures and removes all input and output connections from unimportant channels ­ generating a smaller dense model. A saliency-based pruning method, however, has threefold disadvantages. Firstly, by removing channels, the capabilities of CNNs are permanently lost, and the resulting CNN may never regain its accuracy for difficult inputs for which the removed channels were responsible. Secondly, despite the fact that channel pruning may drastically shrink model size, without careful design, computational resources cannot be effectively reduced in a CNN without a detrimental impact on its accuracy. Finally, the saliency of a neuron is not static, which can be illustrated by the feature visualization in Figure 1. Here, a CNN is shown a set of input images, channel neurons in a convolutional output may get highly excited, whereas another set of images elicit little response from the same channel. This is in line with our understanding of CNNs that neurons in a convolutional layer specialize in recognizing distinct features, and the relative importance of a neuron depends heavily on the inputs.
+The above shortcomings prompts the question: why should we prune by static importance, if the importance is highly input-dependent? Surely, a more promising alternative is to prune dynamically depending on the current input. A dynamic channel pruning strategy allows the network to learn to prioritize certain convolutional channels and ignore irrelevant ones.
+1
+
+Under review as a conference paper at ICLR 2019
+
+Instead of simply reducing model size at the cost of accuracy with pruning, we can accelerate convolution by selectively computing only a subset of channels predicted to be important at run-time, while considering the sparse input from the preceding convolution layer. By doing this, not only do we save computational resources, we also preserve all neurons of the full model, which minimizes the impact on model accuracy.
+In this paper, we propose feature boosting and suppression (FBS) to dynamically amplify and suppress output channels computed by the convolutional layer. Intuitively, we can imagine that the flow of information of each output channel can be amplified or restricted under the control of a "valve". This allows salient information to flow freely while we stop all information from unimportant channels and skip their computation. Unlike pruning statically, the valves use features from the previous layer to predict the saliency of output channels. With conventional stochastic gradient descent (SGD) methods, the predictor can learn to adapt itself by observing the input and output features of the convolution operation.
+FBS introduces tiny auxiliary connections to existing convolutional layers. The minimal overhead added to the existing model is thus negligible when compared to the potential speed up provided by the dynamic sparsity. Existing dynamic computation strategies in CNNs (Lin et al., 2017; Odena et al., 2017; Bolukbasi et al., 2017) produce on/off pruning decisions or execution path selections. Training them thus often resorts to reinforcement learning, which in practice is often computationally expensive. Even though our models similarly use non-differentiable functions, contrary to these methods, our unified losses are still well-minimized with conventional SGD.
+We apply FBS to a custom CIFAR-10 (Krizhevsky et al., 2014) classifier and popular CNN models such as VGG-16 (Simonyan & Zisserman, 2015) and ResNet-18 (He et al., 2016) trained on the ImageNet ILSVRC2012 dataset (Deng et al., 2009). Empirical results show that under the same speed-up constraints, our strategy can produce models with validation accuracies surpassing all other static channel pruning and dynamic conditional execution methods examined in the paper.
+
+high response
+5.426 3.297 3.076 2.938 3.409 3.309 3.298 3.171
+
+low response
+0.051 0.052 0.066 0.069
+(a) Channel 114
+
+-0.229 -0.218 -0.168 -0.161
+
+(c) The distribution of maxi-
+
+(b) Channel 181
+
+mum activations
+
+Figure 1: When images from the ImageNet validation dataset are shown to a pre-trained ResNet-18 (He et al., 2016), the outputs from certain channel neurons may vary drastically. The top rows in (a) and (b) are found respectively to greatly excite neurons in channels 114 and 181 of layer block 3b/conv2, whereas the bottom images elicit little activation from the same channel neurons. The number below each image indicate the maximum values observed in the channel before adding the shortcut and activation. Finally, (c) shows the distribution of maximum activations observed in the first 20 channels.
+
+2 Related Work
+2.1 Structured Sparsity
+Since LeCun et al. (1990) introduced optimal brain damage, the idea of creating more compact and efficient CNNs by removing connections or neurons has received significant attention. Early literature on pruning deep CNNs zero out individual weight parameters (Hassibi et al., 1994; Guo et al., 2016). This results in highly irregular sparse connections, which were notoriously difficult for GPUs to exploit. This has prompted custom accelerator
+2
+
+Under review as a conference paper at ICLR 2019
+solutions that exploit sparse weights (Parashar et al., 2017; Han et al., 2016). Although supporting both sparse and dense convolutions efficiently normally involves some compromises in terms of efficiency or performance.
+Alternatively, recent work has thus increasingly focused on introducing structured sparsity (Wen et al., 2016; Ye et al., 2018; Alvarez & Salzmann, 2016; Zhou et al., 2016), which can be exploited by GPUs and allows custom accelerators to focus solely on efficient dense operations. Wen et al. (2016) added group Lasso on channel weights to the model's training loss function. This has the effect of reducing the magnitude of channel weights to diminish during training, and remove connections from zeroed-out channels. To facilitate this process, Alvarez & Salzmann (2016) additionally used proximal gradient descent, while Li et al. (2017) and He et al. (2018) proposed to prune channels by thresholds, i.e. they set unimportant channels to zero, and fine-tune the resulting CNN. The objective to induce sparsity in groups of weights may present difficulties for gradient-based methods, given the large number of weights that need to be optimized. A common approach to overcome this is to solve (He et al., 2017) or learn (Liu et al., 2017; Ye et al., 2018) channel saliencies to drive the sparsification of CNNs. He et al. (2017) solved an optimization problem which limits the number of active convolutional channels while minimizing the reconstruction error on the convolutional output. Liu et al. (2017) used Lasso regularization on channel saliencies to induce sparsity and prune channels with a global threshold. Ye et al. (2018) learned to sparsify CNNs with an iterative shrinkage/thresholding algorithm applied to the scaling factors in batch normalization. Huang et al. (2018) adopted reinforcement learning to train agents that take the layer weights as inputs and produce binary channel pruning decisions. PerforatedCNNs, proposed by Figurnov et al. (2016), use predefined masks that are model-agnostic to skip the output pixels in convolutional layers.
+2.2 Dynamic Execution
+In a pruned model produced by structured sparsity methods, the capabilities of the pruned neurons and connections are permanently lost. Therefore, many propose to use dynamic networks as an alternative to structured sparsity. During inference, a dynamic network can use the input data to choose parts of the network to evaluate.
+Convolutional layers are usually spatially sparse, i.e. their activation outputs may contain only small patches of salient regions. A number of recent publications exploit this for acceleration. Dong et al. (2017) introduced low-cost collaborative layers which induce spatial sparsity in cheap convolutions, so that the main expensive ones can use the same sparsity information. Figurnov et al. (2017) proposed spatially adaptive computation time for residual networks (He et al., 2016), which learns the number of residual blocks required to compute a certain spatial location. Almahairi et al. (2016) presented dynamic capacity networks, which use the gradient of a coarse output's entropy to select salient locations in the input image for refinement. Ren et al. (2018) assumed the availability of a priori spatial sparsity in the input image, and accelerated the convolutional layer by computing non-sparse regions.
+There are dynamic networks that make binary decisions or multiple choices for the inference paths taken. BlockDrop, proposed by Wu et al. (2018), trains a policy network to skip blocks in residual networks. Liu & Deng (2018) proposed conditional branches in deep neural networks (DNNs), and use Q-learning to train the branching policies. Odena et al. (2017) designed a DNN with layers containing multiple modules, and decided which module to use with a recurrent neural network (RNN). Lin et al. (2017) learned an RNN to adaptively prune channels in convolutional layers. The on/off decisions commonly used in these networks cannot be represented by differentiable functions, hence the gradients are not well-defined. Consequently, the dynamic networks above train their policy functions by reinforcement learning. There exist, however, methods that workaround such limitations. Shazeer et al. (2017) introduced sparsely-gated mixture-of-experts and used a noisy ranking on the backpropagate-able gating networks to select the expensive experts to evaluate. Bolukbasi et al. (2017) trained differentiable policy functions to implement early exits in a DNN. Hua et al. (2018) learned binary policies that decide whether partial or all input channels are used for convolution, but approximate the gradients of the non-differentiable policy functions with continuous ones.
+3
+
+Under review as a conference paper at ICLR 2019
+
+3 Feature Boosting and Suppression
+We start with a high-level illustration (Figure 2) of how FBS accelerates a convolutional layer with batch normalization (BN). The auxiliary components (in red) predicts the importance of each output channel based on the input features, and amplify the output features accordingly. Moreover, certain output channels are predicted to be entirely suppressed (or zero-valued as represented by ), such output sparsity information can advise the convolution operation to skip the computation of these channels, as indicated by the dashed arrow. It is notable that the expensive convolution can be doubly accelerated by skipping the inactive channels from both the input features and the predicted output channel saliencies. The rest of this section provides detailed explanation of the components in Figure 2.
+
+convolution
+xl 1 sparsity
+
+normalize bias)
+convl (xl 1)
+
+norm (convl (xl 1)) + l
+
+subsample
+
+channel saliency predictor
+
+multiple winners take all wta
+
+ss (xl 1)
+
+gl (xl 1)
+
+l (xl 1)
+
+multiply (+ ReLU)
+
+xl
+
+Figure 2: A high level view of a convolutional layer with FBS. By way of illustration, we use the lth layer with 8-channel input and output features, where channels are colored to indicate different saliencies, and the white blocks ( ) represent all-zero channels.
+
+3.1 Preliminaries
+
+For simplicity, we consider a deep sequential batch-normalized (Ioffe & Szegedy, 2015) CNN with L convolutional layers, i.e. xL = F (x0) = fL (· · · f2 (f1 (x0)) · · · ), where the lth layer fl : RCl-1×Hl-1×Wl-1  RCl×Hl×Wl computes the features xl  RCl×Hl×Wl , which comprise of Cl channels of features with height Hl and width Wl. The lth layer is thus defined as:
+
+fl (xl-1) = (l · norm (convl (xl-1, l)) + l)+ .
+
+(1)
+
+Here, additions (+) and multiplications (·) are element-wise, (z)+ = max (z, 0) denotes the ReLU activation, l, l  RCl are trainable parameters, norm (z) normalizes each channel of features z across the population of z, with µz, z2  RCl respectively containing the population mean and variance of each channel, and a small prevents division by zero:
+
+norm (z) = z - µz . z2 +
+
+(2)
+
+Additionally, convl (xl-1, l) computes the convolution of input features xl-1 using the weight tensor l  R ,Cl×Cl-1×k2 where k is the kernel size. Specifically, FBS concerns the optimization of convl (xl-1, l) functions, as a CNN spends the majority of its inference time in them, using k2Cl-1ClHlWl multiply-accumulate operations (MACs) for the lth layer.
+
+3.2 Designing a Dynamic Layer
+
+Consider the following generalization of a layer with dynamic execution:
+
+f^(x, · · · ) = f (x, , · · · ) ·  (x, , · · · ) ,
+
+(3)
+
+where f and  respectively use weight parameters  and  and may have additional inputs, and compute tensors of the same output shape, denoted by F and G. Intuitively, the expensive F[i] can always be skipped for any index i whenever the cost-effective G[i] evaluates
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+to 0. Here, the superscript [i] is used to index the ith slice of the tensor. For example, if we have features F  RC×H×W containing C channels of H-by-W features, F[c]  RH×W retrieves the cth feature image. We can further sparsify and accelerate the layer by adding, for instance, a Lasso on  to the total loss, where Ex [z] is the expectation of z over x:
+
+R (x) = Ex [  (x, , · · · ) 1] ,
+
+(4)
+
+Despite the simplicity of this formulation, it is however very tricky to design f^ properly. Under the right conditions, we can arbitrarily minimize the Lasso while maintaining the same output from the layer by scaling parameters. For example, in low-cost collaborative layers (Dong et al., 2017), f and  are simply convolutions (with or without ReLU activation) that respectively have weights  and . Since f and  are homogeneous functions, one can always halve  and double  to decrease (4) while the network output remains the same. In other words, the optimal network must have    0, which is infeasible in finiteprecision arithmetic. For the above reasons, Dong et al. (2017) observed that the additional loss in (4) always degrades the CNN's task performance. Ye et al. (2018) pointed out that gradient-based training algorithms are highly inefficient in exploring such reparameterization patterns, and channel pruning methods may experience similar difficulties. Shazeer et al. (2017) avoided this limitation by finishing  with a softmax normalization, but (4) can no longer be used as the softmax renders the 1-norm, which now evaluates to 1, useless. In addition, similar to sigmoid, softmax (without the cross entropy) is easily saturated, and thus may equally suffer from vanishing gradients. Many instead design  to produce on/off decisions and train them with reinforcement learning as discussed in Section 2.
+
+3.3 Feature Boosting and Suppression with Channel Saliencies
+
+Instead of imposing sparsity on features or convolutional weight parameters (e.g. Wen et al.
+(2016); Alvarez & Salzmann (2016); Li et al. (2017); He et al. (2018)), recent channel pruning
+methods (Liu et al., 2017; Ye et al., 2018) induce sparsity on the BN scaling factors l. Inspired by them, FBS similarly generate a channel-wise importance measure. Yet contrary
+to them, instead of using the constant BN scaling factors l, we predict channel importance and dynamically amplify or suppress channels with a parametric function (xl-1) dependent on the output from the previous layer xl-1. Here, we propose to replace layer definition fl (xl-1) for all l  [1, L] with f^l (xl-1) which employs dynamic channel pruning:
+
+f^l (xl-1) = (l (xl-1) · (norm (convl (xl-1, l)) + l))+ ,
+
+(5)
+
+where a low-overhead policy l (xl-1) evaluates the pruning decisions for the computationally demanding conv (xl-1, l):
+
+l (xl-1) = wta dCl (gl (xl-1)) .
+
+(6)
+
+Here, wtak(z) is a k-winners-take-all function, i.e. it returns a tensor identical to z, except that we zero out entries in z that are smaller than the k largest entries in absolute magnitude.
+In other words, wta dCl (gl(xl-1)) provides a pruning strategy that computes only dCl
+most salient channels predicted by gl(xl-1), and suppresses the remaining channels with zeros. In Section 3.4, we provide a detailed explanation of how we design a cheap gl(xl-1) that learns to predict channel saliencies.
+
+It is notable that our strategy prune Cl - dCl least salient output channels from lth
+
+layer, where the density d  ]0, 1] can be varied to sweep the trade-off relationship between
+
+performance and accuracy. Moreover, pruned channels contain all-zero values. This allows the subsequent (l + 1)th layer to trivially make use of input-side sparsity, since all-zero
+
+features can be safely skipped even for zero-padded layers. Because all convolutions can
+
+exploit both input- and output-side sparsity, the speed-up gained from pruning is quadratic
+
+with respect to the pruning ratio. For instance, dynamically pruning half of the channels in
+
+all
+
+layers
+
+gives
+
+rise
+
+to
+
+a
+
+dynamic
+
+CNN
+
+that
+
+uses
+
+approximately
+
+1 4
+
+of
+
+the
+
+original
+
+MACs.
+
+Theoretically, FBS does not introduce the reparameterization discussed in Section 3.2. By
+batch normalizing the convolution output, the convolution kernel l is invariant to scaling. Computationally, it is more efficient to train. Many alternative methods use non-
+differentiable  functions that produce on/off decisions. In general, DNNs with these policy
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+functions are incompatible with SGD, and resort to reinforcement learning for training. In contrast, (6) allows end-to-end training, as wta is a piecewise differentiable and continuous function like ReLU. Srivastava et al. (2015) suggested that in general, a network is easier and faster to train for complex tasks and less prone to catastrophic forgetting, if it uses functions such as wta that promote local competition between many subnetworks.
+
+3.4 Learning to Predict Channel Saliencies
+
+This section explains the design of the channel saliency predictor gl(xl-1). To avoid significant computational cost in gl, we subsample xl-1 by reducing the spatial dimensions of each channel to a scalar using the following function ss : RC×H×W  RC :
+
+ss (xl-1)
+
+=
+
+1 HW
+
+s x[l1-]1
+
+s x[l2-]1
+
+· · · s xl[C-]1
+
+,
+
+(7)
+
+where s xl[c-]1 reduces the cth channel of z to a scalar using, for instance, the 1-norm
+x[lc-]1 1, 2-norm, -norm, or the variance of x[lc-]1. The results in Section 4 use the 1norm by default, which is equivalent to global average pooling for the ReLU activated xl-1. We then design gl(xl-1) to predict channel saliencies with a fully connected layer following the subsampled activations ss (xl-1), where l  RCl×Cl-1 is the weight tensor of the layer:
+
+gl (xl-1) = (ss (xl-1) l + l)+ .
+
+(8)
+
+We generally initialize l with 1 and apply He et al. (2015)'s initialization to l. To induce
+
+sparsity in gl(xl-1), we use ReLU as shown in (8), then follow Liu et al. (2017) and Ye
+
+et al. (2018) and regularize all layers with the Lasso 
+
+L l=1
+
+Ex
+
+[
+
+gl(xl-1)
+
+1]
+
+in
+
+the
+
+total
+
+loss, where  = 10-8 in our experiments.
+
+4 Experiments
+We ran extensive experiments on CIFAR-10 (Krizhevsky et al., 2014) and the ImageNet ILSVRC2012 (Deng et al., 2009), two popular image classification datasets. We designed M-CifarNet, a custom 8-layer CNN for CIFAR-10 (see Appendix B for its structure), using only 1.3 M parameters with 91.37% and 99.67% top-1 and top-5 accuracies respectively. M-CifarNet is much smaller than a VGG-16 on CIFAR-10 (Liu et al., 2017), which uses 20 M parameters and only 2.29% more accurate. Because of its compactness, our CNN is more challenging to accelerate. By faithfully reimplementing Network Slimming (NS) (Liu et al., 2017), we closely compare FBS with NS under various speedup constraints. For ILSVRC2012, we augment two popular CNN variants, ResNet-18 (He et al., 2016) and VGG-16 (Simonyan & Zisserman, 2015), and provide detailed accuracy/MACs trade-off comparison against recent structured pruning and dynamic execution methods. we provide the detailed experimental setup in Appendix A, and further examine and explain the effectiveness of FBS on CNNs by exploring the model design space in Appendix C.
+Our method begins by first replacing all convolutional layer computations with (5), and initializing the new convolutional kernels with previous parameters. Initially, we do not suppress any channel computations by using density d = 1 in (6) and fine-tune the resulting network. For fair comparison against NS, we then follow Liu et al. (2017) by iteratively decrementing the overall density d of the network by 10% in each step, and thus gradually using fewer channels to sweep the accuracy/performance trade-off. The difference is that NS prunes channels by ranking globally, while FBS prunes around 1 - d of each layer.
+4.1 CIFAR-10
+By respectively applying NS and FBS to our CIFAR-10 classifier and incrementally increasing sparsity, we produce the trade-off relationships between number of operations (measured in MACs) and the classification accuracy as shown in Figure 3a. FBS clearly surpasses NS in its ability to retain the task accuracy under an increasingly stringent computational budget. Besides comparing FBS against NS, we are interested in combining both methods,
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Accuracy
+
+92% 90% 88% 86% 84% 82% 80% 78%
+0.0
+
+NS top-1 FBS top-1 NS+FBS top-1
+
+0.5 1.0 MACs
+
+1.5 1e8
+
+layers
+conv0 conv1 conv2 conv3 conv4 conv5 conv6 conv7
+
+1 0
+
+channels sorted by probabilities of being active
+
+(a) M-CifarNet accuracy/MACs trade-off
+
+(b) Channel skipping probabilites
+
+Figure 3: Experimental results on M-CifarNet. We compare in (a) the accuracy/MACs trade-off between FBS, NS and FBS+NS. The baseline is emphasized by the circle . The heat map in (b) reveals the individual probability of skipping a channel for each channel (x-axis), when an image of a category (y-axis) is shown to the network with d = 1.
+
+which demonstrates the effectiveness of FBS if the model is already less redundant, i.e. it cannot be pruned further using NS without degrading the accuracy by more than 1%. The composite method (NS+FBS) is shown to successfully regain most of the lost accuracy due to NS, producing a trade-off curve closely matching FBS. It is notable that under the same 90.50% accuracy constraints, FBS, NS+FBS, and NS respectively achieve 3.93×, 3.22×, and 1.19× speed-up ratios. Conversely for a 2× speed-up target, they respectively produce models with accuracies not lower than 91.55%, 90.90% and 87.54%.
+Figure 3b demonstrates that our FBS can effectively learn to amplify and suppress channels when dealing with different input images. The 8 heat maps respectively represent the channel skipping probabilities of the 8 convolutional layers. The brightness of the pixel at location (x, y) denotes the probability of skipping the xth channel when looking at an image of the yth category. The heat maps verify our belief that the auxiliary network learned to predict which channels specialize to which features, as channels may have drastically distinct probabilites of being used for images of different categories. The model here is a M-CifarNet using FBS with d = 0.5, which has a top-1 accuracy of 90.59% (top-5 99.65%). Moreover, channels in the heat maps are sorted so the channels that are on average least frequently evaluated are placed on the left, and channels shaded in stripes are never evaluated. The network in Figure 3b is not only approximately 4× faster than the original, by removing the unused channels, we also reduce the number of weights by 2.37×. This reveals that FBS naturally subsumes channel pruning strategies such as NS, as we can simply prune away channels that are skipped regardless of the input. It is notable that even though we specified a universal density d, FBS learned to adjust its dynamicity across all layers, and prune different ratios of channels from the convolutional layers.
+4.2 ImageNet ILSVRC2012 Classification
+Residual networks (He et al., 2016) adopt sequential structure of residual blocks: xb = K (xb-1) + F (xb-1), where xb is the output of the bth block, K is either an identity function or a downsampling convolution, and F consists of a sequence of convolutions. For residual networks, we directly apply FBS to all convolutional layers, with a difference in the way we handle the feature summation. Because the (b + 1)th block receives as input the sum of the two features with sparse channels K (xb-1) and F (xb-1), the channels of this sum is considered sparse only when the same channels in both features are sparse.
+By applying FBS and NS respectively to ResNet-18, we saw that the ILSVRC2012 validation accuracy of FBS consistently outperforms NS under different speed-up constraints (see Appendix C for the trade-off curves). For instance, at d = 0.7, it utilizes only 1.12 G MACs (1.62× speed-up) to achieve a top-1 error rate of 31.54%, while NS requires 1.51 G
+7
+
+Under review as a conference paper at ICLR 2019
+
+MACs (1.21× faster) for a similar error rate of 31.70%. When compared across recent dynamic execution methods examined in Table 1, FBS demonstrates simultaneously the highest speed-up and the lowest error rates. It is notable that the baseline accuracies for FBS refer to a network that has been augmented with the auxiliary layers featuring FBS but suppress no channels, i.e. d = 1. We found that this method brings immediate accuracy improvements, an increase of 1.73% in top-1 and 0.46% in top-5 accuracies, to the baseline network, which is in line with our observation on M-CifarNet.
+
+Method
+
+Dynamic
+
+Baseline Top-1 Top-5
+
+Accelerated Top-1 Top-5
+
+Speedup
+
+Soft Filter Pruning (He et al., 2018) Network Slimming (Liu et al. (2017), our implementation) Low-cost Collaborative Layers (Dong et al., 2017) Channel Gating Neural Networks (Hua et al., 2018) Feature Boosting and Suppression (FBS)
+
+29.72 31.02 30.02 30.98 29.29
+
+10.37 11.32 10.76 11.16 10.32
+
+32.90 32.79 33.67 32.60 31.83
+
+12.22 12.61 13.06 12.19 11.78
+
+1.72× 1.39× 1.53× 1.61× 1.98×
+
+Table 1: Comparisons of error rates of the baseline and accelerated ResNet-18 models.
+
+Since VGG-16 is computationally intensive with over 15 G MACs, We first applied NS on VGG-16 to reduce the computational and memory requirements, and ease the training of the FBS-augmented variant. We assigned a 1% budget in top-5 accuracy degradation and compressed the network using NS, which gave us a smaller VGG-16 with 20% of all channels pruned. The resulting network is a lot less redundant, which almost halves the compute requirements, with only 7.90 G MACs remaining. We then apply FBS to the well-compressed network. In Table 2, we compare the performances of different structured pruning and dynamic execution methods to FBS. At a speed-up constraint of 3×, FBS shows a minimal increase of 0.04% in top-5 error rate. At speed-ups of 4× and 5×, FBS only degrades the top-5 error rates by 0.52% and 0.59% respectively.
+
+Method
+
+Dynamic
+
+ top-5 errors (%)
+
+3× 4×
+
+5×
+
+Filter Pruning (Li et al. (2017), reproduced by He et al. (2017)) Perforated CNNs (Figurnov et al., 2016) Network Slimming (Liu et al. (2017), our implementation) Runtime Neural Pruning (Lin et al., 2017) Channel Pruning (He et al., 2017) Feature Boosting and Suppression (FBS)
+
+-- 8.6 3.7 5.5 1.37 3.26 2.32 3.23 0.0 1.0 0.04 0.52
+
+14.6 --
+5.18 3.58
+1.7 0.59
+
+Table 2: Comparisons of top-5 error rate increases for VGG-16 on ILSVRC2012 validation set under 3×, 4× and 5× speed-up constraints. The baseline has a 10.1% error rate. Results from He et al. (2017) only show numbers with one digit after the decimal point.
+
+5 Conclusion
+In summary, we proposed feature boosting and suppression that helps CNNs to achieve significant reductions in the compute required while maintaining high accuracies. FBS fully preserves the capabilities of CNNs and predictively boosts important channels to help the accelerated models retain high accuracies. We demonstrated that FBS achieves around 2× and 5× speed-ups respectively on ResNet-18 and VGG-16 within 0.6% loss of top-5 accuracy. Under the same performance constraints, the accuracy gained by FBS surpasses all recent structured pruning and dynamic execution methods examined in this paper. In addition, it can serve as an off-the-shelf technique for accelerating many popular CNN networks and the fine-tuning process is unified in the traditional SGD which requires no algorithmic changes in training. The implementation of FBS and the optimized networks are fully open source, and will be released to the public.
+8
+
+Under review as a conference paper at ICLR 2019
+References
+Amjad Almahairi, Nicolas Ballas, Tim Cooijmans, Yin Zheng, Hugo Larochelle, and Aaron Courville. Dynamic capacity networks. In Proceedings of the 33rd International Conference on International Conference on Machine Learning (ICML), pp. 2549­2558, 2016.
+Jose M Alvarez and Mathieu Salzmann. Learning the number of neurons in deep networks. In D. D. Lee, M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett (eds.), Advances in Neural Information Processing Systems (NIPS), pp. 2270­2278. 2016.
+Tolga Bolukbasi, Joseph Wang, Ofer Dekel, and Venkatesh Saligrama. Adaptive neural networks for efficient inference. In Proceedings of the 34th International Conference on Machine Learning (ICML), pp. 527­536, 2017.
+J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei. ImageNet: A large-scale hierarchical image database. In IEEE Conference on Computer Vision and Pattern Recognition, 2009.
+Xuanyi Dong, Junshi Huang, Yi Yang, and Shuicheng Yan. More is less: A more complicated network with less inference complexity. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), July 2017.
+Michael Figurnov, Maxwell D. Collins, Yukun Zhu, Li Zhang, Jonathan Huang, Dmitry Vetrov, and Ruslan Salakhutdinov. Spatially adaptive computation time for residual networks. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), July 2017.
+Mikhail Figurnov, Aizhan Ibraimova, Dmitry P Vetrov, and Pushmeet Kohli. PerforatedCNNs: Acceleration through elimination of redundant convolutions. In Advances in Neural Information Processing Systems (NIPS), pp. 947­955, 2016.
+Yiwen Guo, Anbang Yao, and Yurong Chen. Dynamic network surgery for efficient DNNs. In Advances in Neural Information Processing Systems (NIPS), 2016.
+Song Han, Xingyu Liu, Huizi Mao, Jing Pu, Ardavan Pedram, Mark A Horowitz, and William J Dally. Eie: efficient inference engine on compressed deep neural network. In Computer Architecture (ISCA), 2016 ACM/IEEE 43rd Annual International Symposium on, pp. 243­254. IEEE, 2016.
+Babak Hassibi, David G. Stork, and Gregory Wolff. Optimal brain surgeon: Extensions and performance comparisons. In J. D. Cowan, G. Tesauro, and J. Alspector (eds.), Advances in Neural Information Processing Systems (NIPS), pp. 263­270. 1994.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. In Proceedings of the 2015 IEEE International Conference on Computer Vision (ICCV), ICCV '15, pp. 1026­ 1034, Washington, DC, USA, 2015. IEEE Computer Society. ISBN 978-1-4673-8391-2. doi: 10.1109/ICCV.2015.123.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+Yang He, Guoliang Kang, Xuanyi Dong, Yanwei Fu, and Yi Yang. Soft filter pruning for accelerating deep convolutional neural networks. In International Joint Conference on Artificial Intelligence (IJCAI), pp. 2234­2240, 2018.
+Yihui He, Xiangyu Zhang, and Jian Sun. Channel pruning for accelerating very deep neural networks. IEEE International Conference on Computer Vision (ICCV), pp. 1398­1406, 2017.
+Weizhe Hua, Christopher De Sa, Zhiru Zhang, and G. Edward Suh. Channel gating neural networks. CoRR, abs/1805.12549, 2018. URL http://arxiv.org/abs/1805.12549.
+9
+
+Under review as a conference paper at ICLR 2019
+J. Huang, V. Rathod, C. Sun, M. Zhu, A. Korattikara, A. Fathi, I. Fischer, Z. Wojna, Y. Song, S. Guadarrama, and K. Murphy. Speed/accuracy trade-offs for modern convolutional object detectors. In 2017 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 3296­3297, July 2017.
+Qiangui Huang, Kevin Zhou, Suya You, and Ulrich Neumann. Learning to prune filters in convolutional neural networks. In IEEE Winter Conference on Computer Vision. 2018.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In Proceedings of the 32Nd International Conference on International Conference on Machine Learning (ICML), pp. 448­456, 2015.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. In Advances in Neural Information Processing Systems (NIPS). 2012.
+Alex Krizhevsky, Vinod Nair, and Geoffrey Hinton. The CIFAR-10 and CIFAR-100 datasets. http://www.cs.toronto.edu/ kriz/cifar.html, 2014.
+Yann LeCun, John S. Denker, and Sara A. Solla. Optimal brain damage. In Advances in Neural Information Processing Systems (NIPS), pp. 598­605. 1990.
+Hao Li, Asim Kadav, Igor Durdanovic, Hanan Samet, and Hans Peter Graf. Pruning filters for efficient convnets. 2017.
+Ji Lin, Yongming Rao, Jiwen Lu, and Jie Zhou. Runtime neural pruning. In Advances in Neural Information Processing Systems (NIPS), pp. 2181­2191. 2017.
+Lanlan Liu and Jia Deng. Dynamic deep neural networks: Optimizing accuracy-efficiency trade-offs by selective execution. 2018.
+Zhuang Liu, Jianguo Li, Zhiqiang Shen, Gao Huang, Shoumeng Yan, and Changshui Zhang. Learning efficient convolutional networks through network slimming. In International Conference on Computer Vision (ICCV), 2017.
+J. Long, E. Shelhamer, and T. Darrell. Fully convolutional networks for semantic segmentation. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 3431­3440, June 2015.
+Augustus Odena, Dieterich Lawson, and Christopher Olah. Changing model behavior at test-time using reinforcement learning. 2017.
+Angshuman Parashar, Minsoo Rhu, Anurag Mukkara, Antonio Puglielli, Rangharajan Venkatesan, Brucek Khailany, Joel Emer, Stephen W Keckler, and William J Dally. Scnn: An accelerator for compressed-sparse convolutional neural networks. In ACM SIGARCH Computer Architecture News, volume 45, pp. 27­40. ACM, 2017.
+Mengye Ren, Andrei Pokrovsky, Bin Yang, and Raquel Urtasun. SBNet: Sparse blocks network for fast inference. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2018.
+S. Ren, K. He, R. Girshick, and J. Sun. Faster R-CNN: Towards real-time object detection with region proposal networks. IEEE Transactions on Pattern Analysis and Machine Intelligence, 39(6):1137­1149, June 2017.
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-ofexperts layer. 2017.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. In International Conference on Learning Representations (ICLR), 2015.
+10
+
+Under review as a conference paper at ICLR 2019
+Rupesh Kumar Srivastava, Jonathan Masci, Faustino J. Gomez, and Ju¨rgen Schmidhuber. Understanding locally competitive networks. In International Conference on Learning Representations (ICLR), 2015.
+Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Learning structured sparsity in deep neural networks. In Advances in Neural Information Processing Systems (NIPS), pp. 2074­2082. 2016.
+Zuxuan Wu, Tushar Nagarajan, Abhishek Kumar, Steven Rennie, Larry S. Davis, Kristen Grauman, and Rogerio Feris. BlockDrop: Dynamic inference paths in residual networks. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2018.
+Jianbo Ye, Xin Lu, Zhe L. Lin, and James Z. Wang. Rethinking the smaller-norm-lessinformative assumption in channel pruning of convolution layers. In International Conference on Learning Representations (ICLR), 2018.
+Hao Zhou, Jose M. Alvarez, and Fatih Porikli. Less is more: Towards compact cnns. In Bastian Leibe, Jiri Matas, Nicu Sebe, and Max Welling (eds.), Computer Vision ­ ECCV 2016, pp. 662­677, Cham, 2016. Springer International Publishing. ISBN 978-3-31946493-0.
+A Experiment Setup
+We trained M-CifarNet (see Appendix B) with a 0.01 learning rate and a 256 batch size. We reduced the learning rate by a factor of 10× for every 100 epochs. To compare FBS against NS fairly, every model with a new target MACs budget were consecutively initialized with the previous model, and trained for a maximum of 300 epochs, which is enough for all models to converge to the best obtainable accuracies. For NS, we follow Liu et al. (2017) and start training with an 1-norm sparsity regularization weighted by 10-5 on the BN scaling factors. We then prune at 150 epochs and fine-tune the resulting network without the sparsity regularization.
+We additionally employed image augmentation procedures from Krizhevsky et al. (2012) to preprocess each training example. Each CIFAR-10 example was randomly horizontal flipped and slightly perturbed in the brightness, saturation and hue.
+ILSVRC2012 classifiers, i.e. ResNet-18 and VGG-16, were trained with a procedure similar to the one above. The difference was that they were trained for a maximum of 35 epochs, the learning rate was decayed for every 20 epochs, and NS models were all pruned at 15 epochs. For image preprocessing, we additionally cropped and stretched/squeezed images randomly following Krizhevsky et al. (2012).
+B Details of M-CifarNet on CIFAR-10
+For the CIFAR-10 classification task, we use M-CifarNet, a custom designed CNN, with less than 1.30 M parameters and takes 174 M MACs to perform inference for a 32-by-32 RGB image. The architecture is illustrated in Table 3, where all convolutional layers use 3 × 3 kernels, the Shape column shows the shapes of each layer's features, and pool7 is a global average pooling layer. Table 3 additionally provides further comparisons of layer-wise compute costs between FBS, NS, and the composition of the two methods (NS+FBS). It is notable that the FBS column has two different output channel counts, where the former is the number of computed channels for each inference, and the latter is the number of channels remaining in the layer after removing the unused channels.
+Figure 4 shows how the skipping probabilites heat maps of the convolutional layer conv4 evolve as we train M-CifarNet. The network was trained for 12 epochs, and we saved the model at every epoch. The heat maps are generated with the saved models in sequence, where we apply the same reordering to all heat map channels with the sorted result from the first epoch. It can be observed that as we train the network, the channel skipping probabilites become more pronounced.
+11
+
+Under review as a conference paper at ICLR 2019
+
+Layer Shape
+
+Number of MACs (Output Channels)
+
+Original
+
+NS
+
+FBS NS+FBS
+
+conv0 conv1 conv2 conv3 conv4 conv5 conv6 conv7 pool7 fc
+Total Saving
+
+30 × 30 30 × 30 15 × 15 15 × 15 15 × 15 8×8 8×8 8×8 1×1 1×1
+
+1.5 M (64) 33.2 M (64) 16.6 M (128) 33.2 M (128) 33.2 M (128) 14.1 M (192) 21.2 M (192) 21.2 M (192)
+1.9 k (10)
+174.3 M -
+
+1.3 M (52) 27.0 M (64) 15.9 M (123) 31.9 M (128) 33.1 M (128) 13.4 M (182) 11.6 M (111) 12.3 M (192)
+1.9 k (10)
+146.5 M 1.19×
+
+893 k (32/62) 8.4 M (32/42) 4.2 M (64/67) 8.3 M (64/79) 8.3 M (64/83) 3.6 M (96/128) 5.4 M (96/152) 5.4 M (96/96)
+960 (10)
+44.3 M 3.93×
+
+860 k (32) 10.2 M (39) 5.9 M (74) 11.6 M (77) 12.1 M (77) 4.9 M (110) 4.3 M (67) 4.5 M (116)
+1.1 k (10)
+54.2 M 3.21×
+
+Table 3: The network structure of M-CifarNet for CIFAR-10 classification. In addition, we provide a detailed per-layer MACs comparison between FBS, NS, and the composition of them (NS+FBS). We minimize the models generated by the three methods while maintaining a classification accuracy of at least 90.5%.
+
+channels
+
+5
+
+10
+training epochs Figure 4: The training history of a convolutional layer conv4 in M-CifarNet. The history is visualized by the 12 skipping probabilites heat maps, where the heights denote the 10 categories in CIFAR-10, and channels in conv4 occupy the width.
+C Additional Results on ILSVRC2012
+Finally, Figure 5 compares the accuracy/performance trade-off curves between FBS and NS.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+80%
+
+Accuracy
+
+60%
+
+40% NS top-1
+NS top-5
+FBS top-1 20% FBS top-5
+
+0.5 1.0 1.5
+
+MACs
+
+1e9
+
+Figure 5: The accuracy/performance trade-off comparison between NS and FBS for ResNet18 on the ImageNet ILSVRC2012 validation set.
+
+13
+
+

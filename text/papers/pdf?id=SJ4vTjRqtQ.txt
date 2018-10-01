@@ -1,0 +1,398 @@
+Under review as a conference paper at ICLR 2019
+LEARNING TO PLAN
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We introduce Learning To Plan (L2P), a novel architecture for deep reinforcement learning, that combines model-based and model-free aspects for online planning. Our architecture learns to dynamically construct plans using a learned state-transition model by selecting and traversing between simulated states and actions to maximize valuable information before acting. In contrast to model-free methods, model-based planning lets the agent efficiently test action hypotheses without performing costly trial-and-error in the environment. L2P learns to efficiently form plans by expanding a single action-conditional state transition at a time instead of exhaustively evaluating each action, reducing the required number of state-transitions during planning by up to 96%. We observe various emergent planning patterns used to solve environments, including classical search methods such as breadth-first and depth-first search. L2P shows improved data efficiency, performance, and generalization to new and unseen domains in comparison to several baselines.
+1 INTRODUCTION
+The central focus of reinforcement learning (RL) is the selection of optimal actions to maximize the expected reward in an environment where the agent must rapidly adapt to new and varied scenarios. Various avenues of research have spent considerable efforts improving core axes of RL algorithms such as performance, stability, and sample efficiency. Significant progress on all fronts has been achieved by developing agents using deep neural networks with model-free RL (Mnih et al., 2015; 2016; Schulman et al., 2015; 2017; OpenAI, 2018); showing model-free methods efficiently scale to high-dimensional state space and complex domains with increased compute. Unfortunately, modelfree policies are often unable to generalize to variances within an environment as the agent learns a policy which directly maps environment states to actions.
+A favorable approach to improving generalization is to combine an agent with a learned environment model, enabling it to reason about its environment. This approach, referred to as modelbased RL learns a model from past experience, where the model usually captures state-transitions, p(st+1|st, at), and might also learn reward predictions p(rt+1|st, at). Usage of learned statetransition models is especially valuable for planning, where the model predicts the outcome of proposed actions, avoiding expensive trial-and-error in the actual environment ­ improving performance and generalization. This contrasts with model-free methods which are explicitly trial-anderror learners (Sutton & Barto, 2017). Historically, applications have primarily focused on domains where a state-transition model can be easily learned, such as low dimensional observation spaces (Peng & Williams, 1993; Deisenroth & Rasmussen, 2011; Levine & Abbeel, 2014), or where a perfect model was provided (Coulom, 2006; Silver et al., 2016a) ­ limiting usage. Furthermore, application to environments with complex dynamics and high dimensional observation spaces has proven difficult as state-transition models must learn from agent experience, suffer from compounding function approximation errors, and require significant amounts of samples and compute (Oh et al., 2015; Chiappa et al., 2017; Guzdial et al., 2017). Fortunately, recent work has overcome the aforementioned difficulties by learning to interpret imperfect model predictions (Weber et al., 2017) and learning in a lower dimensional state space (Farquhar et al., 2017a).
+Planning in RL has used state-transition models to perform simulated trials with various styles of state traversal such as: recursively expanding all available actions per state for a fixed depth (Farquhar et al., 2017a), expanding all actions of the initial state and simulating forward for a fixed number of steps with a secondary policy (Weber et al., 2017), or performing many simulated roll-
+1
+
+Under review as a conference paper at ICLR 2019
+
+Encoder
+st
+
+Planning
+zt
+
+Outer Agent
+hT ht
+
+at
+
+Figure 1: Learning To Plan Architecture. Encoder is comprised of several convolutional layers and a fully-connected layer. Planning occurs for  = 1, ..., T steps using the IA and state-transition model. The result of planning is sent to the outer agent before an action at is chosen. The fully-connected layer within the outer agent, outlined in blue, is used by the planning process.
+
+outs with each stopping when a terminal state is encountered (Silver et al., 2016a). An issue arises within simulated trials when correcting errors in action selection, as actions can either be undone by wasting a simulation step, using the opposing action, or are irreversible, causing the remaining rollout steps to be sub-optimal in value. Ideally, the agent can step the rollout backwards in time thereby undoing the poor action and choosing a better one in its place. Additionally, during rollouts the agent is forced to either perform a fixed number of steps or continue until a terminal state has been reached; when ideally a rollout can terminate early if the agent decides the path forward is of low value.
+In this paper, we propose an architecture that learns to dynamically control a state-transition model of the environment for planning. By doing so, our model has greater flexibility during planning allowing it to efficiently adjust previously simulated actions. We demonstrate improved performance against both model-free and planning baselines on varied environments.
+The paper is organized as follows: Section 2 covers our architecture and training procedure, Section 3 covers related work, Section 4 details the experimental design used to evaluate our architecture, and in Section 5 we analyze the experimental results of our architecture.
+
+2 LEARNING TO PLAN
+In this section, we describe L2P, a novel planning architecture for deep reinforcement learning (DRL). We first discuss the architecture overview followed by the training procedure. Steps taken in the environment use subscript t and steps taken during planning use subscript  . We provide additional motivation behind the architecture in Appendix A.1.
+
+2.1 L2P ARCHITECTURE
+
+The architecture is comprised of an inner agent, an outer agent, a shared encoder, and a learned
+
+state-transition model. Figure 1 illustrates a high-level diagram of the L2P architecture. The outer
+
+agent (OA) is a feed-forward network and the inner agent (IA) is based on a recurrent neural network
+
+(RNN). The architecture interacts with the environment by observing raw environment states st  S and outputting actions at  A via OA. However, before OA outputs an action at the IA performs
+
+ = 1, ..., T steps of planning by interacting with an internal simulated environment; where this
+
+simulated environment is defined by the state-transition model and sub-section of OA's network.
+
+Selection of an action at by the current state zt  R1×z.
+
+OA uses the final hidden The objective of IA is to
+
+state hIT  R1×hi of IA and an embedding of maximize the total utility provided to the OA;
+
+where utility, given in Equation 1, measures the "value of information" provided to OA if it were to
+
+have undergone a state transition from z to z+1.
+
+U (hO+1, hO, a , z ) = Q^(z , a )DKL(hO+1||hO) Q^(z , a ) = (a |z ; I )Q(z , a ; O)
+2
+
+(1)
+
+Under review as a conference paper at ICLR 2019
+
+where z+1 is the state transitioned to after performing an action a in state z , hO  R1×ho and hO+1 are the hidden states of OA after perceiving the current state z and state transitioned to z+1 respectively, DKL is the KullbackLeibler (KL) distance measure, Q(z , a ; O) is the value OA assigns to taking action a in the current state z , and (a |z ; I) is the learned policy of IA. Computation of DKL between hidden states is provided in the Appendix B.
+Therefore, to maximize utility for OA during each planning step  , IA must select appropriate simulated-states z and actions a . A simulated-state z is selected from one of three embedded states tracked during planning: the previous zp, current zc , and root states zr; with the triplet written as z{p,c,r} for convenience. Initially, z{=p,0c,r} is set to an embedding zt produced by the encoder of the initial raw state st as z=0 = encoder(st). The encoder is comprised of a series of convolutional layers specific to each environment and provided in the Appendix B. Before planning begins, OA's hidden state is updated using z=0:
+
+hO = W zhz
+
+(2)
+
+where W zh  Rz×ho is a learnable parameter of OA with biases omitted. Within this work, we consider the intermediate activation from the OA, a feed-forward network, as a hidden state. The simulated-action a mirrors those available to OA in the environment, such that a  A.
+
+2.2 A PLANNING STEP
+
+z{ p,c,r}
+ / T
+h h
+ - 1
+
+State
+× z* Model 
+ h w a*
+
+h  + 1
+z*  + 1
+h
+
+Figure 2: A single planning step  . Inner Agent, shown as the blue box with a recursive arrow, performs a step of planning using the state-transition model. Circles containing × indicate multiplication and circles with  indicate sampling from the Gumbel Softmax distribution.
+
+At each planning step  , shown in Figure 2, the IA selects a simulated-state z and action a by considering the previous hidden state hI-1, the triplet of embedded states z{p,c,r}, a scalar representing the current planning step  /T , and OA's hidden state hO given zc. The information is concatenated together forming a context and is fed into IA, a recurrent network producing an updated hidden state
+hI  R1xhi . The updated hidden state is used to select the simulated-state z by multiplying z{p,c,r} with a 1-hot encoded weight w  {0, 1}1×3 sampled from the Gumbel-Softmax distribution, G:
+
+w  G(W h3hI ) z = w [zp, zc , zr]
+
+(3)
+
+where W h3  Rhi×3 is a learnable parameter belonging to IA and G is the Gumbel-Softmax distribution (GSD). Where the GSD is a continuous relaxation of the discrete categorical distribution giving access to differentiable discrete variables (Jang et al., 2016; Maddison et al., 2016). Empirically, we found that using a 1-hot encoding for the weight w gives greater performance than a softmax activation. Therefore, we used GSD in place of softmax activations throughout our architecture. Next, the simulated-action a  {0, 1}1×A, is sampled as follows:
+
+a  G(W azh[z, hI ])
+
+(4)
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+where W azh  Ra×z+hi is a learnable parameter of IA. In Equation 4 the selected simulated-state z and IA's hidden state hI are concatenated, passed through a linear layer, and used as logits for GSD. Then, with the selected simulated-state z and simulated-action a, we produce the next state z+1 using the state-transition model, defined as:
+
+z = z + tanh(W zzz) z = z + tanh((a W azz)z )
+z+1 = z + z
+
+(5)
+
+where W zz  Rz×z and W azz  RA×z×z are learnable parameters of the state-transition model.
+
+We parameterize each available action in A with a learned weight matrix that carries information
+
+about the
+Farquhar and zc+1
+
+ee=ftfaezlc.t+(o21f0. t1a7kain).gFainnaalcltyi,onthaethreRe 1e×mAb.edWdeedussetattheessaarme eupstdaatete-dtraanss:iztipo+n1m=odzecl
+
+presented by , zr = z=0,
+
+2.3 ACTION SELECTION
+
+The IA repeats emitting a final
+
+thhieddpernocsetasstedheTIfinseudmimn aSreizcitniognth2e.2reosfuslet loefctpinlagnnzingan. dThae
+
+for OA
+
+T steps before uses IA's final
+
+finally hidden
+
+state hTI and its initial hidden state hO=0 to select an action at:
+
+at = W ahtanh(W hhhIT + hO=0) where W hh  Rho×hi and W ah  RA×ho are learnable parameters of OA.
+
+(6)
+
+2.4 TREE INTERPRETATION
+
+The planning process can be interpreted as dynamically expanding a state-action tree, illustrated in Figure 3, where all edges and vertexes are chosen by IA to maximize the total utility provided to OA.
+
+With simulated-state selection z, using w , IA controls which node in the tree is expanded further: the parent node (zp), the root node (zr), or the current node (zc). While action selection a chooses the branching di-
+rection, exploring the embedded state space
+using the state-transition model.
+
+a)
+
+R zc
+
+b)
+
+R c)
+
+R
+
+zr
+
+zc
+
+The illustration of a constructed tree in a
+fictional environment is shown in Figure 3.
+State selections are shown in light purple, Figure 3: Example of dynamic tree construction durand state transitions with an action, using ing planning. the state-transition model, are shown as blue.
+The source state is shown as a grey circle
+with a blue outline and the transitioned state is shown as a fully blue circle. In this example, there are
+three actions, each corresponding to their graphical representation: left, right, and down. The root
+state is marked with an "R". An example of a possible tree construction for T=3 steps of planning: a) step  = 1, IA selects the current state zc and transitions to a new state with action "left"; b) step  = 2, the IA selects the current state zc and "down" action; and step  = 3 c) IA selects the root state zc and "down" action.
+
+2.5 TRAINING PROCEDURE
+
+Our architecture is trained to maximize the expected rewards within the environment. The OA
+
+is trained to maximize the expected discounted sum of rewards, Rt =
+
+ t=0
+
+trt,
+
+while
+
+the
+
+IA
+
+maximizes the utility it provides to OA. The OA learns a deterministic policy (a , z ) that directly
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+maps states s  S to actions a  A, while IA learns a stochastic policy (a |z ). Empirically, we found that using the same policy for planning and acting caused poor performance. We hypothesize that the optimal policy for planning is inherently different from the one required for optimal control in the environment; as during planning, a bias toward exploration might be optimal.
+OA uses an identical training procedure and loss to that of DQN used in Mnih et al. (2015) with the loss denoted as LO. We used the Huber loss to perform state-grounding of the state-transition model between the current state zt, action at, and zt+1 which we denoted with LZ . IA is trained using a policy gradient method, given in Equation 7, defined over a planning episode  = 1, ...T :
+
+I J (I ) = EI [I logI (z , a )R ]
+
+(7)
+
+where R is defined as the discounted utility
+
+T  =1
+
+U
+
++
+
+I U +1
+
+for
+
+planning
+
+step
+
+.
+
+The IA
+
+can be interpreted as an actor-critic algorithm but where the value function is learned by the OA.
+
+Combining our losses, the architecture is trained using the following gradient:
+
+1T
+
+ = LO + LZ + T
+
+I logI (at|zt)R - AI H[(z )] - wI H[w ] (8)
+
+ =0
+
+where  controls the state-grounding loss and {A,w} are hyperparameters tuning entropy maximization of IA's policy. The losses LO and LZ are computed over all parameters; while the policy gradient and entropy maximization losses are with respect to only IA's parameters. We perform
+updates to IA in this way as to stop IA from cheating by modifying the parameters of the OA that define its reward via DKL and Q(z, a; O) within the utility.
+
+3 RELATED WORK
+Various efforts have been made to combine model-free and model-based methods, such as the DynaQ algorithm (Sutton, 1991) that learns a model of the environment and uses this model to train a model-free policy. Originally applied in the discrete setting, Gu et al. (2016) extended Dyna-Q to continuous control. In a similar spirit to the Dyna algorithm, recent work by Ha & Schmidhuber (2018) combined data generated from a pre-trained unsupervised model with evolutionary strategies to train a policy. However, none of the aforementioned algorithms use the learned model to improve the online performance of the policy and instead use the model for offline training. Therefore, the learned models are typically trained with a tangential objective to that of the policy such as a highdimensional reconstruction. In contrast, our work learns a model in an end-to-end manner, such that the model is optimized for its actual use in planning.
+Tamar et al. (2016) trained a model-free agent with an explicit differentiable planning structure, implemented with convolutions, to perform approximate on-the-fly value iteration. As their planning structure relies on convolutions, the range of applicable environments is restricted to those where state-transitions can be expressed spatially.
+Pascanu et al. (2017) implemented a model-based architecture comprised of several individually trained components that learn to construct and execute plans. They examine performance gridworld tasks with single and multi-goal variants but on a limited set of maps.
+Vezhnevets et al. (2016) proposed a method which learns to initialize and update a plan; their work does not use a state-transition model and maps new observations to plan updates.
+Value prediction networks (VPNs) by Oh et al. (2017), Predictron by Silver et al. (2016b), and Farquhar et al. (2017a), an expansion of VPNs, combine learning and planning by training deep networks to plan through iterative rollouts. The Predictron predicts values by learning an abstract state-transition function. VPNs constructs a tree of targets used only for action selection. Farquhar et al. (2017a) create an end-to-end differentiable model that constructs trees to improve value estimates during training and acting. Both Oh et al. (2017) and Farquhar et al. (2017a) construct plans using forward-only rollouts by exhaustively expanding each state's actions. In contrast to the aforementioned works, during planning L2P learns to selectively expand actions at each state, with the ability to adjust sub-optimal actions, and uses planning results to improve the policy during both training and acting.
+
+5
+
+Under review as a conference paper at ICLR 2019
+Weber et al. (2017) proposed Imagination Augmented Agents (I2As), an architecture that learns to plan using a separately trained state-transition model. Planning is accomplished by expanding all available actions A of the initial state and then performing A rollouts using a tied-policy for a fixed number of steps. In contrast, our work learns the state-transition model end-to-end, uses a separate policy for planning and acting, and is able to dynamically adjust planning rollouts. Additionally, in terms of sample efficiency, I2As require hundreds of millions of steps to converge, with the Sokoban environment taking roughly 800 million steps. Though not directly comparable, our work in the Push environment, a puzzle game very similar to Sokoban, requires an order of magnitude fewer steps, roughly 20 million, before convergence.
+Tishby & Polani (2011) proposed a formulation of the Markov decision process where rewards are traded against control information. The notion of valuable information is discussed, which determines the relevance of information by the value it allows the agent to achieve. Utility is related to this notion of valuable information but instead measures the "gain" the OA can expect from a statetransition. Additionally, our work maximizes both the expected reward given by the environment and the utility provided to OA while their work focuses solely on maximizing control information and does not couple information value with rewards.
+Additional connections between learning environment models, planning and controls, and other methods related to ours were previously discussed by Schmidhuber (2015).
+4 EXPERIMENTS
+We evaluated L2P on a multi-goal gridworld environment and Push, (Farquhar et al., 2017a) a box-pushing puzzle environment. Push is similar to Sokoban used by Weber et al. (2017) with comparable difficulty. Within our experiments, we evaluated our model performance against either model-free baselines, DQN and A2C, or planning baselines, such as TreeQN and ATreeC. The experiments are designed such that a new scenario is generated across each episode, which ensures that the solution of a single variation cannot be memorized. We are interested in understanding how well our model can adapt to varied scenarios. Additionally, we investigate how planning length T affects model performance using the Push environment and planning patterns that our agent learns in the Push environment. Full details of the experimental setup and hyperparameters are found in the Appendix B. Unless specified otherwise, each L2P model configuration is averaged over 3 different seeds and is trained for 20 million steps due to limited computational resources.
+Figure 4: Randomly generated samples of the Push environment. Each square's coloring represents a different entity: the agent is shown as red, boxes as aqua, obstacles as black, and goals as grey. The outside of the environment, not visible to the agent, is shown as a black border around the map.
+Push: The Push environment is a box-pushing domain, where an agent must push boxes into goals while avoiding obstacles. Samples of this environment are shown in Figure 4. Since the agent can only push boxes, with no pull actions, poor actions within the environment can lead to irreversible configurations. The agent is randomly placed, along with 12 boxes, 5 goals, and 6 obstacles on the center 6x6 tiles of an 8x8 grid. Boxes cannot be pushed into each other and obstacles are "soft" such that they do not block movement, but generate a negative reward if the agent or a box moves onto an obstacle. Boxes are removed once pushed onto a goal. We use the open-source implementation provided by Farquhar et al. (2017b). The reward structure is as follows: +1 for pushing a box onto the goal, -0.2 for moving over an obstacle or pushing a box over an obstacle, -0.1 if the agent attempts to push a box into another, -0.01 for each step, and -1 if the agent falls off the map. A new map is generated at the end of each episode which occurs after 75 steps, if the agent falls off the map, or when all boxes have been cleared. We compare our model performance against planning baselines, TreeQN and ATreeC (Farquhar et al., 2017a), as well as model-free baselines, DQN (Mnih et al., 2015) and A2C (Mnih et al., 2016).
+6
+
+Under review as a conference paper at ICLR 2019
+Figure 5: Randomly generated samples of a 16 × 16 gridworld environment where the agent must collect all goals. The agent is shown as green, goals in blue, obstacles as red, and outside of the environment, not visible to the agent, is shown as a black border.
+Planning length: Using the Push environment, we performed a hyperparameter search over parameter T , which adjusts the number of planning steps, with T = {1, 3, 5} evaluated. The push environment was chosen because the performance is sensitive to an agent's ability to plan effectively. Planning patterns: We examine the planning patterns that our agent learns in the Push environment for T=3 steps. Here we are interested in understanding what information the agent extracts from the simulation as context before acting. Gridworld: We use a gridworld domain with randomly placed obstacles that an agent must navigate searching for goals. The environment, randomly generated between episodes, is a 16x16 grid with 3 goals. Details of level generation are provided in the appendix. The agent must learn an optimal policy to solve new unseen maps. Figure 5 shows several instances of a 16x16 gridworld where the agent is shown as red, goals in blue, and obstacles as black. The rewards that an agent receives are as follows: +1 for each goal captured, -1 for colliding with a wall, -1 for stepping off the map, -0.01 for each step, and -1 for going over the step limit. An episode terminates if the agent collides with an obstacle, collects all the goals, steps off the map, or goes over 70 steps. We evaluate our algorithm against the following variations of the DQN baseline (Mnih et al., 2015): a wide network with double the number of hidden units per layer, a deeper network using an additional hidden layer, and a recurrent version. Each DQN variant used the same encoder structure as L2P.
+5 RESULTS AND DISCUSSION
+5.1 PLANNING LENGTH
+In Figure 6(a), we see the performance of our model over the planning lengths T = {1, 3, 5} where each parameter setting is trained with 3 random seeds for 20 million steps in the environment. As seen in Figure 6(a), model performance increases as we add additional planning steps, while the number of model parameters remains constant.
+
+(a) Varied Planning Lengths.
+
+(b) Push Training Curves.
+
+Figure 6: Push Environment. a) Training over varying planning lengths, T = {1, 3, 5}, in the Push Environment. b) Training curves of L2P vs. baselines on the Push environment.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+As the planning length increases, we see the model converge faster. We begin to see diminishing returns in performance after T = 3 planning depth. As seen from the plots, even a single step of planning allows the agent to test action-hypotheses and avoid poor choices in the environment.
+
+5.2 PUSH ENVIRONMENT
+
+Figure 6(b) shows L2P, with planning length T = 3, compared to DQN, A2C, TreeQN and ATreeC baselines 1. For TreeDQN and ATreeC, we chose tree depths which gave the best performance,
+corresponding to tree depths of 3 and 1 respectively. Our model clearly outperforms both plan-
+ning and non-planning baselines: TreeQN, DQN, and A2C; with a slight performance difference
+to ATreeC. We see that our architecture converges at a much faster rate than the other baselines re-
+quiring roughly 12 million steps in the environment, in comparison to the other planning baselines, TreeQN and ATreeC, which take roughly 35-40 million steps: 3x additional samples.
+
+We note that the planning efficiency of L2P is higher in terms of overall performance per number of
+
+state-transitions. On the Push environment, with A = 4 actions, ATreeC with tree depth of d = 3
+
+requires
+
+Ad+1 -1 A-1
+
+- 1 = 84 state-transitions. In contrast, L2P with planning length of T = 3
+
+requires only T state-transitions ­ a 96% reduction. Loosely comparing to I2As, simply in terms
+
+of state-transitions, we see that I2As require A × L state-transitions per action step, where L is
+
+the rollout length their model performs. This performance is a result of L2P learning to selectively
+
+expand actions and being able to dynamically adjust previously simulated actions during planning.
+
+Additionally, we observed that our model does not suffer from the issue of bouncing between adjacent states; an issue also noted by Farquhar et al. (2017a) with TreeQN. An earlier iteration of our work was affected by this issue as IA employed a deterministic state-action value function. Our solution was to use an actor-critic algorithm for IA to introduce stochasticity into the decision-making processes of OA such that the agent was able to bounce out of these states quickly, thus improving performance.
+
+(a) Breadth-first Pattern.
+
+(b) Depth-first Pattern.
+
+Figure 7: Samples of planning patterns the agent uses to solve the Push environment with T = 3. The faded environments, to the right of each sample, is used to signify when the agent is planning. Highlighted squares represent the location that IA chose to move towards during planning.
+
+5.3 PLANNING PATTERNS
+By watching a trained agent play through newly generated maps, we identified common planning patterns, which are shown in Figure 7. Three prominent patterns emerged: breadth-first search, depth-first search, and the usage of planning to highlight points of interest (POI) such as hazards and goals. From Figure 7(a) we can see that our agent learned to employ breadth-first search, where planning steps are used to expand available actions around the agent, corresponding to a tree of depth 1. In contrast, depth-first search as seen in Figure 7(b), has the agent expanding state forward only. The agent does not always follow depth-first search paths and seems to use them to "check" if a particular pathway is worth pursuing. Finally, we noticed that planning was used to "highlight" nearby POI, where the usage of "highlight" refers to the agent spending multiple planning steps repeating an action such that the same state is visited multiple times. We hypothesize that focusing,
+1The data for the training curves of DQN, A2C, TreeQN, and ATreeC were provided by Farquhar et al. via email correspondence. Each experiment was run with 12 different seeds for 40million steps.
+8
+
+Under review as a conference paper at ICLR 2019
+
+Model DQN-Deep DQN-Wide DQN-RNN
+L2P-T3
+
+Avg. Reward -1.30 -1.37 -0.42 0.89
+
+(a) Training Curves.
+
+(b) Model Performance.
+
+Figure 8: Gridworld Environment. a) Training curves with L2P compared to various DQN baselines on 16 × 16 gridworld with 3 goals. b) The performance of each DQN baseline and our model where
+Avg. Reward is the average of the last 100 episodes of training.
+
+by repeatedly visiting the same state, the IA ensures that the POI is remembered in its hidden state such that the OA can act accordingly, given this information.
+5.4 MULTI-GOAL GRIDWORLD
+Figure 8(a) shows, the results of L2P compared to various DQN baselines. Within this domain, the difference in performance is clear: our model outperforms the baselines by a significant margin. The policies that L2P learns generalizes better to new scenarios, can effectively avoid obstacles, and is able to capture multiple goals. Of the DQN variations, we found that DQN-RNN performs better than the other two versions, implying that for a model-free algorithm to perform well within this environment, the agent must be able to perform additional computations and retain some information on previous moves it has made. Additionally, as seen in Figure 8(a), the Deep and Wide DQN variants do not achieve a score higher than -1.0 indicating the agents learn only to navigate around the map for 25-50 steps before an episode ends.
+The poor performance of DQN models is unsurprising as this environment is particularly unforgiving due to: episode termination conditions, goal placement, and density of obstacles. As previously mentioned, episodes end when the agent touches an obstacle, moves off the map, or exceeds the number of allocated steps. While the difficulty with goal placement is that a certain distance must be traversed between the agent to a goal and goal-to-goal, meaning a goal will rarely be discovered without first traversing through several obstacles. Finally, obstacles are often placed in a position where only one square of passage exists, in such positions an incorrect move will cause the episode to terminate leaving little room for error.
+6 CONCLUSION
+In this paper, we have presented L2P, a new architecture for deep reinforcement learning that uses two agents, IA and OA, working in tandem. Empirically, we have demonstrated that L2P outperforms the model-free and planning baselines in both the mutli-goal gridworld and Push environments while using 3x fewer environment samples. We have shown that the IA learns to dynamically construct plans that maximize utility for the OA; with IA learning to dynamically use classical search patterns, such as depth-first search, without explicit instruction. Compared to other planning architectures, L2P requires significantly fewer state-transitions during planning for the same level of performance ­ drastically reducing computational requirements by up to 96%.
+ACKNOWLEDGMENTS
+Removed for review as this can leak information about the authors.
+9
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Silvia Chiappa, Se´bastien Racaniere, Daan Wierstra, and Shakir Mohamed. Recurrent environment simulators. arXiv preprint arXiv:1704.02254, 2017.
+Re´mi Coulom. Efficient selectivity and backup operators in monte-carlo tree search. In International conference on computers and games, pp. 72­83. Springer, 2006.
+Marc Deisenroth and Carl E Rasmussen. Pilco: A model-based and data-efficient approach to policy search. In Proceedings of the 28th International Conference on machine learning (ICML-11), pp. 465­472, 2011.
+Gregory Farquhar, Tim Rockta¨schel, Maximilian Igl, and Shimon Whiteson. Treeqn and atreec: Differentiable tree planning for deep reinforcement learning. arXiv preprint arXiv:1710.11417, 2017a.
+Gregory Farquhar, Tim Rockta¨schel, Maximilian Igl, and Shimon Whiteson. "https:// github.com/oxwhirl/treeqn/blob/master/treeqn/envs/push.py", 2017b.
+Shixiang Gu, Timothy Lillicrap, Ilya Sutskever, and Sergey Levine. Continuous deep q-learning with model-based acceleration. In International Conference on Machine Learning, pp. 2829­ 2838, 2016.
+Matthew Guzdial, Boyang Li, and Mark O Riedl. Game engine learning from video. 2017.
+David Ha and Ju¨rgen Schmidhuber. World models. arXiv preprint arXiv:1803.10122, 2018.
+Eric Jang, Shixiang Gu, and Ben Poole. Categorical reparameterization with gumbel-softmax. arXiv preprint arXiv:1611.01144, 2016.
+Sergey Levine and Pieter Abbeel. Learning neural network policies with guided policy search under unknown dynamics. In Advances in Neural Information Processing Systems, pp. 1071­1079, 2014.
+Chris J Maddison, Andriy Mnih, and Yee Whye Teh. The concrete distribution: A continuous relaxation of discrete random variables. arXiv preprint arXiv:1611.00712, 2016.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015.
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In International conference on machine learning, pp. 1928­1937, 2016.
+Junhyuk Oh, Xiaoxiao Guo, Honglak Lee, Richard L. Lewis, and Satinder P. Singh. Actionconditional video prediction using deep networks in atari games. CoRR, abs/1507.08750, 2015. URL http://arxiv.org/abs/1507.08750.
+Junhyuk Oh, Satinder Singh, and Honglak Lee. Value prediction network. CoRR, abs/1707.03497, 2017. URL http://arxiv.org/abs/1707.03497.
+OpenAI. Openai five benchmark: Results, Aug 2018. URL https://blog.openai.com/ openai-five-benchmark-results/.
+Razvan Pascanu, Yujia Li, Oriol Vinyals, Nicolas Heess, Lars Buesing, Se´bastien Racanie`re, David P. Reichert, Theophane Weber, Daan Wierstra, and Peter Battaglia. Learning modelbased planning from scratch. CoRR, abs/1707.06170, 2017. URL http://arxiv.org/abs/ 1707.06170.
+Jing Peng and Ronald J Williams. Efficient learning and planning within the dyna framework. Adaptive Behavior, 1(4):437­454, 1993.
+10
+
+Under review as a conference paper at ICLR 2019
+Juergen Schmidhuber. On learning to think: Algorithmic information theory for novel combinations of reinforcement learning controllers and recurrent neural world models. arXiv preprint arXiv:1511.09249, 2015.
+John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. Trust region policy optimization. In International Conference on Machine Learning, pp. 1889­1897, 2015.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et al. Mastering the game of go with deep neural networks and tree search. nature, 529(7587):484, 2016a.
+David Silver, Hado van Hasselt, Matteo Hessel, Tom Schaul, Arthur Guez, Tim Harley, Gabriel Dulac-Arnold, David Reichert, Neil Rabinowitz, Andre Barreto, et al. The predictron: End-toend learning and planning. arXiv preprint arXiv:1612.08810, 2016b.
+Richard S Sutton. Dyna, an integrated architecture for learning, planning, and reacting. ACM SIGART Bulletin, 2(4):160­163, 1991.
+Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction. MIT press, second edition, in progress edition, 2017.
+Aviv Tamar, Sergey Levine, Pieter Abbeel, YI WU, and Garrett Thomas. Value iteration networks. In Advances in Neural Information Processing Systems, pp. 2146­2154, 2016.
+Naftali Tishby and Daniel Polani. Information theory of decisions and actions. In Perception-action cycle, pp. 601­636. Springer, 2011.
+Alexander Vezhnevets, Volodymyr Mnih, John Agapiou, Simon Osindero, Alex Graves, Oriol Vinyals, Koray Kavukcuoglu, et al. Strategic attentive writer for learning macro-actions. arXiv preprint arXiv:1606.04695, 2016.
+The´ophane Weber, Se´bastien Racanie`re, David P Reichert, Lars Buesing, Arthur Guez, Danilo Jimenez Rezende, Adria Puigdome`nech Badia, Oriol Vinyals, Nicolas Heess, Yujia Li, et al. Imagination-augmented agents for deep reinforcement learning. arXiv preprint arXiv:1707.06203, 2017.
+11
+
+Under review as a conference paper at ICLR 2019
+A SUPPLEMENTAL MATERIAL
+A.1 MOTIVATING EXAMPLE
+As this work improves upon existing planning approaches it is pragmatic to examine the general planning process a human might perform before action selection. We use chess as an illustrative example as it is widely known and victory requires careful action selection.
+Through introspection the following "planning algorithm" emerges, where before acting each player: a) observes the current game state; b) selects a chess piece to move and mentally steps "forward in time" moving their piece and opponent pieces with a mental dynamics model; and then chooses to ci) repeat step b), cii) undo the last move, ciii) or reset to the current initial "root" state a). With steps ci-iii) repeatedly performed until the player feels they have exhausted all useful paths. Finally, an action is selected using this planning information. This process can be interpreted as dynamically creating a tree structure where the nodes are visited states, the edges are actions, and the tree is grown downward each time the player chooses to step "forward in time". The player traverses this tree by stepping forward (ci), undoing previous moves (cii), or abandoning the current pathway to start from the root state (ciii). Importantly, undoing and resetting does not destroy previous information the player has gained and is remembered when selecting the final action.
+From this process we note four interesting characteristics:
+· During the planning process, no new external state or information enters the system. · The entire dynamic process tries to maximize the current information available to the player
+given only their current state and a dynamics model. · A model of the environment dynamics is needed to simulate action-conditional steps. · Previously visited states and transitions should be remembered in working memory instead
+of being discarded.
+Our architecture, L2P, encodes each characteristic into the model structure.
+B EXPERIMENTAL DETAILS
+B.1 TRAINING DETAILS
+We used the RMSProp optimizer with a learning rate of  = 0.0001, = 1e - 5, and decay of 0.95. We trained all environments for 20 million environment steps, using a model freeze interval of 30k, and linearly annealed the exploration rate from 1.0 to 0.05 over the first 4 million steps in the environment. Our replay memory held 1 million samples. We used a discount rate of O = 0.95 for the outer agent and I = 1.0 for the IA. The entropy regularization used was A = 0.01 and w = 0.007. The state-grounding coefficient used was  = 0.01 in all experiments. All hyperparameters were held fixed during all experiments.
+B.2 GRIDWORLD ENVIRONMENT
+For each episode, a new level is generated where we place an agent, 3 goals, and 50 obstacles of varying size with their locations sampled uniformly in a 16 × 16 grid map. First, the agent is placed within one of the center 4 tiles of the map. Then a location for each goal is sampled where the location must satisfy the following conditions:
+· DE[gi, a]  dga · DE [gi, gj ]  dgg
+where DE[x, y] is the euclidean distance between point x and y, dga is the distance between goal gi and the agent, and dgg is the distance between goal gi and gj. We used dga = 4.5 and dgg = 6.0. Next, we randomly sample locations and dimensions for each obstacle, rejecting already occupied locations, where each obstacle can have a width and height in {1, 2}. Finally, to ensure that each goal can be reached, we carve a path backwards to the agent remove blocks that stop clear passage.
+12
+
+Under review as a conference paper at ICLR 2019
+B.3 ARCHITECTURES All encoder layers were separated with ReLU non-linearities unless otherwise specified. Convolution layers are specified with the notation conv-wxh-s-n with n filters of size w × h and stride s, and fc-h denotes a fully-connected layer with h hidden units. The state-transition model remained consistent between each environment with only the number of actions A and embedding size z affecting the number of parameters of the component. Gridworld: The encoder consisted of conv-3x3-1-16, conv-3x3-2-32, conv-4x4-2-32, and fc-128. For the IA's hidden state hI, we used 64 units and the outer agents hidden state hO has 64 units. The hidden state z used 64 units. The DQN baseline used the same encoder as our architecture as well as the same embedding size z. Push: The encoder consists of conv-3x3-1-24, conv-3x3-1-24, conv-4x4-1-48, and fc-128. For the IA's hidden state hI, we used 64 units and the outer agents hidden state hO has 64 units. The hidden state z used 128 units. B.4 KL CALCULATION To compute the KL divergence between hO and hO+1, we first apply the inverse tanh function followed by the sigmoid: (tanh-1(· · · )); the resulting output is interpreted as a joint distribution of ho independent Bernoulli random variables where the ith unit's success probability is given by the units value.
+13
+
+

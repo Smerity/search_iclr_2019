@@ -1,0 +1,544 @@
+Under review as a conference paper at ICLR 2019
+MASSIVELY PARALLEL HYPERPARAMETER TUNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Modern learning models are characterized by large hyperparameter spaces. In order to adequately explore these large spaces, we must evaluate a large number of configurations, typically orders of magnitude more configurations than available parallel workers. Given the growing costs of model training, we would ideally like to perform this search in roughly the same wall-clock time needed to train a single model. In this work, we tackle this challenge by introducing ASHA, a simple and robust hyperparameter tuning algorithm with solid theoretical underpinnings that exploits parallelism and aggressive early-stopping. Our extensive empirical results show that ASHA slightly outperforms Fabolas and Population Based Tuning, stateof-the hyperparameter tuning methods; scales linearly with the number of workers in distributed settings; converges to a high quality configuration in half the time taken by Vizier (Google's internal hyperparameter tuning service) in an experiment with 500 workers; and beats the published result for a near state-of-the-art LSTM architecture in under 2× the time to train a single model.
+1 INTRODUCTION
+Although machine learning models have recently achieved dramatic successes in a variety of practical applications, these models are highly sensitive to internal parameters, i.e., hyperparameters. In these modern learning regimes, three trends motivate a new approach to hyperparameter tuning:
+1. High-dimensional hyperparameter spaces. Machine learning models are becoming increasingly complex, as evidenced by modern neural networks with dozens of hyperparameters. For such complex models with hyperparameters that interact in unknown ways, a practitioner is forced to evaluate potentially thousands of different hyperparameter settings.
+2. Increasing training times. As datasets grow larger and models become more complex, training a model has become dramatically more expensive, often taking days or weeks on specialized high-performance hardware. This trend is particularly onerous in the context of hyperparameter tuning, as a new model must be trained to evaluate each candidate hyperparameter configuration.
+3. Rise of parallel computing. The combination of a growing number of hyperparameters and longer training time per model precludes evaluating configurations sequentially; we simply cannot wait months or years to find a suitable hyperparameter setting. Leveraging parallel and distributed computational resources presents a solution to the increasingly challenging problem of hyperparameter optimization.
+Our goal is to design a hyperparameter tuning algorithm that can effectively leverage parallel resources. This goal seems trivial with standard methods like random search, where we could train different configurations in an embarrassingly parallel fashion. However, for high-dimensional search spaces, the number of candidate configurations required to find a good configuration often dwarfs the number of available parallel resources, and when possible, our goal is to:
+Evaluate orders of magnitude more hyperparameter configurations than available parallel workers in a small multiple of the wall-clock time needed to train a single model.
+We denote this setting as the large-scale regime for hyperparameter optimization. In this work we study this regime, and our contributions are as follows:
+· We introduce the Asynchronous Successive Halving Algorithm (ASHA), a practical hyperparameter tuning method for the large-scale regime that exploits parallelism and aggressive early-stopping.
+1
+
+Under review as a conference paper at ICLR 2019
+Our algorithm is inspired by the Successive Halving algorithm (SHA) (Karnin et al., 2013; Jamieson & Talwalkar, 2015), a theoretically principled early-stopping method that allocates more resources to promising configurations. As a side benefit of adapting SHA for the parallel setting, we also improve upon the synchronous version of SHA, as described in Section 3.3.
+· In the sequential setting, we compare SHA with Fabolas (Klein et al., 2017) and Population Based Tuning (PBT) (Jaderberg et al., 2017), two state-of-the-art methods that exploit partial training (Klein et al., 2017; Jaderberg et al., 2017). Our results show that SHA slightly outperforms Fabolas and PBT, which when coupled with SHA's simplicity and theoretical grounding, motivate the use of SHA in parallel settings. We also verify that SHA and ASHA achieve similar results.
+· In a distributed setting with 25 workers, we evaluate ASHA's suitability for the large-scale regime. We focus on tuning two CNNs on CIFAR-10, and observe that ASHA finds a good configuration in approximately the time it takes to train a single model. We also show that ASHA scales linearly with the number of workers, and that it again slightly exceeds the performance of PBT.
+· In a distributed setting with 500 workers, we compare ASHA to the default tuning algorithm used by Vizier (Golovin et al., 2017), Google's internal hyperparameter tuning service. We show that ASHA outperforms Vizier when tuning an LSTM model on the Penn Treebank dataset (PTB).
+· Finally, we use ASHA with 16 GPUs to tune a near state-of-the-art language model (Merity et al., 2018), with a published test perplexity of 57.3 on PTB. ASHA is able to find a configuration with a test perplexity of 56.3 in less than 2× the time it takes to train a single model.
+2 RELATED WORK
+Sequential methods: There is a large body of work in this area, with existing methods focusing on adaptively evaluating configurations, adaptively selecting configurations, or taking a hybrid approach that combines both strategies. SHA (Jamieson & Talwalkar, 2015) and Hyperband (Li et al., 2018) are empirically effective adaptive evaluation techniques that employ principled `early-stopping.' SHA serves as the inner loop for Hyperband, with Hyperband automating the choice of the early-stopping rate by running different variants of SHA. While the appropriate choice of early stopping rate is problem dependent, Li et al. (2018)'s empirical results show that aggressive early-stopping works well for a wide variety of tuning tasks. Hence, we focus on adapting SHA to the parallel setting in Section 3, though we also evaluate the corresponding asynchronous Hyperband method.
+Fabolas (Klein et al., 2017), a hybrid Bayesian optimization method, has demonstrated state-of-theart performance on several tasks in comparison to Hyperband and other leading methods. While Fabolas, along with most other Bayesian optimization approaches, can be parallelized using a constant liar (CL) type heuristic (Ginsbourger et al., 2010; González et al., 2016), the parallel version will underperform the sequential version, since the latter uses a more accurate posterior to propose new points. Hence, we compare to Fabolas in the sequential setting in Section 4.1, and demonstrate that under an appropriate experimental setup, SHA and Hyperband in fact slightly outperform Fabolas.
+Parallel methods: Jaderberg et al. (2017) developed PBT, a state-of-the-art hybrid evolutionary approach that exploits partial training to iteratively increase the fitness of a population of models. Additionally, Golovin et al. (2017) introduced Vizier, a black-box optimization service with support for multiple tuning methods and early-stopping options. For succinctness, we will refer to Vizier's default algorithm as "Vizier" with the understanding that it is simply one of methods available on the Vizier platform. We compare to PBT and Vizier in Section 4.2 and Section 4.3, respectively. We further note that PBT is more comparable to SHA than to Hyperband since both PBT and SHA require the user to set the early-stopping rate via internal hyperparameters.
+Neural Architecture Search (NAS) methods: Another class of related methods are tailored for search spaces designed to tune the architectures of neural networks. While earlier methods were computationally expensive (Zoph & Le, 2017; Real et al., 2017), more recent methods exploit reuse to reduce the costs (Pham et al., 2018; Bender et al., 2018). However, these methods suffer from reproducibility issues (Pham et al., 2018; Pham & Guan, 2018), and recent work has demonstrated that appropriately tuning more traditional architectures can match or outperform the results from architecture search (Melis et al., 2018). Relatedly, ASHA's performance in Section 4.3.1 matches that of leading NAS methods on the PTB benchmark (Pham et al., 2018; Pham & Guan, 2018).
+2
+
+Under review as a conference paper at ICLR 2019
+
+3 ASHA ALGORITHM
+We start with an overview of SHA (Karnin et al., 2013; Jamieson & Talwalkar, 2015) and motivate the need to adapt it to the parallel setting. Then we present ASHA and discuss how it addresses issues with synchronous SHA and improves upon the original algorithm.
+3.1 SUCCESSIVE HALVING (SHA)
+Algorithm 1: Successive Halving Algorithm.
+1 Input: number of configurations n, minimum resource r, maximum resource R, reduction factor , minimum early-stopping rate s
+2 smax = log(R/r) 3 assert n  smax-s so that at least one configuration will be allocated R. 4 T = get_hyperparameter_configuration(n) 5 for i  {0, . . . , smax - s} do 6 // All configurations trained for a given i constitute a "rung." 7 ni = n/-i 8 ri = ri+s 9 L = run_then_return_val_loss(, ri) :   T 10 T = top_k(T, L, ni/) 11 end 12 return best configuration in T
+The idea behind SHA (Algorithm 1) is simple: allocate a small budget to each configuration, evaluate all configurations and keep the top 1/, increase the budget per configuration by a factor of , and repeat until the maximum per-configuration budget of R is reached (lines 5­11). The resource allocated by SHA can be iterations of stochastic gradient descent, number of training examples, number of random features, etc.
+
+bracket s rung i ni ri total budget
+
+0 0 91
+
+9
+
+1 33
+
+9
+
+2 19
+
+9
+
+1
+
+0 93
+
+27
+
+1 39
+
+27
+
+2
+
+0 99
+
+81
+
+Figure 1: Promotion scheme for SHA with n = 9, r = 1, R = 9, and  = 3. (Left) Visual depiction of the promotion scheme for bracket s = 0. (Right) Promotion scheme for different brackets s. s increases the starting budget per configuration r0  R by a factor of  per increment of s. Hence, it takes more resources to explore the same number of configurations for higher s. Note that for a given s, the same budget is allocated to each rung but is split between fewer configurations in higher rungs.
+SHA requires the number of configurations n, a minimum resource r, a maximum resource R, a reduction factor   2, and a minimum early-stopping rate s. Additionally, the get_hyperparameter_configuration(n) subroutine returns n configurations sampled randomly from a given search space; and the run_then_return_val_loss(, r) subroutine returns the validation loss after training the model with the hyperparameter setting  and for r resources. For a given early-stopping rate s, a minimum resource of r0 = rs will be allocated to each configuration. Hence, lower s corresponds to more aggressive early-stopping, with s = 0 prescribing a minimum resource of r. We will refer to SHA with different values of s as brackets and, within a bracket, we will refer to each round of promotion as a rung with the base rung numbered 0 and increasing. Figure 1(left) shows the rungs for bracket 0 for an example setting with n = 9, r = 1, R = 9, and  = 3, while Figure 1(right) shows how resource allocations change for different brackets.
+3
+
+Under review as a conference paper at ICLR 2019
+The naive way of parallelizing SHA is to distribute the training of the n/k surviving configurations on each rung k. Under this strategy, the efficiency of parallel workers is severely hampered by two issues: (1) the amount of possible parallelism reduces by a factor of  each time we move up a rung, with concurrent exponential increase in training time, and (2) SHA's synchronous nature introduces stragglers as every configuration within a rung must complete before proceeding to the next rung.
+We could also consider the embarrassingly parallel approach of running multiple instances of SHA, one on each worker. However, this strategy is not well suited for the large-scale regime, where we would like results in little more than the time to train one configuration. To see this, assume that training time for a configuration scales linearly with the allocated resource and time(R) represents the time required to train a configuration for the maximum resource R. In general, for a given bracket s, the minimum time to return a configuration trained to completion is (log(R/r)-s+1)×time(R), where log(R/r) - s + 1 counts the number of rungs. For example, consider Bracket 0 in the toy example in Figure 1. The time needed to return a fully trained configuration is 3 × time(R), since there are three rungs and each rung is allocated R resource. Moreover, using this parallelization strategy on the task considered in Section 4.3.1 would have required 5 days to return an answer, compared to the 1 day needed for ASHA.
+3.2 ASYNCHRONOUS SHA (ASHA)
+Algorithm 2: Asynchronous Successive Halving Algorithm.
+1 Input: minimum resource r, maximum resource R, reduction factor , minimum early-stopping rate s
+2 Algorithm ASHA() 3 repeat 4 for each free worker do 5 (, k) = get_job() 6 run_then_return_val_loss(, rs+k) 7 end 8 for completed job (, k) with loss l do 9 Update configuration  in rung k with loss l. 10 end 11 Procedure get_job() 12 // A configuration is "promotable" if it has not been trained on
+the maximum resource R, its validation loss places it in the top 1/ fraction of completed configurations in its rung, and it has not already been promoted. 13 Let  be the furthest trained promotable configuration, with k indicating its rung. 14 if  exists then 15 Promote  to rung k + 1. 16 return , k + 1 17 else 18 Add a new configuration  to bottom rung. 19 return , 0 20 end
+We now introduce ASHA as an effective technique to parallelize SHA, leveraging asynchrony to mitigate stragglers and maximize parallelism. Intuitively, ASHA promotes configurations to the next rung whenever possible instead of waiting for a rung to complete before proceeding to the next rung. Additionally, if no promotions are possible, ASHA simply adds a configuration to the base rung, so that more configurations can be promoted to the upper rungs. ASHA is formally defined in Algorithm 2. Given its asynchronous nature it does not require the user to pre-specify the number of configurations to evaluate, but it otherwise requires the same inputs as SHA. Note that the run_then_return_val_loss subroutine in ASHA is asynchronous and the code execution continues after the job is passed to the worker. ASHA's promotion scheme is laid out in the get_job subroutine. We compare the promotion schemes of SHA and ASHA in Figure 2.
+4
+
+Under review as a conference paper at ICLR 2019
+
+rung 2
+
+Successive Halving (Synchronous)
+
+8 9 rung 2
+
+Successive Halving (Asynchronous)
+
+89
+
+Budget Allocated to Job Budget Allocated to Job
+
+rung 1
+
+8 1 6 3 rung 1
+
+1
+
+6
+
+83
+
+rung 0 1 2 3 4 5 6 7 8 9
+
+1 rung 0 1 2 3
+
+456
+
+789
+
+1
+
+2
+
+4 Chro6nological8Jobs 10
+
+12
+
+2
+
+4 Chro6nological8Jobs 10
+
+12
+
+Figure 2: Comparison of promotion schemes for SHA and ASHA. We show the promotion schemes for Bracket 0 from Figure 1 (i.e. r = 1, R = 9,  = 3, and s = 0). Each bar represents a job along with the associated training budgets. The jobs submitted by SHA and ASHA are shown in chronological order going from left to right. The bars are labeled with the configuration number and the color gradient corresponds to performance, with lighter bars having lower error; as in Figure 1(left), configurations 1, 6, and 8 are promoted to rung 1 and configuration 8 is promoted to rung 2. SHA must complete all jobs in a rung before moving the next rung. In contrast, ASHA strives to maintain the simple rule that each rung should always have about 1/ = 1/3 of the configurations as the rung below it, while new configurations are added to the bottom rung as needed.
+
+ASHA is well-suited for the large-scale regime, where wall-clock time is constrained to a small multiple of the time needed to train a single model. For ease of comparison with SHA, assume training time scales linearly with the resource. Consider the example of Bracket 0 shown in Figure 1, and assume we can run ASHA with 9 machines. Then ASHA returns a fully trained configuration in 13/9 × time(R), since 9 machines are sufficient to promote configurations to the next rung in the same time it takes to train a single configuration in the rung. Hence, the training time for a configuration in rung 0 is 1/9 × time(R), for rung 1 it is 1/3 × time(R), and for rung 2 it is time(R). In general, log(R)-s machines are needed to advance a configuration to the next rung in the same time it takes to train a single configuration in the rung, and it takes s+i-log(R) × time(R) to train a configuration in rung i. Hence, ASHA can return a configuration trained to completion in time
+log (R)
+i-log(R) × time(R)  2 time(R).
+i=s
+Moreover, when training is iterative, ASHA can return an answer in time(R), since incrementally trained configurations can be checkpointed and resumed.
+Finally, since Hyperband simply runs multiple SHA brackets, we can asynchronously parallelize Hyperband by either running multiple brackets of ASHA or looping through brackets of ASHA sequentially as is done in the original Hyperband. We employ the latter looping scheme for asynchronous Hyperband in the next section.
+3.3 ALGORITHM DISCUSSION
+ASHA is able to remove the bottleneck associated with synchronous promotions at the cost of a small number of incorrect promotions. By the law of large numbers, we expect to erroneously promote a vanishing fraction of configurations in each rung as the number of configurations grows. Intuitively, in the first rung with n evaluated configurations, the number of mispromoted configurations is roughly
+n, since the process resembles the convergence of an empirical cumulative distribution function to its expected value (c.f., the Dvoretzky-Kiefer-Wolfowitz inequality (Dvoretzky et al., 1956)). For later rungs, although the configurations are no longer i.i.d. since they were advanced based on the empirical CDF of the evaluation scores, we expect this dependence to be weak.
+We further note that ASHA improves upon SHA in two ways. First, Li et al. (2018) discusses two SHA variants: finite horizon (bounded resource per configuration, i.e., R is bounded) and infinite horizon
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+(unbounded resources per configuration, i.e., R is unbounded). ASHA consolidates these settings into one algorithm. In Algorithm 2, we do not promote configurations that have been trained for R, thereby restricting the number of rungs. However, this algorithm trivially generalizes to the infinite horizon; we can remove this restriction so that the maximum resource per configuration increases naturally as configurations are promoted to higher rungs. In contrast, SHA does not naturally extend to the infinite horizon setting, as it relies on the doubling trick and must rerun brackets with larger budgets to increase the maximum resource.
+Additionally, SHA does not return an output until a single bracket completes. In the finite horizon this means that there is a constant interval of (# of rungs × time(R)) between receiving outputs from SHA. In the infinite horizon this interval doubles between outputs. In contrast, ASHA grows the bracket incrementally instead of in fixed budget intervals. To further reduce latency, ASHA uses intermediate losses to determine the current best performing configuration, as opposed to only considering the final SHA outputs.
+
+4 EMPIRICAL EVALUATION
+
+We first present results in the sequential setting to justify our choice of focusing on SHA and to compare SHA to ASHA. We next evaluate ASHA in parallel environments on three benchmark tasks.
+
+4.1 SEQUENTIAL EXPERIMENTS
+We benchmark Hyperband and SHA against Fabolas and PBT, and examine the relative performance of SHA versus ASHA and Hyperband versus asynchronous Hyperband. As mentioned previously, asynchronous Hyperband loops through brackets of ASHA with different early-stopping rates, switching brackets when a budget corresponding to a hypothetical bracket of SHA would be depleted.
+
+Test Error Test Error
+
+0.26
+
+CIFAR10 Using Small Cuda Convnet Model
+
+Hyperband
+
+Hyperband (async)
+
+0.25 SHA ASHA
+
+0.24
+
+Random
+
+PBT
+
+0.23
+
+0.22
+
+0.21
+
+0.20
+
+0.19
+
+0.18 0
+
+500 Du10ra0t0ion (Min1u5t0e0s) 2000
+
+2500
+
+0.2C6IFAR10 Using Small CNN Architecture Tuning Task
+
+0.25
+
+0.24
+
+0.23
+
+0.22
+
+0.21 Hyperband
+
+0.20
+
+SHA Random
+
+Hyperband (async) ASHA PBT
+
+0 500 Du10ra0t0ion (Min1u5t0e0s) 2000
+
+2500
+
+Figure 3: Sequential experiments (1 worker). Average across 10 trials is shown for each hyperparameter optimization method. Gridded lines represent top and bottom quartiles of trials.
+
+We first compare Hyperband with Fabolas on 4 different benchmarks. Due to the nuanced nature of the evaluation framework used by Klein et al. (2017) in comparing Fabolas with Hyperband, we present our detailed discussion of the experimental setup and associated results in Appendix A.1. In summary, our results show that Hyperband, specifically the first bracket of SHA, tends to outperform Fabolas while also exhibiting lower variance across experimental trials.
+The remaining comparisons are performed on two benchmarks on CIFAR-10: (1) tuning a convolutional neural network (CNN) with the cuda-convnet architecture and the same search space as Li et al. (2017); and (2) tuning a CNN architecture with varying number of layers, batch size, and number of filters. The details for the search spaces considered for each benchmark and the settings we used for each search method can be found in Appendix A.3.
+The results on these two benchmarks are shown in Figure 3. On benchmark 1, both Hyperband and SHA (both synchronous and asynchronous versions) outperform PBT by 3×. On benchmark 2, while all methods comfortably beat random search, SHA, ASHA and PBT performed similarly and slightly outperform Hyperband and asynchronous Hyperband. This last observation (i) corroborates the
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Test Error Test Error
+
+0.26
+
+CIFAR10 Using Small Cuda Convnet Model
+ASHA
+
+0.25 Hyperband (async)
+
+0.24 PBT
+
+0.23
+
+0.22
+
+0.21
+
+0.20
+
+0.19
+
+0.18 40
+
+60 Dura80tion (Min10u0tes) 120 140
+
+0.2C6IFAR10
+
+Using
+
+Small
+
+CNN
+ASHA
+
+Architecture
+
+Tuning
+
+Task
+
+0.25
+
+Hyperband (async) PBT
+
+0.24
+
+0.23
+
+0.22
+
+0.21
+
+0.20
+0 20 40 Du6ra0tion (M80inutes1)00 120 140
+
+Figure 4: Limited-scale distributed experiments with 25 workers. For each searcher, the average test error across 5 trials is shown in each plot. The light dashed lines indicate the min/max ranges. The dotted black line represents the time needed to train the most expensive model in the search space for the maximum resource R. The dotted blue line represents the point at which 25 workers in parallel have performed as much work as a single machine in the sequential experiments (Figure 3).
+
+results in Li et al. (2017), which found that the brackets with the most aggressive early-stopping rates performed the best; and (ii) follows from the discussion in Section 2 noting that PBT is more similar in spirit to SHA than Hyperband, as PBT / SHA both require user-specified early-stopping rates (and are more aggressive in their early-stopping behavior in these experiments). Lastly, for both tasks, introducing asynchrony does not consequentially impact the performance of ASHA (relative to SHA) or asynchronous Hyperband (relative to Hyperband). This not surprising; as discussed in Section 3.3, we expect the number of ASHA mispromotions to be square root in the number of configurations.
+4.2 LIMITED-SCALE DISTRIBUTED EXPERIMENTS
+We next evaluate ASHA and PBT on the same two tasks from Section 4.1. For each experiment, we run each search method with 25 workers for 150 minutes. We use the same setups for ASHA and PBT as in the previous section. Figure 4 shows the average test error across 5 trials for each search method. On both tasks, ASHA succeeded in the large-scale regime. For benchmark 1, ASHA evaluated over 1000 configurations in just over 40 minutes with 25 workers and found a good configuration (error rate below 0.21) in approximately the time needed to train a single model, whereas it took ASHA nearly 400 minutes to do so in the sequential setting (Figure 3). Notably, we only achieve a 10× speedup on 25 workers due to the relative simplicity of this task, i.e., it only required evaluating a few hundred configurations before identifying a good one in the sequential setting. In contrast, when considering the more difficult search space in benchmark 2, we observe linear speedups with ASHA, as the roughly 700 minutes in the sequential setting (Figure 3) needed to find a configuration with test error below 0.23 is reduced to under 25 minutes in the distributed setting.
+We further note that ASHA outperforms PBT on benchmark 1; in fact the minimum and maximum range for ASHA across 5 trials does not overlap with the average for PBT. On benchmark 2, PBT slightly outperforms asynchronous Hyperband and performs comparably to ASHA. However, note that the ranges for the searchers share large overlap and the result is likely not significant. ASHA's slight outperformance of PBT on these two tasks, coupled with the fact that it is a more principled and general approach (e.g., agnostic to resource type and robust to hyperparameters that change the size of the model), further motivates its use for the large-scale regime.
+4.3 TUNING LARGE-SCALE LANGUAGE MODELS
+We tune a one layer LSTM language model for next word prediction on the Penn Treebank dataset (Marcus et al., 1993), see Appendix A.5 for more details. Each tuner is given 500 workers and 6 × time(R), i.e., 6× the average time needed to train a single model. For ASHA, we set  = 4,
+7
+
+Under review as a conference paper at ICLR 2019
+
+Perplexity
+
+90 LSTM on PTB
+
+88
+
+ASHA Hyperband (Loop Brackets)
+
+Vizier
+
+86
+
+84
+
+82
+
+80
+
+78
+
+76
+
+0R 1R 2R Ti3mRe 4R 5R 6R
+
+Figure 5: Large-scale ASHA benchmark that takes on the order of weeks to run with 500 workers. The x-axis is measured in units of average time to train a single configuration for R resource. The average across 5 trials is shown, with dashed lines indicating min/max ranges.
+
+r = R/64, and s = 0; asynchronous Hyperband loops through brackets s = 0, 1, 2, 3. We compare to Vizier without the performance curve early-stopping rule (Golovin et al., 2017).1
+The results in Figure 5 show that ASHA and asynchronous Hyperband found good configurations for this task in 1 × time(R). Additionally, ASHA and asynchronous Hyperband are both about 3× faster than Vizier at finding a configuration with test perplexity below 80, despite being much simpler and easier to implement. We also note that asynchronous Hyperband initially lags behind ASHA, but eventually catches up at around 1.5 × time(R).
+Notably, we observe that certain hyperparameter configurations in this benchmark induce perplexities that are orders of magnitude larger than the average case perplexity. Model-based methods that make assumptions on the data distribution, such as Vizier, can degrade in performance without further care to adjust this signal. We attempted to alleviate this by capping perplexity scores at 1000 but this still significantly hampered the performance of Vizier. We view robustness to these types of scenarios as an additional benefit of ASHA and Hyperband.
+4.3.1 TUNING MODERN LSTM ARCHITECTURES
+We next performed a follow up experiment on the Penn Treebank dataset focusing on models with improved perplexity. Our starting point was the work of Merity et al. (2018), which introduced a near state-of-the-art LSTM architecture with DropConnect, a new regularization scheme that can be easily combined with existing LSTM implementations in common deep learning frameworks. They reported validation and test perplexities respectively of 60.7 and 58.8 without fine-tuning and 60.0 and 57.3 with fine-tuning. We constructed a search space around their configuration and ran ASHA with  = 4, r = 1 epoch, R = 256 epochs, and s = 0 on one p2.16xlarge instance on AWS. With 16 GPUs, after less than 2× the time to train a single model for 256 epochs, we were able to find a configuration with validation and test perplexities of 60.2 and 58.1 respectively before fine-tuning and 58.7 and 56.3 after fine-tuning. This demonstrates the effectiveness of ASHA in the large-scale regime for modern hyperparameter optimization problems.
+5 CONCLUSION
+In this paper, we introduced ASHA and demonstrated its suitability for the large-scale regime of hyperparameter optimization. Directions for future work include combining ASHA with adaptive selection methods and incorporating meta-learning to inform early-stopping. These extensions overlap with those for synchronous SHA, and any progress made for the synchronous algorithm will likely also apply for ASHA.
+1 At the time of running the experiment, it was brought to our attention by the team maintaining the Vizier service that the early-stopping code contained a bug. The bug negatively impacted the performance of Vizier with early-stopping; hence we omit the results here.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Gabriel Bender, Pieter-Jan Kindermans, Barret Zoph, Vijay Vasudevan, and Quoc Le. Understanding and simplifying one-shot architecture search. In Jennifer Dy and Andreas Krause (eds.), Proceedings of the 35th International Conference on Machine Learning, volume 80 of Proceedings of Machine Learning Research, pp. 550­559, Stockholmsmässan, Stockholm Sweden, 10­15 Jul 2018.
+T. Domhan, J. T. Springenberg, and F. Hutter. Speeding up automatic hyperparameter optimization of deep neural networks by extrapolation of learning curves. In IJCAI, 2015.
+A. Dvoretzky, J. Kiefer, and J. Wolfowitz. Asymptotic minimax character of the sample distribution function and of the classical multinomial estimator. The Annals of Mathematical Statistics, 27: 642­669, 1956.
+David Ginsbourger, Rodolphe Le Riche, and Laurent Carraro. Kriging is well-suited to parallelize optimization. In Computational Intelligence in Expensive Optimization Problems, pp. 131­162. Springer, 2010.
+Daniel Golovin, Benjamin Sonik, Subhodeep Moitra, Greg Kochanski, John Karro, and D.Sculley. Google vizier: A service for black-box optimization. In KDD, 2017.
+J. González, D. Zhenwen, P. Hennig, and N. Lawrence. Batch bayesian optimization via local penalization. In AISTATS, 2016.
+Max Jaderberg, Valentin Dalibard, Simon Osindero, Wojciech M Czarnecki, Jeff Donahue, Ali Razavi, Oriol Vinyals, Tim Green, Iain Dunning, Karen Simonyan, et al. Population based training of neural networks. arXiv:1711.09846, 2017.
+K. Jamieson and A. Talwalkar. Non-stochastic best arm identification and hyperparameter optimization. In AISTATS, 2015.
+Z. Karnin, T. Koren, and O. Somekh. Almost optimal exploration in multi-armed bandits. In ICML, 2013.
+A. Klein, S. Falkner, S. Bartels, P. Hennig, and F. Hutter. Fast bayesian optimization of machine learning hyperparameters on large datasets. AISTATS, 2017.
+A. Krizhevsky. Learning multiple layers of features from tiny images. In Technical report, Department of Computer Science, Univsersity of Toronto, 2009.
+Lisha Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, and Ameet Talwalkar. Hyperband: Bandit-based configuration evaluation for hyperparameter optimization. Proc. of ICLR, 17, 2017.
+Lisha Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, and Ameet Talwalkar. Hyperband: A novel bandit-based approach to hyperparameter optimization. Journal of Machine Learning Research, 18(185):1­52, 2018. URL http://jmlr.org/papers/v18/16-558.html.
+Mitchell Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated corpus of english: The penn treebank. Computational Linguistics, 19(2):313­330, 1993.
+Gábor Melis, Chris Dyer, and Phil Blunsom. On the state of the art of evaluation in neural language models. In International Conference on Learning Representations, 2018. URL https:// openreview.net/forum?id=ByJHuTgA-.
+Stephen Merity, Nitish Shirish Keskar, and Richard Socher. Regularizing and optimizing LSTM language models. In International Conference on Learning Representations, 2018. URL https: //openreview.net/forum?id=SyyGPP0TZ.
+Y. Netzer et al. Reading digits in natural images with unsupervised feature learning. In NIPS Workshop on Deep Learning and Unsupervised Feature Learning, 2011.
+Hieu Pham and Melody Guan. ENAS Github Repository. https://github.com/ melodyguan/enas/issues/50, 2018.
+9
+
+Under review as a conference paper at ICLR 2019
+
+Hieu Pham, Melody Guan, Barret Zoph, Quoc Le, and Jeff Dean. Efficient neural architecture search via parameters sharing. In Jennifer Dy and Andreas Krause (eds.), Proceedings of the 35th International Conference on Machine Learning, volume 80 of Proceedings of Machine Learning Research, pp. 4095­4104, Stockholmsmässan, Stockholm Sweden, 10­15 Jul 2018.
+Esteban Real, Sherry Moore, Andrew Selle, Saurabh Saxena, Yutaka Leon Suematsu, Quoc V. Le, and Alexey Kurakin. Large-scale evolution of image classifiers. In ICML, 2017.
+P. Sermanet, S. Chintala, and Y. LeCun. Convolutional neural networks applied to house numbers digit classification. In ICPR, 2012.
+K. Swersky, J. Snoek, and R. P. Adams. Freeze-thaw bayesian optimization. arXiv:1406.3896, 2014.
+Barret Zoph and Quoc V. Le. Neural architecture search with reinforcement learning. In ICLR, 2017.
+
+A APPENDIX
+As part of our supplementary material, we discuss the comparison made with Fabolas in the sequential setting and provide additional details for the empirical results shown in Section 4.
+A.1 COMPARISON WITH FABOLAS IN SEQUENTIAL SETTING
+
+Test Error
+
+0.40
+
+SVM on vehicle
+Hyperband (by rung)
+
+0.35
+
+Hyperband (by bracket) Fabolas
+
+Random
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10 0 100 200 D3u0r0ation40(0Minu5te00s) 600 700 800
+
+0.40
+
+CIFAR10 Using Small Cuda Convnet Model
+Hyperband (by rung)
+
+Hyperband (by bracket)
+
+0.35
+
+Fabolas Random
+
+0.30
+
+0.25
+
+0.20
+
+0.15 0
+
+500 Du10ra0t0ion (Min1u5t0e0s) 2000
+
+2500
+
+Test Error
+
+Test Error
+
+0.6 SVM on MNIST
+
+0.5
+
+0.4 Hyperband (by rung)
+
+0.3
+
+Hyperband (by bracket) Fabolas
+
+Random
+
+0.2
+
+0.1
+
+0.0 0 100 200 D3u0r0ation40(0Minu5te00s) 600 700 800
+
+S0.V20H0N
+
+Trained
+
+Using
+
+Small
+
+CNN
+
+Architecture
+Hyperband (by
+
+Tuning
+rung)
+
+Task
+
+0.175 Hyperband (by bracket)
+
+0.150
+
+Fabolas Random
+
+0.125
+
+0.100
+
+0.075 0.050
+
+0.025 0.000 0
+
+500 Du10ra0t0ion (Min1u5t0e0s) 2000
+
+2500
+
+Test Error
+
+Figure 6: Sequential Experiments (1 worker) with Hyperband running synchronous SHA. Hyperband (by rung) records the incumbent after the completion of a SHA rung, while Hyperband (by bracket) records the incumbent after the completion of an entire SHA bracket. The average test error across 10 trials of each hyperparameter optimization method is shown in each plot. Dashed lines represent min and max ranges for each tuning method.
+
+Klein et al. (2017) showed that Fabolas can be over an order of magnitude faster than existing Bayesian optimization methods. Additionally, the empirical studies presented in Klein et al. (2017) suggest that Fabolas is faster than Hyperband at finding a good configuration. We conducted our own experiments to compare Fabolas with Hyperband on the following tasks:
+
+10
+
+Under review as a conference paper at ICLR 2019
+1. Tuning an SVM using the same search space as Klein et al. (2017). 2. Tuning a convolutional neural network (CNN) with the same search space as Li et al. (2017)
+on CIFAR-10 (Krizhevsky, 2009). 3. Tuning a CNN on SVHN (Netzer et al., 2011) with varying number of layers, batch size,
+and number of filters (see Appendix A.4 for more details).
+In the case of the SVM task, the allocated resource is number of training datapoints, while for the CNN tasks, the allocated resource is the number of training iterations.
+We note that Fabolas was specifically designed for data points as the resource, and hence, is not directly applicable to tasks (2) and (3). However, freeze-thaw Bayesian optimization (Swersky et al., 2014), which was specifically designed for models that use iterations as the resource, is known to perform poorly on deep learning tasks (Domhan et al., 2015). Hence, we believe Fabolas to be a reasonable competitor for tasks (2) and (3) as well, despite the aforementioned shortcoming.
+We use the same evaluation framework as Klein et al. (2017), where the best configuration, also known as the incumbent, is recorded through time and the test error is calculated in an offline validation step. Following Klein et al. (2017), the incumbent for Hyperband is taken to be the configuration with the lowest validation loss and the incumbent for Fabolas is the configuration with the lowest predicted validation loss on the full dataset. Moreover, for these experiments, we set  = 4 for Hyperband.
+Notably, when tracking the best performing configuration for Hyperband, we consider two approaches. We first consider the approach proposed in Li et al. (2018) and used by Klein et al. (2017) in their evaluation of Hyperband. In this variant, which we refer to as "Hyperband (by bracket)," the incumbent is recorded after the completion of each SHA bracket. We also consider a second approach where we record the incumbent after the completion of each rung of SHA to make use of intermediate validation losses, similar to what we propose for ASHA (see discussion in Section 3.3 for details). We will refer to Hyperband using this accounting scheme as "Hyperband (by rung)." Interestingly, by leveraging these intermediate losses, we observe that Hyperband actually outperforms Fabolas.
+In Figure 6, we show the performance of Hyperband, Fabolas, and random search. Our results show that Hyperband (by rung) is competitive with Fabolas at finding a good configuration and will often find a better configuration than Fabolas with less variance. Note that Hyperband loops through the brackets of SHA, ordered by decreasing early-stopping rate; the first bracket finishes when the test error for Hyperband (by bracket) drops. Hence, most of the progress made by Hyperband comes from the bracket with the most aggressive early-stopping rate, i.e. bracket 0.
+A.2 EXPERIMENT DETAILS
+In the below sections, we detail the experimental setup for the benchmarks in Section 4.
+A.3 EXPERIMENTS IN SECTION 4.1 AND SECTION 4.2
+We use the usual train/validation/test splits for CIFAR-10, evaluate configurations on the validation set to inform algorithm decisions, and report test error. These experiments were conducted using g2.2xlarge instances on Amazon AWS.
+For both benchmark tasks, we run SHA with n = 256,  = 4, s = 0, and set r = R/256, where R = 30000 iterations of stochastic gradient descent. Hyperband loops through 5 brackets of SHA, moving from bracket s = 0, r = R/256 to bracket s = 4, r = R. We run ASHA and asynchronous Hyperband with the same settings as the synchronous versions. We run PBT with a population size of 25, which is between the recommended 20­40 (Jaderberg et al., 2017). Furthermore, to help PBT evolve from a good set of configurations, we randomly sample configurations until at least half of the population performs above random guessing.
+We implement PBT with truncation selection for the exploit phase, where the bottom 20% of configurations are replaced with a uniformly sampled configuration from the top 20% (both weights and hyperparameters are copied over). Then, the inherited hyperparameters pass through an exploration phase where 3/4 of the time they are either perturbed by a factor of 1.2 or 0.8 (discrete hyperparameters are perturbed to two adjacent choices), and 1/4 of the time they are randomly resampled. Configurations are considered for exploitation/exploration every 1000 iterations, for a total of 30
+11
+
+Under review as a conference paper at ICLR 2019
+
+rounds of adaptation. For the experiments in Section 4.2, to maintain 100% worker efficiently for PBT while enforcing that all configurations are trained for within 2000 iterations of each other, we spawn new populations of 25 whenever a job is not available from existing populations.
+
+Hyperparameter
+batch size # of layers # of filters weight init std 1 weight init std 2 weight init std 3 l2 penalty 1 l2 penalty 2 l2 penalty 3 learning rate
+
+Type
+choice choice choice continuous continuous continuous continuous continuous continuous continuous
+
+Values
+{26, 27, 28, 29}
+{2, 3, 4}
+{16, 32, 48, 64} log [10-4, 10-1]
+log [10-3, 1] log [10-3, 1] log [10-5, 1] log [10-5, 1] log [10-3, 102] log [10-5, 101]
+
+Table 1: Hyperparameters for small CNN architecture tuning task.
+
+Vanilla PBT is not compatible with hyperparameters that change the architecture of the neural network, since inherited weights are no longer valid once those hyperparameters are perturbed. To adapt PBT for the architecture tuning task, we fix hyperparameters that affect the architecture in the explore stage. Additionally, we restrict configurations to be trained within 2000 iterations of each other so a fair comparison is made to select configurations to exploit. If we do not impose this restriction, PBT will be biased against configurations that take longer to train, since it will be comparing these configurations with those that have been trained for more iterations.
+A.4 EXPERIMENTAL SETUP FOR THE SMALL CNN ARCHITECTURE TUNING TASK
+This benchmark tunes a multiple layer CNN network with the hyperparameters shown in Table 1. This search space was used for the small architecture task on SVHN (Section A.1) and CIFAR-10 (Section 4.2). The # of layers hyperparameter indicate the number of convolutional layers before two fully connected layers. The # of filters indicates the # of filters in the CNN layers with the last CNN layer having 2 × # filters. Weights are initialized randomly from a Gaussian distribution with the indicated standard deviation. There are three sets of weight init and l2 penalty hyperparameters; weight init 1 and l2 penalty 1 apply to the convolutional layers, weight init 2 and l2 penalty 2 to the first fully connected layer, and weight init 3 and l2 penalty 3 to the last fully connected layer. Finally, the learning rate hyperparameter controls the initial learning rate for SGD. All models use a fixed learning rate schedule with the learning rate decreasing by a factor of 10 twice in equally spaced intervals over the training window. This benchmark is run on the SVHN dataset (Netzer et al., 2011) following Sermanet et al. (2012) to create the train, validation, and test splits.
+A.5 EXPERIMENTAL SETUP FOR LARGE-SCALE BENCHMARKS
+The hyperparameters for the LSTM tuning task comparing ASHA to Vizier on the Penn Tree Bank (PTB) dataset presented in Section 4.3 is shown in Table 2. Note that all hyperparameters are tuned on a linear scale and sampled uniform over the specified range. The inputs to the LSTM layer are embeddings of the words in a sequence. The number of hidden nodes hyperparameter refers to the number of nodes in the LSTM. The learning rate is decayed by the decay rate after each interval of decay steps. Finally, the weight initialization range indicates the upper bound of the uniform distribution used to initialize all weights. The other hyperparameters have their standard interpretations for neural networks. The default training (929k words) and test (82k words) splits for PTB are used for training and evaluation (Marcus et al., 1993). We define resources as the number of training records, which translates into the number of training iterations after accounting for certain hyperparameters.
+For the task tuning a modern LSTM architecture, we use the code provided by Merity et al. (2018) and construct a search space around the hyperparameter setting that they used. The hyperparameters that we considered along with their associated ranges are shown in Table 3.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Hyperparameter batch size
+# of time steps # of hidden nodes
+learning rate decay rate decay epochs clip gradients dropout probability weight init range
+
+Type discrete discrete discrete continuous continuous discrete continuous continuous continuous
+
+Values [10, 80] [10, 80] [200, 1500] log [0.01, 100.] [0.01, 0.99] [1, 10] [1, 10] [0.1, 1.] log [0.001, 1]
+
+Table 2: Hyperparameters for PTB LSTM task.
+
+Hyperparameter learning rate dropout (rnn)
+dropout (input) dropout (embedding)
+dropout (output) dropout (dropconnect)
+weight decay batch size time steps
+
+Type continuous continuous continuous continuous continuous continuous continuous
+discrete discrete
+
+Values log [10, 100] [0.15, 0.35]
+[0.3, 0.5] [0.05, 0.2] [0.3, 0.5] [0.4, 0.6] log [0.5e - 6, 2e - 6] [15, 20, 25] [65, 70, 75]
+
+Table 3: Hyperparameters for 16 GPU near state-of-the-art LSTM task.
+
+13
+
+

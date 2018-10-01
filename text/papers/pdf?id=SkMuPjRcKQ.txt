@@ -1,0 +1,2177 @@
+Under review as a conference paper at ICLR 2019
+
+000 FEED-FORWARD PROPAGATION IN PROBABILISTIC
+001
+002 NEURAL NETWORKS WITH CATEGORICAL AND MAX
+
+L003
+004 AYERS
+
+005
+
+006 Anonymous authors 007 Paper under double-blind review
+008
+
+009
+
+010
+011 ABSTRACT
+
+012 Probabilistic Neural Networks take into account various sources of stochasticity: 013 input noise, dropout, stochastic neurons, parameter uncertainties modeled as ran014 dom variables. In this paper we revisit the feed-forward propagation method that
+015 allows one to estimate for each neuron its mean and variance w.r.t. mentioned
+
+016 sources of stochasticity. In contrast, standard NNs propagate only point estimates,
+
+017 discarding the uncertainty. Methods propagating also the variance have been pro-
+
+018 posed by several authors in different context. The presented view attempts to
+
+019 clarify the assumptions and derivation behind such methods, relate it to classical
+
+020 NNs and broaden the scope of its applicability. The main technical innovations
+
+021 are new posterior approximations for argmax and max-related transforms, that al-
+
+022
+
+lows for applicability in networks with softmax and max-pooling layers as well as leaky ReLU activations. We evaluate the accuracy of the approximation and
+
+023 suggest a simple calibration. Applying the method to networks with dropout al-
+
+024 lows for faster training and gives improved test likelihoods without the need of
+
+025 sampling.
+
+026
+
+027
+028 1 INTRODUCTION
+
+029
+
+030 Despite the massive success of Neural Networks (NNs) considered as deterministic predictors, there
+
+031
+
+are many scenarios where a probabilistic treatment is highly desirable. One of the best known techniques to improve the generalization is dropout (Srivastava et al., 2014), which introduces mul-
+
+032 tiplicative Bernoulli noise in the network. At test time, however, it is commonly approximated
+
+033 by substituting the mean value of the noise variables. Computing the expectation by Monte Carlo
+
+034 (MC) sampling instead leads to improved test likelihood and accuracy (Srivastava et al., 2014; Gal
+
+035 & Ghahramani, 2015) but is computationally expensive. A challenging problem in NNs is the sen-
+
+036 sitivity of the output to the perturbations of the input, in particular random and adversarial perturba-
+
+037 tions (Moosavi-Dezfooli et al., 2017; Fawzi et al., 2016; Rodner et al., 2016). In Fig. 1 we illustrate
+
+038 the point that the average of the network output under noisy input differs from propagating the clean
+
+039 input. It is therefore desirable to estimate the output uncertainty resulting from the uncertainty of
+
+040 the input. In classification networks, propagating the uncertainty of the input can impact the confi-
+
+041 dence of the classifier and its robustness as shown by Astudillo & da Silva Neto (2011). Ideally, we
+
+042
+
+would like that a classifier is not overconfident when making errors, however such high confidences of wrong predictions are typically observed in NNs. Similarly, when predicting real values (e.g.
+
+043 optical flow estimation), it is desirable to estimate also confidences of such predictions. Taking into
+
+044 account uncertainties from input or dropout allows to predict output uncertainties well correlated
+
+045 with the test error (Kendall & Gal, 2017; Gast & Roth, 2018; Schoenholz et al., 2016). Another im-
+
+046 portant problem is overfitting. Bayesian learning is a sound way of dealing with a finite training set:
+
+047 the parameters are considered as random variables and are determined up to an uncertainty implied
+
+048 by the training data. This uncertainty needs then to be propagated to predictions at the test-time.
+
+049 The above scenarios motivate considering NNs with different sources of stochasticity as Bayesian 050 networks, a class of directed probabilistic graphical models. We focus on the inference problem 051 that consists in estimating the probability of hidden units and the outputs given the network input.
+052 While there exist elaborate inference methods for Bayesian networks (variational, mean field, Gibbs
+
+053
+
+1
+
+Under review as a conference paper at ICLR 2019
+
+054
+
+055
+
+056 Input: image
+
+class
+
+057
+
+with noise
+
+NN
+
+Softmax
+
+probabilities
+
+058
+
+059
+
+060
+
+061
+
+062
+
+063
+
+064
+
+065
+
+066
+
+067
+
+068 Figure 1: Illustrative example of propagating an input perturbed with Gaussian noise N (0, 0.1) 069 through a fully trained LeNet. When the same image is perturbed with different samples of noise, 070 we observe on the output empirical distributions shown as Monte Carlo (MC) histograms. Propa-
+071 gating the clean image results in the estimate denoted AP1 which may be away from the MC mean.
+
+072 Propagating means and variances results in a posterior Gaussian distribution denoted AP2. For the
+073 final class probabilities we approximate the expected value of the softmax. The methods AP1 and 074 AP2 are formally defined in § 2. A quantitative evaluation of this experiment is given in § 5.
+
+075
+076 sampling, etc.), they are computationally demanding and can hardly be applied at the same scale as 077 state-of-the-art NNs.
+
+078
+
+079 Contribution and Related Work We revisit feed-forward propagation methods that perform an
+
+080 approximate inference analytically by propagating means and variances of neurons through all lay-
+
+081 ers of a NN, ensuring computational efficiency and differentiability. This type of propagation has
+
+082
+
+been proposed by several authors under different names: uncertainty propagation (Astudillo & da Silva Neto, 2011) in a very limited setting with no learning, fast dropout training (Wang & Man-
+
+083 ning, 2013), probabilistic backpropagation (Herna´ndez-Lobato & Adams, 2015) in the context of
+
+084 Bayesian learning, assumed density filtering Gast & Roth (2018). Perhaps the most general form is
+
+085 considered by Wang et al. (2016) and termed natural parameter networks. The local reparametriza-
+
+086 tion trick (Kingma et al., 2015) can be viewed as application of the variance propagation method
+
+087 through one layer only and then sampling from the approximate posterior.
+
+088 In these preceding works, for propagation through softmax, sampling or point-wise estimates were 089 used while max-pooling was avoided. Ghosh et al. (2016) proposed an analytic approximation 090 for softmax using two inequalities, but resorted to sampling noting that the approximation was not 091 accurate. Gast & Roth (2018) introduced Dirichlet posterior to overcome the difficulty with softmax, 092 however, the softmax is still used in the model internally. Furthermore, typically used expressions
+093 for ReLU activations involve differences of error functions and may be unstable.
+
+094 We propose a latent variable view of probabilistic NNs that links them closer to their deterministic 095 counterparts and allows us to develop better approximations. Our technical contribution includes the 096 development of numerically suitable approximations for propagating means and variances through 097 "multivariate" activation functions such as softmax for categorical variables and other max-related 098 non-linearities: max-pooling and leaky ReLU. This makes the whole framework practically opera-
+099 tional and applicable to a wider class of problems.
+
+100 Experimentally, we verify the accuracy of the proposed propagation in approximating the true poste101 rior and compare it to the standard propagation by NN, which has not been questioned before. This 102 verification shows that the proposed scheme has better accuracy than standard propagation in all 103 tested scenarios. We further demonstrate its potential utility in the end-to-end learning with dropout.
+104
+
+105
+
+106
+
+107
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+108 2 PROBABILISTIC NNS AND FEED-FORWARD EXPECTATION PROPAGATION
+109
+
+110 In probabilistic NNs, all units are considered to be random variables. In a typical network, units are 111 organized by layers. There are l layers of hidden random vectors Xk, k = 1, . . . l and X0 is the
+112 input layer. Each vector Xk has nk components (layer units) denoted Xik. The network is modeled 113 as a conditional Bayesian network (aka belief network, Neal (1992)) defined by the pdf
+
+114 115
+
+p(X1,...l | X0) =
+
+l k=1
+
+p(X k
+
+|
+
+X
+
+k-1).
+
+(1)
+
+116 We further assume that the conditional distribution p(Xk | Xk-1) factorizes and depends on a lin-
+
+117
+
+ear combination of the random vector Xk-1, p(Xk | Xk-1) =
+
+nk i=1
+
+p(Xik
+
+| Aki ),
+
+where
+
+Aki
+
+=
+
+118 (W kXk-1)i are activations. We will denote values of r.v. Xk by xk, so that the event Xk = xk can
+
+119 be unambiguously denoted just by xk. Notice also that we consider biases of the units implicitly
+
+120 via an additional input fixed to value one. The posterior distribution of each layer k > 0, given the 121 observations x0, recurrently expresses as
+
+122 123
+
+p(Xk | x0) = EXk-1| x0 p(Xk | Xk-1) = p(Xk | xk-1)p(xk-1 | x0) dxk-1.
+
+(2)
+
+124 The posterior distribution of the last layer, p(Xl | x0) is the prediction of the model.
+125
+126 We now explain how the standard NNs with injected noises give rise to the Bayesian networks of 127 the form (1). Consider a deterministic nonlinear mapping applied to a "noised" activation:
+
+128
+
+Xk = f (Ak - Zk),
+
+(3)
+
+129 130
+
+where f : R  R is applied component-wise and Zik are independent real-valued random variables with a known distribution (such as the standard normal distribution). From representation (3) we
+
+131 can recover the conditional cdf of the belief network FXk | Xk-1 (u) = E[[f (W kXk-1 - Zk) 
+
+132 u | Xk-1]] and the respective conditional density.
+
+133
+
+134 Example 1. Stochastic binary unit (Williams, 1992). Let Y be a binary valued r.v. given by Y = 135 (A - Z), where  is the Heaviside step function and Z is noise with cdf FZ . Then P(Y =1 | A) = 136 FZ (A). This is easily seen from
+
+137
+
+P(Y =1 | A) = P((A - Z) = 1 A) = P(Z  A|A = FZ(A).
+
+(4)
+
+138 139
+
+If, for instance, Z is distributed with standard logistic distribution, then P(Y =1 | A) = S(A), where S is the logistic sigmoid function S(a) = (1 + e-a)-1.
+
+140
+
+141 In general, the expectation (2) is intractable to compute and the resulting posterior can have a com142 binatorial number of modes. However, in many cases of interest it is suitable to approximate the 143 posterior p(Xk | x0) for a given x0 with a factorized distribution q(Xk) = i q(Xik). We expect 144 that in many recognition problems, given the input image, the hidden states and the final prediction
+145 are concentrated around some specific values (unlike in generative problems, where the posterior
+146 distributions are typically multi-modal). A similar factorized approximation is made for the activa147 tions. The exact shape of distributions q(Xik) and q(Aik) can be chosen appropriately depending on 148 the unit type: e.g., a Bernoulli distribution for binary Xik a Gaussian or Logistic distribution for real149 valued activations Aik. We will rely on the fact that the mean and variance are sufficient statistics for 150 such approximating distributions. Then, as long as we can calculate these sufficient statistics for the 151 layer of interest, the exact shape of distributions for the intermediate outputs need not be assumed.
+
+152 The information-theoretic optimal factorized approximation to the posterior p(Xk | x0), minimizing 153 the forward KL divergence KL(p(Xk | x0) q(Xk)), is given by marginals i p(Xik | x0). Fur154 thermore, in the case when q(Xik) is from to the exponential family, the optimal approximation is 155 given by matching the moments of q(Xik) to p(Xik | x0). The factorized approximation then can be 156 computed layer-by-layer, assuming that the preceding layer was already approximated. Substituting 157 q(Xk-1) for p(Xk-1 | x0) in (2) results in the procedure
+
+158 159
+
+q(Xik) = Eq(Xk-1) p(Xik | Xk-1) = p(Xik | xk-1) q(xki -1) dxk-1.
+
+(5)
+
+160 i
+
+161 Thus we need to propagate the factorized approximation layer-by-layer, by the marginalization update (5) until we get the approximate posterior output q(Xl). This method is closely related to the
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+162 assumed density filtering (see Minka, 2001), in which, in the context of learning, one chooses a 163 family of distributions that is easy to work with and "projects" the true posterior onto the family 164 after each measurement update. Here, the projection takes place after propagating each layer for the
+165 purpose of the inference.
+
+166
+
+167 3 PROPAGATION IN BASIC LAYERS
+168
+
+169 We now consider a single layer at a time and detail how (5) is computed (approximately) for a 170 layer consisting of a linear mapping A = wTX (scalar output, for clarity) and a non-linear noisy 171 activation Y = f (A - Z).
+172
+
+173 Linear Mapping Activation A in a typical deep network is a sum of hundreds of stochastic inputs 174 X (from the previous layer). This justifies the assumption that A - Z (where Z is a smoothly
+175 distributed injected noise) can be approximated by a uni-modal distribution fully specified by mean 176 and variance as e.g. normal or logistic distribution1. Knowing the statistics of Z, it is therefore
+177 sufficient to estimate the mean and the variance of the activation A given by
+
+178
+
+µ = E[A] = wTE[X] = wTµ,
+
+(6a)
+
+179 180
+
+ 2 = ij wiwj Cov[X]ij  i wi2i2,
+
+(6b)
+
+181 where µ is the mean and Cov[X] is the covariance matrix of X. The approximation of the covariance
+
+182 matrix by its diagonal is implied by the factorization assumption for the activations A.
+
+183
+184 Nonlinear Coordinate-wise Mappings Let A be a scalar r.v. with statistics µ, 2 and let Y = 185 f (A-Z) with independent noise Z. Assuming that A = A-Z is distributed normally or logistically 186 with statistics µ~, ~2, we can approximate the expectation and variance of Y = f (A)
+
+187 188
+
+µi = Eq(A)[f (A)], i2 = Eq(A)[f 2(A)] - µi2
+
+(7)
+
+189 by analytic expressions for most of the commonly used non-linearities. For binary variables, oc190 curring in networks with Heaviside nonlinearities, the distribution q(Y ) is fully described by one 191 parameter µi = E[Y ], and the propagation rule (5) becomes
+
+192
+
+µi = Eq(A) p(Y =1 | Ak) , i2 = µi(1 - µi),
+
+(8)
+
+193 where the variance is dependent but will be needed in propagation through other layers.
+
+194
+195 Example 2. Heaviside Nonlinearity with Noise. Consider the model Y = (A - Z), where Z is 196 logistic noise. The statistics of A = A-Z are given by µ~ = µ and ~2 = 2 +S2 , where S2 = 2/3
+
+197 is the variance of Z. Assuming noisy activations A to have logistic distribution, we obtain the mean
+
+198 of Y as:
+
+199 200
+
+µ
+
+= E[(A~)] = P(A  0) = P
+
+A - µ~ -µ~ 
+~/S ~/S
+
+=. S µ~ ~/S
+
+=S
+
+µ , (9)
+2/S2 + 1
+
+201 202
+
+where
+
+the
+
+dotted
+
+equality
+
+is
+
+due
+
+to
+
+that
+
+-(A~
+
+-
+
+µ~)
+
+S ~
+
+has standard logistic distribution and that the
+
+203 sigmoid function S is its cdf. The variance of Y is expressed as in (8).
+
+204 Example 3. Rectified Linear Unit (ReLU) Assuming the activation A to be normally distributed,
+
+205
+
+the mean of Y = max(0, A) expresses as µ
+
+=
+
+ -
+
+max(0,
+
+a)p(a)da
+
+=
+
+ 0
+
+ap(a)da
+
+=
+
+206 µ(µ/) + (µ/), i.e., expresses analytically using the pdf  and cdf  of the standard nor-
+
+207 mal distribution. The variance can be expressed as well. These expressions, used by Frey & Hinton
+
+208 (1999); Herna´ndez-Lobato & Adams (2015) rely on function , which has limited numerical ac209 curacy and may lead to negative output variances. In § 4.4 we propose an approximation for leaky 210 ReLU, which is numerically stable and is suitable for ReLU as well.
+
+211
+
+212
+
+Fig. 2 shows the approximations for propagation through Heaviside, ReLU and leaky ReLU nonlinearities. Note that all expectations over a smoothly distributed A result in smooth propagation
+
+213 functions regardless the smoothness (or lack thereof) of the original function.
+
+214
+
+215 1Note, the prior works assumes that A alone approaches Gaussian, which is a stronger assumption, consid-
+
+ering for example binary input X.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+216 217 2.0 218 1.5 219 1.0
+220 0.5
+
+Heaviside
+±3
+
+ReLu
+8 ±3 6
+4
+
+LReLU(0.1)
+8 ±3 6
+4
+
+221 0.0 2 2
+
+222 0.5 0 0
+
+223 1.0 2 2 224 10 5 0 5 10 6 4 2 0 2 4 6 6 4 2 0 2 4 6
+
+225
+
+226 Figure 2: Propagation for the Heaviside function: Y = [[A0]], ReLU: Y = max(0, A) and leaky
+227 ReLU: Y = max(A, A). Red: activation function. Black: an exemplary input distribution with 228 mean µ = 3, variance 2 = 1 shown with support µ ± 3. Dashed blue: the approximate mean 229 µ of the output versus the input mean µ. The variance of the output is shown as blue shaded area 230 µ ± 3 .
+
+231
+
+232 233 234
+
+Summarizing, we can represent the approximate inference in networks with binary and continuous variables as a feed-forward moment propagation: given the approximate moments of Xk-1 | x0, the moments of Xik | x0 are estimated via (8), (7) ignoring dependencies between Xjk-1 | x0 on each
+
+step (as implied by the factorized approximation).
+
+235
+
+236
+AP1 and AP2 The standard NN can be viewed as a further simplification of the proposed method: 237 it makes the same factorization assumption but does not compute variances of the activations (6b) 238 and propagates only the means. Consequently, a zero variance is assumed in propagation through 239 non-linearities. In this case the expected values of mappings such as (A) and ReLU(A) are just 240 these functions evaluated at µ. For injected noise models we obtain smoothed versions: e.g., substi241 tuting  = 0 in the noisy Heaviside function (9) recovers the standard sigmoid function. We thus
+242 can view standard NNs as making a simpler from of factorized inference in the same Bayesian NN
+243 model. We designate this simplification (in figures and experiments) by AP1 and the method using
+244 variances by AP2 ("AP" stands for approximation).
+
+245
+
+246 4 PROPAGATION IN CATEGORICAL AND MAX LAYERS
+247
+
+248 In this section we present our main technical contribution: propagation rules for argmax, softmax
+
+249 and max mappings, that are non-linear and multivariate. Similar to how sigmoid function is ob-
+
+250 tained as the expectation of the Heaviside function with injected noise in Example 2, we observe
+
+251 that softmax layer is the expectation of argmax with injected noise. It will follow that the stan-
+
+252 dard NN with softmax layer can be viewed as AP1 approximation of argmax layer with injected
+
+253 noise. We propose a new approximation for the argmax posterior probability that takes into account
+
+254 uncertainty (variances) of the activations and enables propagation through argmax and softmax
+
+255 layers. Next, we observe that the maximum of several variables (used in max-pooling) can be ex-
+
+256
+
+pressed through argmax. This gives a new one-shot approximation of the expected maximum using argmax probabilities. Finally, we consider the case of leaky ReLU, which is a maximum of two
+
+257 correlated variables. The proposed approximations are relatively easy to compute and differentiable,
+
+258 which facilitates their usage in NNs.
+
+259
+
+260 4.1 ARGMAX AND SOFTMAX
+261
+
+262 The softmax function, most commonly used to model a categorical distribution, ubiquitous in clas263 sification, is defined as p(Y =y|x) = exy / k exk , where y is the class index. We explore the fol264 lowing latent variable representation known in the theory of discrete choice: p(Y =y|x) = E[Y y],
+265 where Y  {0, 1}n is the indicator of the noisy argmax: Y y = [[argmaxk(Xk + k) = y]] and k 266 follows the standard Gumbel distribution. Standard NN implements the AP1 approximation of this
+267 latent model: conditioned on X = x, the expectation over latent noises  is the softmax(x).
+
+268 For the AP2 approximation we need to compute the expectation w.r.t. both: X and , or, what is the 269 same, to compute the expectation of softmax(X) over X. This task is difficult, particularly because
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+270 variances of Xi may differ across components. First, we derive an approximation for the expectation 271 of argmax indicator without injected noise:
+
+272
+
+273
+
+Y y = [[argmax Xk = y]].
+k
+
+(10)
+
+274 The injected noise case can be treated by simply increasing the variance of each Xi by the variance 275 of standard Gumbel distribution.
+
+276
+277 Let Xk , k = 1, . . . , n be independent, with mean µk and variance k2. We need to estimate
+
+278
+
+E[Y y] = EX [[Xy - Xk  0 k = y]],
+
+(11)
+
+279 280 281
+
+The vector U with components Uk = Xy - Xk for k = y is from Rn-1 with component means
+µ~k = µy - µk and component variances ~k2 = y2 + k2. Note the components of U are not independent.
+
+282
+
+283 We approximate the distribution of U by the multivariate logistic distribution defined by Malik &
+
+284 Abraham (1973). This choice is motivated by the extrapolation of the case with two input variables.
+
+285 The approximation is made by shifting and rescaling the distribution in order to match the means
+
+286 287 288
+
+and marginal variances. The marginal distributions of standard multivariate logistic distribution are
+
+standard logistic with zero mean and variance S. Thus the approximation assumes that (Uk -
+
+µ~k)S /~k is standard (n-1)-variate logistic with the cdf given by Sn-1(u) = 1+
+
+1 k e-uk
+
+(Malik
+
+& Abraham, 1973, eq. 2.5). It allows us to evaluate the necessary probability:
+
+289
+
+290 291
+
+q(y) = E[Y y] = P(U  0) = P
+
+Uk - µ~k  -µ~k k = y ~k/S ~k/S
+
+= Sn-1
+
+-µ~k ~k /S
+
+.
+
+(12)
+
+292
+293 Expanding µ~, ~2 and noting that µk - µy = 0 for y = k, we obtain the approximation
+
+294
+
+q(y) = exp µk - µy
+
+-1
+.
+
+295 296
+
+k (k2 + y2)/S2
+
+(13)
+
+297 This approximation has linear memory complexity but requires quadratic time in the number of
+
+298 inputs, which may be prohibitive for applications in NNs. We can simplify it further as follows. The
+
+299 expression (13) simplifies when we can approximate
+
+300 301 302
+
+µk - µy
+
+ ak - ay
+
+(k2 + y2)/S2
+
+(14)
+
+303 with some choice of ak for all k. In this case we obtain q(y) = (softmax(a))y. We therefore
+
+304 propose the approximation
+
+305 306 307
+
+q = softmax(a) with ak = µk/
+
+k2
+
++
+
+n¯2 - k2 n-1
+
+/S2 ,
+
+(15)
+
+308
+
+where
+
+¯2
+
+=
+
+1 n
+
+k k2 is the average variance.
+
+309
+
+Importantly, the approximation is consistent with the already obtained results for the following spe-
+
+310 311 312
+
+cial cases. In the case of two input variables, for the simplified approximation with ak set as (15) we have ak = µk/ (12 + 22)/S2 , i.e. (14) holds as equality, and we obtain
+
+313 314
+
+ea1 1
+
+µ~
+
+q(y=1) = softmax(a1, a2)1 = ea1 + ea2 = 1 + ea2-a1 = S(a2 - a1) = S ~/S ,
+
+(16)
+
+315 which matches the approximation of the Heaviside posterior with input X1 - X2 with mean µ~ 316 and variance ~2. As a consequence expectation of softmax (argmax indicator with injected noise) 317 matches the expectation of sigmoid (Heaviside function with injected noise) given by (9).
+
+318 319 320
+
+In the case when all variances k2 are equal: k = , the approximation (15) results in q = softmax(  µk ).
+
+321 2/S
+
+(17)
+
+322 More specifically, when Xk = µk + k, where k is standard Gumbel (with variance 2/6 =
+
+323 S2 /2) we obtain that q = softmax(µk), i.e. recover the exact expectation of noisy argmax with
+
+deterministic inputs used by AP1.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+324 4.2 MAXIMUM OF TWO VARIABLES
+325
+
+326 Let us consider the function max(X1, X2), which is important for leaky ReLU and maxOut. In
+
+327 this case, exact expressions for the moments for the maximum of two Gaussian random variables
+
+328
+
+X1, X2 are known (Nadarajah & Kotz, 2008).
+
+Denoting s
+
+=
+
+(12
+
++
+
+22
+
+-
+
+2
+
+Cov[X1,
+
+X2
+
+])
+
+1 2
+
+and
+
+329 a = (µ1-µ2)/s, the mean and variance of max(X1, X2) can be expressed as:
+
+330 331
+
+µ = µ1(a) + µ2(-a) + s(a),
+
+(18a)
+
+332
+
+ 2 = (12 + µ12)(x) + (22 + µ22)(-a) + (µ1 + µ2)s(a) - µ 2.
+
+(18b)
+
+333 These expressions involving the normal cdf , will not be used directly. We simplify them in the 334 case of leaky ReLU and use as a reference for maximum of multiple variables. The variance can be
+335 further expressed as
+
+336 337
+
+ 2 = 12(a) + 22(-a) + s2(a2(a) + a(a) - (a(a) + (a))2).
+
+(19)
+
+338 We observe that the function of one variable a2(a) + a(a) - (a(a) + (a))2 is always negative,
+339 quickly vanishes with |a| increasing and is above -0.16. By neglecting it, we obtain a rather tight 340 upper bound  2  12(a)+22(1-(a)). Note that (a), which serves as interpolating coefficient 341 between 12 and 22, is precisely the probability of the event X1 > X2. This suggests the idea of 342 estimating mean and variance of max from the argmax probabilities in the multivariate case.
+
+343
+344 4.3 MAXIMUM OF SEVERAL VARIABLES
+
+345 346
+
+Let Xk , k = 1, . . . , n be independent, with mean µk and variance k2. The moments of the maxi-
+
+347 348
+
+mum Y = maxk Xk, assuming the distributions of Xk are known, can be computed by integration with the CDF of Y (Ross, 2010) given by FY (y) = P(Xk  y k) = k FXk (y). However, this requires numerical 1D integration. We seek a simpler approximation. One option is to compose the
+
+349 maximum of n > 2 variables hierarchically using maximum of two variables § 4.2 and assume that
+
+350 the intermediate results are distributed normally.
+
+351
+
+352 353
+
+We propose a new non-trivial one-shot approximations for the mean and variance assuming that
+the argmax probabilities qk = P(Xk  Xj j) are already estimated. The derivation of these approximations and proofs of their accuracy are given in § A.
+
+354
+
+355 Proposition 1. Assuming Xk are logistic (µk, k2), the mean of Y = maxk Xk can be approximated 356 (upper bounded) by
+
+357 358
+
+µ
+
+k
+
+qk µ^k ,
+
+where
+
+µ^k
+
+= µk +
+
+k qk S
+
+H
+
+(qk
+
+),
+
+(20)
+
+359
+
+360 where H(qk) is the entropy of the Bernoulli distribution with probabilities qk. The variance of Y
+
+361 can be approximated as
+
+362 363
+
+ 2  k2S(a + bS-1(qk)) + qk(µ^k - µ )2,
+
+(21)
+
+kk
+
+364
+
+365 where a = -1.33751 and b = 0.886763 are coefficients originating from a Taylor expansion.
+
+366
+
+367 Notice the similarity to the expressions (18a) and (19) (identifying q1, q2 with argmax probabilities
+
+368
+
+(a) ,(-a), resp.). Also notice that the entropy is non-negative, and thus increases µ when the argmax is ambiguous, as expected in the extreme value theory.
+
+369
+
+370
+371 4.4 LEAKY RELU
+
+372 LReLU is a popular max-related function defined as: Y = max(X, X). We use the exact ex373 pressions for the case of two correlated normal variables (18a) and (19). Assume that  < 1, let 374 X2 = X1 and denote µ = µ1 and 2 = 12. Then µ2 = µ, 22 = 22 and Cov[X1, X2] = 375 Cov[X1, X1] = 2. We have s = (1 - ) and a = (µ1 - µ2)/s = µ(1 - )/s = µ/. The
+376 mean µ expresses as
+
+377
+
+µ = µ( + (1 - )(a)) + (1 - )(a).
+
+(22)
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+378 The variance  2 expresses as
+379
+
+380
+
+2 (a) + 2(1 - (a)) + (1 - )2 a2(a) + a(a) - (a(a) + (a))2
+
+(23)
+
+381
+382 = 2(2 + 2(1 - )(a) + (1 - )2R(a)),
+
+(24)
+
+383 where R(a) = a(a)+(a2 +1)(a)-(a(a)+(a))2 is a sigmoid-shape function of one variable.
+
+384 In practice we approximate  2 with the simpler function
+
+385 386
+
+ 2  2(2 + (1 - 2)S(a/t)),
+
+(25)
+
+387 where t = 0.3758 is set by fitting the approximation. The approximation is shown in Fig. 2.
+
+388
+
+389 5 EXPERIMENTS
+390
+
+391 In the experiments we evaluate the accuracy of the proposed approximation and compare it to the 392 standard propagation. We also test the method in the end-to-end learning and show that with a 393 simple calibration it achieves better test likelihoods than the state-of-the-art. Full details of the 394 implementation, training protocols, used datasets and networks are given in § B. The running time
+395 of AP2 is 2× more for a forward pass and 2-3× more for a forward-backward pass than that of AP1.
+
+396
+
+397 5.1 APPROXIMATION ACCURACY
+
+398
+
+399 We conduct two experiments: how well the proposed method approximates the real posterior of
+
+400 neurons, w.r.t. noise in the network input and w.r.t. dropout. The first case (illustrated in Fig. 1) is
+
+401 studied on the LeNet5 model of Lecun et al. (2001), a 5-layer net with max pooling detailed in § B.4,
+
+402 403
+
+trained on MNIST dataset using standard methods. We set LReLU activations with  = 0.01 to test the proposed approximations. We estimate the ground truth statistics µ,  of all neurons by the Monte Carlo (MC) method: drawing 1000 samples of noise per input image and collecting sample-
+
+404 based statistics for each neuron. Then we apply AP1 to compute µ1 and AP2 to compute µ2 and 2
+
+405 for each unit from the clean input and known noise variance 0. The error measure of the means
+
+406 µ is the average |µ - µ| relative to the average . The averages are taken over all units in the
+
+407 layer and over input images. The error of the standard deviation  is the geometric mean of /,
+
+408 representing the error as a factor from the true value (e.g., 1.0 is exact, 0.9 is under-estimating and
+
+409 1.1 is over-estimating). Table 1 shows average errors per layer and points the main observation:
+
+410 that AP2 is more accurate than AP1 but both methods suffer from the factorization assumption. The
+
+411 variance computed by AP2 provides a good estimate and the estimated categorical distribution by
+
+412 propagating the variance through softmax is much closer to the MC estimate.
+
+413 Next, we study a widely used ALL-CNN network § B.4 by Springenberg et al. (2015) trained with 414 standard dropout on CIFAR-10. Bernoulli dropout noise with dropout rate 0.2 is applied after each 415 activation. The accuracies of estimated statistics w.r.t. dropout noises are shown in Table 2. Here, 416 each layer receives uncertainty propagated from preceding layers, but also new noises are mixed-in 417 in each layer, which works in favor of the factorization assumption. The results are shown in Ta418 ble 2. Observe that GT noise variance  changes significantly across layers, up to 1-2 orders and 419 AP2 gives a useful estimate. Furthermore, having estimated the average factors suggests a simple 420 calibration.
+
+421 Calibration We divide the variance in the last layer by the average factor / estimated on the 422 validation set. With this method, denoted AP2 calibrated, we get significantly better test likelihoods 423 in the end-to-end learning experiment.
+424
+
+425 5.2 ANALYTIC NORMALIZATION
+426
+
+427 The AP2 method can be used to approximate neuron statistics w.r.t. the input chosen at random from
+428 the training dataset as was proposed by Shekhovtsov & Flach (2018). Instead of propagating sample 429 instances, the method takes the dataset statistics (µ0, (0)2) and propagates them once through all
+430 network layers, averaging over spatial dimensions. The obtained neuron mean and variance are then 431 used to normalize the output the same way as in batch normalization (Ioffe & Szegedy, 2015). This
+normalization leads to a better conditioned initialization and training and is batch-independent. We
+
+8
+
+Under review as a conference paper at ICLR 2019
+
+432
+
+Conv LReLU MaxPool Conv LReLU MaxPool FC LReLU FC LReLU FC Softmax
+
+433
+
+434 Noisy input N (0, 10-4)
+
+435  0.03 0.02 0.02 0.06 0.03 0.03 0.09 0.05 0.10 0.05 0.11
+
+436
+
+µ1 0.02 0.19 0.37 0.84 0.43 0.52 1.20 0.66 1.16 0.62 1.25 KL 3.5e-4 µ2 0.02 0.02 0.13 0.29 0.13 0.17 0.37 0.21 0.36 0.20 0.39 KL 3.3e-5
+
+437 2 1.00 1.05 1.25 1.06 1.06 1.12 1.09 1.10 1.03 1.04 0.96
+
+438
+
+Noisy input N (0, 0.01)  0.3 0.16 0.20 0.58 0.24 0.27 0.79 0.47 0.86 0.42 0.92
+
+439 µ1 0.02 0.24 0.53 1.46 0.58 0.70 1.44 0.85 1.40 0.79 1.57 KL 0.36
+
+440 µ2 0.02 0.02 0.21 0.65 0.21 0.31 0.61 0.37 0.67 0.34 0.72 KL 0.05 441 2 1.00 1.10 1.15 1.17 1.22 1.42 1.37 1.59 1.31 1.47 1.23
+
+442 Table 1: Accuracy of approximation of mean and variance statistics for each layer in a fully trained 443 LeNet5 (MNIST) tested with noisy input. Observe the following: MC variance  is growing
+444 significantly from the input to the output; both AP1 and AP2 have a significant drop of accuracy 445 at linear (fc and conv) layers, due to factorized approximation assumption; AP2 approximation of 446 the standard deviation is within a factor close to one, and makes a meaningful estimate, although 447 degrading with depth; AP2 approximation of the mean is more accurate than AP1; the KL divergence 448 from the MC class posterior is improved with AP2.
+
+449 C A C A C A C A C A C A C A C A C P Softmax
+
+450  0 0.26 0.31 0.46 0.86 0.77 1.1 0.78 1.7 0.97 2.2 1.3 1.5 0.89 2 0.74 16 2.8
+
+451 452
+
+µ1 - 0.01 0.02 0.03 0.07 0.06 0.17 0.09 0.19 0.10 0.25 0.11 0.22 0.11 0.21 0.12 0.17 0.38 KL 0.11 µ2 - 0.01 0.02 0.01 0.02 0.02 0.05 0.02 0.06 0.03 0.07 0.04 0.08 0.04 0.09 0.04 0.05 0.14 KL 0.04 2 - 1.00 1.00 1.02 0.88 0.89 0.90 0.95 0.84 0.87 0.77 0.77 0.82 0.85 0.88 0.92 0.69 0.45
+
+453
+
+454 Table 2: Accuracy of approximation of mean and variance statistics for each layer in All-CNN
+
+455 (CIFAR-10) trained and tested with dropout. The table shows accuracies after all layers ( C-
+
+456 457
+
+convolution, A-activation, P-average pooling) and the final KL divergence. A similar effect to propagating input noise is observed: the MC variance  grows with depth; a significant drop of
+
+accuracy is observed in conv and pooling layers which exploit the independence assumption.
+
+458
+
+459
+verify the efficiency of this method for a network that includes the proposed approximations for 460 LReLU and max pooling layers in § B.5 and use it in the end-to-end learning experiment below.
+461
+
+462
+463 5.3 END-TO-END LEARNING WITH ANALYTIC DROPOUT
+
+464 In this experiment we approximate the dropout analytically at training time similar to Wang & Man-
+
+465 ning (2013) but including the new approximations for LReLU and softmax layers. We compare
+
+466 training All-CNN network on CIFAR-10 without dropout, with standard dropout (Srivastava et al.,
+
+467 2014) and analytic (AP2) dropout. All three cases use exactly the same initialization, AP2 nor-
+
+468 malization as discussed above and the same learning setup. Only the learning rate is optimized
+
+469 individually per method § B.3. The dropout layers with dropout rate 0.2 are applied after every ac-
+
+470 tivation and there is no input dropout. Fig. 3 shows the progress of the three methods. The analytic
+
+471 dropout is efficient as a regularizer (reduces overfitting in the validation likelihood), is non-stochastic
+
+472
+
+and progresses faster than standard stochastic dropout. While latter slows the training down due to increased stochasticity of the gradient, the analytic dropout smoothes the loss function and speeds
+
+473 the training up. This is especially visible on the training loss plot Fig. B.3. Furthermore, analytic
+
+474 dropout can be applied as the test-time inference method in a network trained with any variant of
+
+475 dropout. Table 3 shows that AP2, calibrated as proposed above, achieves the best test likelihood,
+
+476 significantly improving SOTA results for this network. Some additional results are given in § B.7.
+
+477 Differently from Wang & Manning (2013), we find that when trained with standard dropout, all test
+
+478 methods achieve approximately the same accuracy and only differ in likelihoods. We believe this is
+
+479 due to the deep CNN in our case that achieves 100% training accuracy.
+
+480 We also attempted comparison with other approaches. Gaussian dropout (Srivastava et al., 2014) 481 performed similarly to standard Bernoulli dropout. Variational dropout Kingma et al. (2015) in 482 our implementation for convolutional networks has diverged or has not reached the accuracy of
+483 the baseline without dropout (we tried correlated and uncorrelated versions with or without local
+484 reparametrization trick and with different KL divergence factors 1, 0.1, 0.01, 0.001).
+
+485
+
+9
+
+Under review as a conference paper at ICLR 2019
+
+486
+487 0.95 488 0.94
+489
+490 0.93
+
+Validation Accuracy
+
+Validation Loss
+AP2 dropout=0.2, lr=0.016 Dropout=0.2, lr=0.013 100 No dropout, lr=0.011
+
+491 0.92
+492
+493 0.91
+
+6 × 10 1
+
+494 0.90
+495
+
+AP2 dropout=0.2, lr=0.016 4 × 10 1
+
+496 0.89
+
+Dropout=0.2, lr=0.013 No dropout, lr=0.011
+
+3 × 10 1
+
+497 498
+
+0.88 0 200 400 600 800 1000 1200
+
+0 200 400 600 800 1000 1200
+
+499
+
+500 Figure 3: Comparison of analytic AP2 dropout with baselines. All methods use AP2 normalization
+
+501
+
+during training. Analytic dropout converges to similar values of stochastic dropout and is faster per iteration. Both methods are efficient in preventing overfitting as seen in the right plot.
+
+502
+
+503
+
+504
+
+SOTA results (Gast & Roth, 2018)
+
+Standard dropout
+
+Analytic dropout
+
+Method
+
+NLL Acc. Test method NLL Acc. Test method NLL Acc.
+
+505 Dropout MC-30 0.327 90.88 AP1
+
+0.434 0.938 AP1
+
+1.86 0.940
+
+506
+
+ProbOut
+
+0.37 91.9 AP2
+
+0.311 0.936 AP2
+
+0.363 0.940
+
+507 AP2 calibrated 0.214 0.937 AP2 calibrated 0.194 0.940
+
+508
+
+MC-10
+
+0.264 0.935 MC-10
+
+0.546 0.919
+
+509
+
+MC-100
+
+0.217 0.937 MC-100
+
+0.281 0.925
+
+510 MC-1000 0.210 0.937 MC-1000 0.243 0.926
+
+511
+512 Table 3: Results for All-CNN on CIFAR-10 test set: negative log likelihood (NLL) and accuracy. 513 Left: state of the art results for this network (Gast & Roth, 2018, table 3). Middle: All-CNN
+trained with standard dropout (our learning schedule and analytic normalization) evaluated using 514 different test-time methods. Observe that "AP2 calibrated" well approximates dropout: the test 515 likelihood is better than MC-100. Right: All-CNN trained with analytic dropout (same schedule 516 and normalization). Observe that "AP2 calibrated" achieves the best likelihood and accuracy.
+517
+
+518 6 CONCLUSION
+519
+
+520 We have revisited the method for approximate inference in probabilistic neural networks that takes 521 into account all sources of stochasticity analytically. The latent variable interpretation allows a
+522 transparent interpretation of standard propagation in NNs as the simplest approximation and the
+
+523 development of variance propagating approximations. We proposed new approximations to LReLU 524 max and argmax functions. This allows analytic propagation in max pooling layers and softmax 525 layer.
+
+526 We measured the quality of the approximation of posterior. The accuracy is improved compared 527 to standard propagation and is sufficient for several use cases such as estimating statistics over
+528 the dataset (normalization) and dropout training, where we report improved test likelihoods. We
+
+529 identified that the weak point of the approximation is the factorization assumption. While modeling
+
+530 correlations is possible (e.g. Rezende & Mohamed, 2015), it is also more expensive and we showed
+531 that a calibration of the cheap methods can give a significant improvement and is a direction for 532 further research. Except as a final layer, argmax and softmax may occur also inside the network, in 533 models such as capsules (Sabour et al., 2017) or multiple hypothesis (Ilg et al., 2018), etc. Further 534 applications of the developed technique may include generative and semi-supervised learning and
+Bayesian model estimation.
+535
+
+536
+537 REFERENCES
+
+538 Ramn Fernndez Astudillo and Joo Paulo da Silva Neto. Propagation of uncertainty through multi539 layer perceptrons for robust automatic speech recognition. In INTERSPEECH, 2011.
+
+10
+
+Under review as a conference paper at ICLR 2019
+540 Anirban DasGupta, S.N. Lahiri, and Jordan Stoyanov. Sharp fixed n bounds and asymptotic ex541 pansions for the mean and the median of a Gaussian sample maximum, and applications to the 542 DonohoJin model. Statistical Methodology, 20:40­62, 2014.
+543
+544 Alhussein Fawzi, Seyed-Mohsen Moosavi-Dezfooli, and Pascal Frossard. Robustness of classifiers: 545 from adversarial to random noise. In NIPS, pp. 1632­1640. 2016.
+546 Brendan J. Frey and Geoffrey E. Hinton. Variational learning in nonlinear Gaussian belief networks. 547 Neural Comput., 11(1):193­213, January 1999.
+548
+549 Yarin Gal and Zoubin Ghahramani. Bayesian convolutional neural networks with Bernoulli approx550 imate variational inference. arXiv:1506.02158, 2015.
+551 Jochen Gast and Stefan Roth. Lightweight probabilistic deep networks. CoRR, abs/1805.11327, 552 2018.
+553
+554 Soumya Ghosh, Francesco Maria Delle Fave, and Jonathan S. Yedidia. Assumed density filtering 555 methods for learning Bayesian neural networks. pp. 1589­1595, 2016.
+556 Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural 557 networks. 2010.
+558
+559 Jose´ Miguel Herna´ndez-Lobato and Ryan P. Adams. Probabilistic backpropagation for scalable 560 learning of Bayesian neural networks. In ICML, pp. 1861­1869, 2015.
+561 Eddy Ilg, Ozgun Cicek, Silvio Galesso, Aaron Klein, Osama Makansi, Frank Hutter, and Thomas 562 Brox. Uncertainty estimates and multi-hypotheses networks for optical flow. In ECCV, 2018.
+563
+564 Sergey Ioffe. Batch renormalization: Towards reducing minibatch dependence in batch-normalized 565 models. CoRR, abs/1702.03275, 2017.
+566 Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by 567 reducing internal covariate shift. In ICML, volume 37, pp. 448­456, 2015.
+568
+569 Alex Kendall and Yarin Gal. What uncertainties do we need in Bayesian deep learning for computer 570 vision? In NIPS, 2017.
+571 Diederik P Kingma, Tim Salimans, and Max Welling. Variational dropout and the local reparame572 terization trick. In NIPS, pp. 2575­2583. 2015.
+573
+574 Yann Lecun, Leon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to 575 document recognition. In Intelligent signal processing, pp. 306­351, 2001.
+576 Henrick J. Malik and Bovas Abraham. Multivariate logistic distributions. The Annals of Statistics, 577 1(3):588­590, 1973.
+578
+579 Thomas P. Minka. Expectation propagation for approximate Bayesian inference. In Uncertainty in 580 Artificial Intelligence, pp. 362­369, 2001.
+581 Seyed-Mohsen Moosavi-Dezfooli, Alhussein Fawzi, Omar Fawzi, and Pascal Frossard. Universal 582 adversarial perturbations. In CVPR, July 2017.
+583
+584 Saralees Nadarajah and Samuel Kotz. Exact distribution of the max/min of two Gaussian random 585 variables. IEEE Trans. VLSI Syst., 16(2):210­212, 2008.
+586 Radford M. Neal. Connectionist learning of belief networks. Artif. Intell., 56(1):71­113, July 1992.
+587
+588 Danilo Jimenez Rezende and Shakir Mohamed. Variational inference with normalizing flows. In 589 ICML, pp. 1530­1538, 2015.
+590 Erik Rodner, Marcel Simon, Bob Fisher, and Joachim Denzler. Fine-grained recognition in the noisy 591 wild: Sensitivity analysis of convolutional neural networks approaches. In BMVC, 2016.
+592
+593 Andrew M. Ross. Computing bounds on the expected maximum of correlated normal variables. Methodology and Computing in Applied Probability, 12(1):111­138, Mar 2010.
+11
+
+Under review as a conference paper at ICLR 2019
+594 Sara Sabour, Nicholas Frosst, and Geoffrey E Hinton. Dynamic routing between capsules. In NIPS, 595 pp. 3856­3866. 2017.
+596
+597 Samuel S. Schoenholz, Justin Gilmer, Surya Ganguli, and Jascha Sohl-Dickstein. Deep information 598 propagation. CoRR, abs/1611.01232, 2016. 599 Alexander Shekhovtsov and Boris Flach. Normalization of neural networks using analytic variance 600 propagation. In Computer Vision Winter Workshop, pp. 45­53, 2018.
+601
+602 J.T. Springenberg, A. Dosovitskiy, T. Brox, and M. Riedmiller. Striving for simplicity: The all 603 convolutional net. In ICLR (workshop track), 2015. 604 Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. 605 Dropout: A simple way to prevent neural networks from overfitting. JMLR, 15:1929­1958, 2014.
+606
+607 Hao Wang, Xingjian SHI, and Dit-Yan Yeung. Natural-parameter networks: A class of probabilistic 608 neural networks. In NIPS, pp. 118­126, 2016. 609 Sida Wang and Christopher Manning. Fast dropout training. In ICML, pp. 118­126, 2013.
+610
+611 Ronald J. Williams. Simple statistical gradient-following algorithms for connectionist reinforcement 612 learning. Machine Learning, 8(3):229­256, May 1992.
+613 614 615 616 617 618 619 620 621 622 623 624 625 626 627 628 629 630 631 632 633 634 635 636 637 638 639 640 641 642 643 644 645 646 647
+12
+
+648 Feed-forward Propagation in Probabilistic Neural
+649
+
+650 Networks with Categorical and Max Layers
+
+651 652
+
+Appendix
+
+653
+
+654
+
+655 A MAXIMUM OF SEVERAL VARIABLES
+656
+
+657 Approximation of the Mean For each k let Ak   denote the event that Xk > Xj j, i.e. that 658 Xk is the maximum of all variables. Let qk = P(Ak) be given. Note that events {Ak}k partition 659 the probability space. The expected value of the maximum Y = maxk Xk can be written as the
+660 following total expectation:
+
+661
+
+µ = E Y = P(Ak)E[Y | Ak] = qkE[Xk | Ak].
+
+(26)
+
+662 k k
+
+663
+
+664 In order to compute each conditional expectation, we approximate the conditional density p(Xk =
+
+665 xk | Ak), which is the marginal of the joint conditional density p(X = x | Ak), i.e. the distribution
+
+666 of X restricted to the part of the probability space Ak as illustrated in Fig. A.1. The approximation
+
+667 is a simpler conditional density p(Xk = xk | A^k) where A^k is chosen in the form A^k = [[Xk  mk]]
+
+668 and the threshold mk is chosen to satisfy the proportionality:
+
+669
+
+P(A^k) = P(Ak) = qk,
+
+(27)
+
+670 671 672 673
+
+which implies mk = FX-k1(qk). This can be also seen as the approximation of the conditional probability P(Ak | Xk = r) = j=k FXj (r), as a function of r, with the indicator [[mk  r]], i.e.
+the smooth step function given by the product of sigmoid-like functions FXk (r) with a sharp step function.
+
+674 675
+
+Assuming
+
+Xk
+
+is
+
+logistic,
+
+we
+
+find
+
+mk
+
+=
+
+µk
+
++
+
+k /S
+
+log(
+
+1-qk qk
+
+).
+
+Then
+
+the
+
+conditional
+
+expectation
+
+676 µ^k = E[Xk | A^k] is computed as
+
+677 678 679 680
+
+1
+
+µ^k
+
+= qk
+
+1 mk xp(Xk=x)dx = qk
+
+
+
+log(
+
+1-qk qk
+
+(µk
+)
+
++
+
+a k S
+
+)pS (a)da
+
+=
+
+µk
+
++
+
+1 qk
+
+k S
+
+H (qk ),
+
+(28)
+
+where pS
+
+is the density of the standard Logistic distribution, a
+
+=
+
+x-µk k /S
+
+is the changed variable
+
+681 under the integral and H(qk) = -qk log(qk) - (1 - qk) log(1 - qk) is the entropy of a Bernoulli
+
+682 variable with probability qk. This results in the following interesting formula for the mean:
+
+683 684
+
+µ
+
+k
+
+qkµk +
+
+k
+
+k S
+
+H
+
+(qk
+
+).
+
+(29)
+
+685
+686 Assuming Xk is normal, we obtain the approximation 687 µ  qkµk + k(-1(qk)).
+
+(30)
+
+688 k k
+
+689
+690 x2 x2 > x1
+
+691
+
+692
+
+693
+
+694
+
+695
+
+696
+
+697 698
+
+x1
+
+699
+700 Figure A.1: The joint conditional density p(X1 = x1, X2 = x2 | X2 > X1), its marginal den701 sity p(X2 = x2 | X2 > X1) and the approximation p(X2 = x2 | X2 > m2), all up to the same
+normalization factor P(X2 > X1).
+
+13
+
+702 4
+
+703
+
+704 3.5
+705 706 3
+707 2.5
+708
+709 2 710
+711 1.5
+712
+
+Expected max
+
+Xk Logistic with std 1 Our Logistic UB Xk Normal Best known Normal UB Our Normal UB
+
+1.0 0.8 0.6 0.4 0.2
+
+713 1 0 100 200 300 400 500
+714 n 715
+
+0.2 0.4 0.6 0.8 1.0
+
+716 Figure A.2: Left: expectation of Y = maxk Xk for Xk iid logistic or normal, our estimates 717 (dashed) versus sampling-based ground truth (solid) and the best known closed form upper bound
+718 for the normal iid case (DasGupta et al., 2014, Theorem 4.1) (dotted). Right: the variance scaling 719 function f (q) (35) (solid) and its approximation (36) (dashed).
+
+720
+721 Lemma A.1. The approximation µ^k is an upper bound on E[Xk|Ak].
+
+722 723
+
+Proof. We need to show that E[Xk|Ak]  E[Xk|A^k]. Since P(Ak) = P(A^k), it is sufficient to prove that
+
+724
+
+725 Xk()dP()  Xk()dP().
+726 Ak A^k
+
+727 728
+
+Let us subtract the integral over the common part Ak  A^k. It remains to show
+
+(31)
+
+729
+
+730
+
+Xk()dP() 
+
+Xk()dP().
+
+Ak \A^k
+
+A^k \Ak
+
+(32)
+
+731
+
+732 In the RHS integral we have Xk()  mk since   A^k = { | Xk()  mk}. In the LHS integral
+
+733 we have Xk() < mk since   A^k. Notice also that P(Ak\A^k) = P(A^k\Ak). The inequality (32)
+
+734 follows.
+
+735 Corollary 1. The approximations of the expected maximum (29), (30) are upper bounds in the 736 respective cases when Xk are logistic, resp., normal.
+737
+
+738 Consider the case then all Xk are all iid logistic or normal with µk = 0 and k = 1. We then have
+
+739
+
+qk
+
+=
+
+1 n
+
+.
+
+For
+
+logistic
+
+case
+
+µ
+
+
+
+nH
+
+(
+
+1 n
+
+),
+
+which
+
+is
+
+asymptotically
+
+log(n)
+
++
+
+1
+
+-
+
+1 2n
+
++
+
+O(1/n2).
+
+For
+
+740 741
+
+normal case µ
+
+
+
+n(-1(
+
+1 n
+
+)).
+
+This
+
+formulas
+
+are
+
+compared
+
+versus
+
+true
+
+(sampling-based)
+
+values
+
+in
+
+Fig. A.2.
+
+742
+
+743 Approximation of the Variance For the variance we write
+744
+
+745  2 = E(Y - µ )2 = qkE((Xk - µ )2 | Ak)  qkE((Xk - µ )2 | A^k),
+746 k k
+747
+748 where the approximation is due to A^k, and further rewrite the expression as
+
+(33)
+
+749 750
+
+= qkE(Xk2 - 2Xkµ + µ 2 | A^k)
+
+(34a)
+
+k
+
+751
+
+752
+
+= qk E(Xk2 - µ^k2 | A^k) + (µ^k - µ )2
+
+(34b)
+
+753 k
+
+754
+
+= qk(^k2 + (µ^k - µ )2)
+
+(34c)
+
+755 k
+
+14
+
+756 757
+
+where ^k2 = Var[Xk | A^k]. For Xk with logistic density p(x) the variance integral ^k2 =
+
+ mk
+
+(x
+
+-
+
+µ^ )2p(x)dx expresses as2:
+
+758
+
+759 760 761
+
+^k2
+
+=
+
+1 qk
+
+k2 S2
+
+-
+
+log2(1 - qk
+
+qk )
+
+-
+
+2
+
+Li2
+
+(
+
+qk qk -
+
+) 1
+
+=:
+
+1 qk
+
+k2
+
+f
+
+(qk
+
+),
+
+762 where Li2 is dilogarithm. The function f can be well approximated on [0, 1] with
+
+(35)
+
+763
+
+f~(q) = S(a + bS-1(q)),
+
+(36)
+
+764
+
+765 where a = -1.33751 and b = 0.886763 are obtained from the first order Tailor expansion of 766 S-1(f (S(t))) at t = 0. This approximation is shown in Fig. A.2 and is in fact an upper bound on 767 f . We thus obtained a rather simple approximation for the variance
+
+768 769
+
+ 2  k2S(a + bS-1(qk)) + qk(µ^k - µ )2.
+
+(37)
+
+770 k k
+
+771 772
+
+B EXPERIMENT DETAILS
+
+773
+774 In this section we give all details necessary to ensure reproducibility of results.
+
+775
+776 B.1 IMPLEMENTATION DETAILS
+
+777 We implemented our inference and learning in the pytorch3 framework. The source code will be 778 publicly available. The implementation is modular: with each of the standard layers we can do 3 779 kinds of propagation: AP1: standard propagation in deterministic layers and taking the mean in 780 stochastic layers (e.g., in dropout we need to multiply by the Bernoulli probability), AP2: proposed
+781 propagation rules with variances and sample: by drawing samples of any encountered stochasticity
+782 (such as sampling from Bernoulli distribution in dropout). The last method is also essential for
+783 computing Monte Carlo (MC) estimates of the statistics we want to approximate. When the training 784 method is sample, the test method is assumed to be AP1, which matches the standard practice of 785 dropout training.
+
+786 In the implementation of AP2 propagation the input and the output of each layer is a pair of mean 787 and variance. At present we use only higher-level pytorch functions to implement AP2 propagation. 788 For example, AP2 propagation for convolutional layer is implemented simply as
+
+789 y . mean = F . conv2d ( x . mean , w) + b 790 y . v a r = F . conv2d ( x . v a r , ww)
+791
+
+792 For numerical stability, it was essential that logsumexp is implemented by subtracting the maximum 793 value before exponentiation
+
+794 m, = x . max ( ) 795 m = m. d e t a c h ( ) # d o e s n o t i n f l u e n c e g r a d i e n t
+796 y = m + t o r c h . l o g ( t o r c h . sum ( t o r c h . exp ( x - m ) ) )
+
+797
+798 The feed-forward propagation with AP2 is about 3 times slower than AP1 or sample. The relative 799 times of a forward-backward computation in our higher-level implementation are as follows:
+
+800
+
+standard training
+
+1
+
+801 BN
+
+1.5
+
+802
+
+i n f e r e n c e =AP2
+
+3
+
+803 i n f e r e n c e =AP2-norm=AP2 6
+
+804
+
+805
+
+Please note that these times hold for unoptimized implementations. In particular, the computational cost of the AP2 normalization, which propagates single pixel statistics, should be more efficient in
+
+806 comparison to propagating a batch of input images.
+
+807
+
+808 809 2Computed with the help of Mathematica
+3http://pytorch.org
+
+15
+
+810 B.2 DATASETS
+811
+
+812 We used MNIST4 and CIFAR105 datasets. Both datasets provide a split into training and test sets. 813 From the training set we split 10 percent (at random) to create a validation set. The validation set is 814 meant for model selection and monitoring the validation loss and accuracy during learning. The test 815 sets were currently used only in the stability tests.
+
+816
+
+817 B.3 TRAINING
+
+818
+
+819 820
+
+For the optimization we used batch size 32, SGD optimizer with Nesterov Momentum 0.9 (pytorch default) and the learning rate lr · k, where k is the epoch number, lr is the initial learning rate,  is the decrease factor. In all reported results for CIFAR we used  such that 600 = 0.1 and 1200
+
+821 epochs. This is done in order to make sure we are not so much constrained by the performance
+
+822 of the optimization and all methods are given sufficient iterations to converge. The initial learning
+
+823 rate was selected by an automatic numerical search optimizing the training loss in 5 epochs. This
+
+824 is performed individually per training case to take care for the differences introduced by different
+
+825 initializations and training methods.
+
+826 827
+
+When not said otherwise, parameters of linear and convolutional layers were initialized using pytorch defaults, i.e., uniformly distributed in [-1/ c, 1/ c], where c is the number of inputs per
+
+828 one output.
+
+829
+
+830 Standard minor data augmentation was applied to the training and validation sets in CIFAR-10, 831 consisting in random translations ±2 pixels (with zero padding) and horizontal flipping.
+
+832 When we train with normalization, it is introduced after each convolutional and fully connected 833 layer.
+
+834
+
+835 B.4 NETWORK SPECIFICATIONS
+
+836
+837 The LeNet5 architecture Lecun et al. (2001) is:
+
+838 Conv2d ( 1 , 6 , k s =5 , s t = 2 ) , A c t i v a t i o n
+
+839 MaxPooling
+
+840 Conv2d ( 6 , 1 6 , k s =5 , s t = 2 ) , A c t i v a t i o n
+
+841
+
+MaxPooling FC ( 4  4  1 6 , 1 2 0 ) , A c t i v a t i o n
+
+842 FC ( 1 2 0 , 8 4 ) , A c t i v a t i o n
+
+843 FC ( 8 4 , 1 0 ) , A c t i v a t i o n
+
+844 LogSoftmax
+
+845
+846 Convolutional layer parameters list input channels, output channels, kernel size and stride.
+
+847 The All-CNN network Springenberg et al. (2015) has the following structure of convolutional layers:
+
+848
+
+849
+
+ksize = [3 , 3, 3, 3, 3, 3, 3, 1, 1 ] stride= [1 , 1, 2, 1, 1, 2, 1, 1, 1 ]
+
+850 d e p t h = [ 9 6 , 9 6 , 9 6 , 1 9 2 , 1 9 2 , 1 9 2 , 1 9 2 , 1 9 2 , 1 0 ]
+
+851
+
+852 each but the last one ending with activation (we used LReLU). The final layers of the network are
+853 854 A d a p t i v e A v g P o o l 2 d , LogSoftmax
+
+855 ConvPool-CNN-C model replaces stride-2 convolutions by stride-1 convolutions of the same shape 856 followed by 2x2 max pooling with stride 2.
+857
+
+858 B.5 AUXILIARY RESULTS ON NORMALIZATION
+859
+
+860 We test the analytic normalization method (Shekhovtsov & Flach, 2018) in a network with max 861 pooling and Leaky ReLU layers. We consider the "ConvPool-CNN-C" model of Springenberg et al.
+
+862 863 4http://yann.lecun.com/exdb/mnist/
+5https://www.cs.toronto.edu/~kriz/cifar.html
+
+16
+
+864
+
+100
+
+865 866
+
+10-1
+
+867 868
+
+10-2
+
+869 870 871 872 873
+
+10-3 10-4 10-5
+
+standard init Xavier init AP2 init BN init
+
+Conv3-96 CoLnvR3e-L96U CoLnvR3e-L96U ConMvaL3xR-Pe1oL9o2lU ConvL3R-e1L92U ConvL3R-e1L92U ConMvaL3xR-Pe1oL9o2lU ConvL1R-e1L92U AverCaogLnevR1Pe-oL1ol0U
+
+874
+
+875
+
+876 Figure B.1: Standard deviation of neurons in network layers after different initializations. The 877 shown values are averages over all units in each layer (spatial and channel dimensions). With stan-
+878 dard random initialization the variances quickly decrease and the network output for the whole
+879 dataset collapses nearly to a single point, complicating the training. Xavier init does not fully re-
+880 solve the problem. Analytic normalization provides standard deviation within a small factor of 1 881 in all layers, comparable to BN. The zig-zagging effect is observed because the normalization is 882 performed after linear layers only.
+
+883 884
+885 100
+
+Training loss
+
+Validation Accuracy 0.95 0.94
+
+886 10 1
+
+887 10 2
+
+888 10 3
+
+889 890
+
+10 4
+
+0.93 0.92 0.91 0.90
+
+init=AP2, lr=0.0098 init=BN, lr=0.011 init=standard, lr=0.038 init=xavier, lr=0.016 norm=AP2, lr=0.0051 norm=BN, lr=0.011
+
+891 10 5
+
+0.89
+
+892 0 150 300 450 600 750 900 105012000.88 0 200 400 600 800 1000 1200
+893
+
+894 Figure B.2: The effect of initialization/normalization on the progress of training. Observe that the 895 initialization alone significantly influences the automatically chosen initial learning rate (lr) and the 896 "trainability" of the network. Using the normalization during the training further improves perfor897 mance for both batch and analytic normalization. BN has an additional regularization effect Ioffe 898 (2017), the square markers in the left plot show BN training loss using averaged statistics.
+
+899
+
+900 (2015) on CIFAR-10 dataset. It's structure is shown on the x-axis of Fig. B.1. We first apply different
+
+901 902
+
+initialization that standard
+
+methods and initialization
+
+cwoimthpuwteeigvahrtisadnicsetsriibnuteeadchunlaifyoerrmolvyerinth[e-t1r/aininnign,d1a/tasenti.nF],igw. hBe.r1e
+
+shows nin is
+
+903 904
+
+the number of inputs per single output of a linear mapping results in the whole dataset concentrated around one output point with standard deviation 10-5. Initialization of Glorot & Bengio (2010),
+
+using statistical arguments, improves this behavior. For the analytic approximation, we take statistics
+
+905 906
+
+of the dataset itself (µ0, 0) and propagate them through the network, ignoring spatial dimensions of the layers. When normalized by this estimates, the real dataset statistics have variances close
+
+907 to one and means close to zero, i.e. the normalization is efficient. For comparison, we also show
+
+908 normalization by the batch statistics with a batch of size 32. Fig. B.2 further demonstrates that
+
+909 the initialization is crucial for efficient learning, and that keeping track of the normalization during
+
+910 training and back propagating through it (denoted norm=AP2 in the figure) performs even better and
+
+911 may be preferable to batch normalization in many scenarios such as recurrent NNs.
+
+912
+
+913 B.6 ACCURACY WITH MAX POOLING
+
+914
+
+915 Table B.2 shows accuracy of posterior approximation results for ConvPool-CNN-C, discussed above
+
+916 917
+
+which includes max pooling layers. The network is trained and evaluated on CIFAR-10 with dropout the same way as in § 5.1.
+
+17
+
+918 C A C A C A M C A C A C A M C A C A C P Softmax
+
+919  0 0.17 0.56 0.40 1.5 0.85 0.95 3.9 2.4 10 5.3 25 7.0 8.9 39 21 43 11 26 4.3
+
+920
+
+µ1 - 0.00 0.00 0.03 0.21 0.05 0.21 0.96 0.11 0.43 0.11 0.71 0.09 0.18 0.79 0.14 0.37 0.10 0.26 0.97 KL 0.06 µ2 - 0.00 0.00 0.01 0.01 0.01 0.09 0.42 0.05 0.22 0.04 0.19 0.03 0.11 0.59 0.07 0.18 0.08 0.19 0.73 KL 0.03
+
+921 2 - 1.00 1.00 1.02 0.93 0.98 1.08 1.21 1.24 1.00 1.09 0.88 0.99 1.15 1.02 0.97 0.97 1.26 1.00 0.73
+
+922
+
+923
+
+Table B.1: Accuracy of approximation of mean and variance statistics for each layer in a fully trained ConvPool-CNN-C network with dropout. A significant drop of accuracy is observed as well
+
+924 after max pooling, we believe due to the violation of the independence assumption.
+
+925
+
+926 Training Loss
+
+927 928
+
+100
+
+AP2 dropout=0.2, lr=0.016 Dropout=0.2, lr=0.013
+
+929 930
+
+10 1 No dropout, lr=0.011
+
+931 10 2
+932
+933 10 3
+
+934
+935 10 4
+
+936 10 5
+937
+938 0 150 300 450 600 750 900 1050 1200
+
+939
+
+940 Figure B.3: Training loss corresponding to Fig. 3. While stochastic dropout slows the training 941 down due to increased stochasticity of the gradient, the analytic dropout smoothes the loss function 942 and speeds the training up.
+
+943
+
+944 0.95
+945
+946 0.94
+
+947 0.93
+
+948 949
+
+0.92
+
+Validation Accuracy
+AP2 dropout=0.2, lr=0.043 Dropout=0.2, lr=0.02 No dropout, lr=0.019
+
+100
+
+Validation Loss
+AP2 dropout=0.2, lr=0.043 Dropout=0.2, lr=0.02 No dropout, lr=0.019
+
+950 0.91
+
+951 952
+
+0.90
+
+953 0.89
+
+6 × 10 1 4 × 10 1
+
+954 955
+
+0.88 0
+
+3 × 10 1
+
+200 400 600 800 1000 1200
+
+0
+
+200 400 600 800 1000 1200
+
+956
+
+957 Figure B.4: Comparison of analytic AP2 dropout with baselines. All methods use the same initial-
+
+958 ization using AP2 statistics and no normalization. Analytic dropout improves over training with no 959 dropout and is faster than sampling dropout but starts slightly overfitting soon.
+
+960
+961 B.7 AUXILIARY RESULTS ON ANALYTIC DROPOUT
+
+962
+
+963
+
+Fig. B.4 shows training results, when we use AP2 method only to initialize the network, but switch off the normalization during the training. In this setting we see that AP2 approximate dropout
+
+964 has a significant regularization effect (validation loss) and improves in accuracy over the baseline
+
+965 without dropout. It also performs faster than stochastic dropout, but achieves worse final accuracy
+
+966 in this case. This shows that other regularizer, namely the normalization used in § 5.3 are important
+
+967 as well. Table B.2 confirms that "AP2 calibrated" keeps the good test-time performance for the
+
+968 network trained with stochastic dropout (the best performing network in Fig. B.4).
+
+969
+
+970
+
+971
+
+18
+
+972 Standard dropout
+
+973
+
+Method
+
+NLL Acc.
+
+974 AP1 0.487 0.923
+
+975 AP2 0.293 0.923
+
+976 AP2 calibrated 0.244 0.923
+
+977
+
+MC-10
+
+0.312 0.922
+
+978
+
+MC-100
+
+0.256 0.924
+
+979 MC-1000 0.244 0.924
+
+980
+
+981 Table B.2: Different test-time propagation methods for a model with dropout. We show test neg-
+
+982
+
+ative log likelihood (NLL) with AP2 and MC posterior estimates for network trained with standard dropout and using AP2 (analytic) dropout. In both cases AP2 results in improved posterior esti-
+
+983 mates. "AP2 calibrated" rescales the variance in the last layer by the average factor / (see § 5.1)
+
+984 estimated on the validation set.
+
+985
+
+986
+
+987
+
+988
+
+989
+
+990
+
+991
+
+992
+
+993
+
+994
+
+995
+
+996
+
+997
+
+998
+
+999
+
+1000
+
+1001
+
+1002
+
+1003
+
+1004
+
+1005
+
+1006
+
+1007
+
+1008
+
+1009
+
+1010
+
+1011
+
+1012
+
+1013
+
+1014
+
+1015
+
+1016
+
+1017
+
+1018
+
+1019
+
+1020
+
+1021
+
+1022
+
+1023
+
+1024
+
+1025
+
+19
+
+

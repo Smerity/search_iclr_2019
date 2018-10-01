@@ -1,0 +1,1785 @@
+Under review as a conference paper at ICLR 2019
+ASYNCHRONOUS SGD WITHOUT GRADIENT DELAY FOR EFFICIENT DISTRIBUTED TRAINING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Asynchronous distributed gradient descent algorithms for training of deep neural networks are usually considered as inefficient, mainly because of the Gradient delay problem. In this paper, we propose a novel asynchronous distributed algorithm that tackles this limitation by well-thought-out averaging of model updates, computed by workers. The algorithm allows computing gradients along the process of gradient merge, thus, reducing or even completely eliminating worker idle time due to communication overhead, which is a pitfall of existing asynchronous methods. We provide theoretical analysis of the proposed asynchronous algorithm, and show its regret bounds. According to our analysis, the crucial parameter for keeping high convergence rate is the maximal discrepancy between local parameter vectors of any pair of workers. As long as it is kept relatively small, the convergence rate of the algorithm is shown to be the same as the one of a sequential online learning. Furthermore, in our algorithm, this discrepancy is bounded by an expression that involves the staleness parameter of the algorithm, and is independent on the number of workers. This is the main differentiator between our approach and other solutions, such as Elastic Asynchronous SGD or Downpour SGD, in which that maximal discrepancy is bounded by an expression that depends on the number of workers, due to gradient delay problem. To demonstrate effectiveness of our approach, we conduct a series of experiments on image classification task on a cluster with 4 machines, equipped with a commodity communication switch and with a single GPU card per machine. Our experiments show a linear scaling on 4-machine cluster without sacrificing the test accuracy, while eliminating almost completely worker idle time. Since our method allows using commodity communication switch, it paves a way for large scale distributed training performed on commodity clusters.
+1 INTRODUCTION
+Distributed training of deep learning models is devised to reduce training time of the models. Synchronous distributed SGD methods, such as Chen et al. (2016) and You et al. (2017), perform training using mini-batch size of several dozens of thousands of images. However, they either require expensive communication switch for fast gradient sharing between workers or, otherwise, introduce a high communication overhead during gradient merge, where workers are idle waiting for communicating gradients over communication switch.
+Distributed asynchronous SGD methods reduce the communication overhead on one hand, but usually introduce gradient delay problem on the other hand, as described in Chen et al. (2016). Indeed, usually in an asynchronous distributed approach, a worker w obtains a copy of the central model, computes a gradient on this model and merges this gradient back into the central model. Note, however, that since the worker obtained the copy of the central model till it merges its gradient back into the central model, other workers could have merged their gradients into the central model. Thus, when the worker w merges its gradient into a central model, that model may have been updated and, thus, the gradient of the worker w is delayed, leading to gradient delay problem. We will refer to algorithms that suffer from gradient delay problem as gradient delay algorithms, e.g. Downpour SGD Dean et al. (2012).
+1
+
+Under review as a conference paper at ICLR 2019
+As our analysis reveals in Section 3, the quantity that controls the convergence rate of an asynchronous distributed algorithm, is maximal pairwise distance ­ the maximal distance between local models of any pair of workers at any iteration. Usually gradient delay algorithms do not limit this distance and it may depend on the number of asynchronous workers, which may be large in large clusters. This may explain their poor scalability, convergence rate and struggle to reach as high test accuracy as in synchronous SGD algorithms, as experimentally shown in Chen et al. (2016).
+While Elastic Averaging SGD Zhang et al. (2015) is also a gradient delay algorithm, it introduces a penalty for workers, whose models diverge too far from the central model. This, in turn, helps to reduce the maximal pairwise distance between local models of workers and, thus, leads to better scalability and convergence rate. In contrast, our analysis introduces staleness parameter that directly controls the maximal pair distance of the asynchronous workers.
+Our analysis builds on the work of Zinkevich et al. (2009b), who studied convergence rate of gradient delay algorithms, when the maximum delay is bounded. They provided analysis for Lipschitz continuous losses, strongly convex and smooth losses. While they show that bounding staleness can improve convergence rate of a gradient delay algorithm, in their algorithm each worker computes exactly one gradient and is idle, waiting to merge the gradient with PS model and download the updated PS model back to the worker.
+The main contributions of this paper are the following. We present and analyze a new asynchronous distributed SGD method that both reduces idle time and eliminates gradient delay problem. Our main theoretic result shows that an asynchronous distributed SGD algorithm can achieve convergence rate as good as in sequential online learning. We support this theoretic result by conducting experiments that show that on a cluster with up to 4 machines, with a single GPU per machine and a commodity communication switch, our asynchronous method achieves linear scalability without degradation of the test accuracy.
+2 ALGORITHM DESCRIPTION
+Below we describe two algorithms. We will use the terms model and parameter vector to refer to the collection of trainable parameters of the model. Each worker in these algorithms starts computing gradients from a copy of a PS model and, prior to merging with the central model at PS, the worker can compute either a single gradient or several gradients, advancing the local model using all these gradients. In the sequel we will use term model update of a worker ­ the difference between the last local model prior to the merge and the latest copy of PS model, from which the worker started computing gradients.
+2.1 ASYNCHRONOUS SGD, WITHOUT GRADIENT DELAY
+The key idea of our approach is to reduce gradient delay, as described in Algorithm 1. To achieve this goal, the merge process waits till each worker has at least one gradient computed locally. Then, model updates from all the workers are collected and averaged and the average model update is used to update the model at PS. This is the synchronous part of our hybrid algorithm. In this way we replace gradient delay by averaging gradients, which is widely used as a technique to increase mini-batch size.
+Workers are allowed to compute gradients asynchronously to each other and to the merge process to reduce wait times, when workers are idle. This is the asynchronous part of our hybrid algorithm.
+Furthermore, the idea of computing several gradients to form a model update is used to hide communication overhead of gradient merge with useful computation of gradients at the workers. Master starts with computing the initial version of the model in line 27 and provides it for transferring to workers. Then Master waits till each worker has computed at least one gradient and used it to advance the worker's local model. When this happens, Master instructs on transferring a model update w.x from each worker to PS, where model updates from all workers are averaged and the average is used to advance the PS model. Finally the updated PS model is provided to all workers.
+A worker starts with assigning value 0 to each variable, except variable staleness s, which is assigned the maximal staleness  . In line 5 the worker checks if the staleness s has already achieved its maximal value and in this case it waits in line 6 till an initial version of the PS model is transferred to
+2
+
+Under review as a conference paper at ICLR 2019
+
+the worker. When the PS model is transferred to the worker, in lines 9 and 10, the worker initializes the two model variables x and xinit with the PS model, since at this stage model update w.x is still 0. Next, the worker sets staleness to 0. Lines 13-15 comprise a usual update of the local model. In line 16, the worker notifies Master on availability of a non-zero model update w.x. Now in line 17, the worker advances the local iteration counter i+ = 1. It also advances staleness s, since with advancing the local model with one gradient, the local model gets far away from the latest version of PS model, stored in line 9 in xinit, by one more gradient. In this way, the worker can perform several iterations, computing a gradient and advancing the local model in lines 13-15, as long as the current staleness s does not hit the maximal staleness  .
+Assume now that at some point in time, Master requests to transfer model update w.x to PS in line 30. Each worker receives this request in line 21 of Thread 2. In this case, the worker releases the model update in line 22 to transfer to PS to merge with the PS model and sets the local model x to xinit, to indicate that the model update is re-initialized to 0. The value iinit is re-initialized to i to indicate that the number of gradients, accumulated in model update x - xinit is 0.
+
+Algorithm 1: Asynchronous SGD without Gradient Delay.
+
+1 Worker Procedure: THREAD 1
+
+2 Input:  -maximal staleness, i-learning schedule. 3 initialization: i = iinit = 0, s =  , x = xinit = w.x = 0; 4 while true do
+
+5 if s =  then
+
+6 wait to receive model from P S: P S.x;
+
+7 end
+
+8 if P S.x is available then
+
+9 xinit = P S.x;
+10 x = xinit + w.x; 11 s = i - iinit;
+
+12 end
+
+13 compute gradient g(x);
+
+14 x = x - ig(x); 15 w.x = x - xinit
+16 notify Master on w.x;
+
+17 i = i + 1, s = s + 1;
+
+18 end
+
+19 Worker procedure: THREAD 2
+
+20 while true do
+
+21 wait for a Master request to transfer w.x
+
+22 provide w.x to transfer to PS.
+
+23 xinit = x , iinit = i
+
+24 end
+
+25 Master Procedure.
+
+26 initialization: W ­ the set of workers, P S.x = initial model;
+
+27 provide P S.x to workers;
+
+28 while not stop condition do
+
+29 wait for each worker w to provide w.x.
+
+30 request each worker w to transfer its model update x.
+
+31 for each worker w do
+
+32
+
+P S.x
+
+=
+
+P S.x
+
++
+
+1 |W
+
+|
+
+w.x
+
+33 end
+
+34 provide P S.x to workers;
+
+35 end
+
+When the worker discovers in line 8 of THREAD 1, that there is a new version of PS model available locally, it stores this model in xinit, advances the local model x from xinit using the model update w.x and sets staleness to the number of gradients i - iinit, used to compute the local update.
+3
+
+Under review as a conference paper at ICLR 2019
+
+Setting staleness to this value indicates that the local model diverges from the latest, locally available PS model, by this number of locally computed gradients.
+
+2.2 SIMPLIFIED ASYNCHRONOUS SGD WITHOUT GRADIENT DELAY
+
+Algorithm 1 is rather hard to analyze. To simplify the analysis, we formulate Algorithm 2 that is a simplified version of Algorithm 1. Algorithm 2 incorporates the most of asynchrony of Algorithm 1: each worker computes locally multi-gradient model update, workers compute their model updates in parallel to each other and to synchronous merge of previous model updates from all the workers. This means that if either the communication between workers is fast enough or staleness is large enough, worker idle time can be eliminated completely. The only difference between the algorithms is that Algorithm 2 synchronizes the time, when workers receive a new model from PS and provide their model updates to PS to merge with the PS model.
+
+More specifically, Algorithm 2 works To simplify notation, we denote  the
+
+icnycclyeclleesngotfh,2i.iet.erati=ons2,
+
+where  . At the
+
+is the end of
+
+maximal staleness. each cycle, e.g. at
+
+iteration j , all workers synchronize with PS: each worker acquires the copy of a new PS model
+
+and provides its accumulated model update to PS. If PS does not have enough time to merge model
+
+updates from the previous cycle and transfer the new model to the workers, workers wait for the new
+
+PS model in line 6. When a worker receives the new PS model, it computes the model update w.x
+
+in line 7 and provides it to PS in line 8. Note that due to the cycle length of  iterations, model
+
+update w.x is computed using  locally computed gradients. Now, in line 9, the worker advances
+
+the new PS model using the model update and sets the resulting model to xinit and x. Note that at this point in time, at each worker, the parameter vector x is sum of the new PS model, which is the
+
+same in all the workers, and the model update w.x that is computed using  gradients, computed
+
+locally in the worker. This means that the worker can perform  additional iterations before hitting
+
+the staleness boundary of  .
+
+Now, after the synchronization with PS, each worker computes  gradients locally and uses them to advance the local model in lines 11-13. At this point in time, each worker hits the staleness boundary of  . In parallel with this computation of model update in each worker, in lines 20-24, Master transfers model updates that workers provided to PS in iteration j, merges them with PS model and provides the new model to the workers. When each worker finishes iteration (j + 1), the current cycle completes and, again, synchronization starts between workers and PS.
+
+Note that workers in Algorithm 2 may be idle, waiting for the new PS model in line 6, only if the communication between workers and PS is slow and does not allow transferring model updates from workers to PS, merge them with the PS model and transfer the new PS model back to the workers before workers complete computing  gradients. Also note that further increasing staleness, reduces or completely eliminates worker idle time.
+
+3 ANALYSIS
+
+In this section, we analyze Algorithm 2. In the analysis we adopt the notation of Zinkevich et al. (2009b). In the proof of Lemma 3.4 and of Theorem 3.5, we use derivation similar to Zinkevich et al. (2009b), while adding terms, which are relevant for our specific algorithms. The most of the analysis is our own contribution. We will point out to parts that we borrow from prior research work.
+
+Our main result is Theorem 3.9, where we show that the convergence rate of Algorithm 2 is O( 2 + T ). The algorithm has two phases. In the first phase, during the early iterations, the asynchronous
+training leads to a slow-down, expressed in the term  2. However, in the second phase, during
+later iterations, the asynchronous training appears to be harmless. We show that, if T  , the
+convergence rate of Algorithm 2 is as good as in sequential online learning.
+
+Note that the convergence rate, stated in Theorem 3.9, assumes that the standard deviation of gradient
+
+computation is inversely proportional to the maximal staleness  . In practice, this means that for
+
+each given value of maximal staleness  , one needs to set the size of mini-batch at each worker so
+
+that
+
+the
+
+standard
+
+deviation
+
+of
+
+gradient
+
+computation
+
+gets
+
+below
+
+1 
+
+.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 2: Simplified Asynchronous SGD without Gradient Delay.
+
+1 Worker Procedure.
+
+2
+
+Input:
+
+ -even maximal staleness, 
+
+=
+
+ 2
+
+and i-learning schedule.
+
+3 initialization: i = iinit = 0, x = xinit = w.x = 0;
+
+4 while true do
+
+5 if i  0 (mod ) then
+
+6 wait to receive model from P S: P S.x ;
+
+7 w.x = x - xinit; 8 provide w.x to transfer to P S;
+
+9 x = xinit = P S.x + w.x;
+
+10 end
+
+11 compute gradient g(x);
+
+12 x = x - ig(x); 13 i = i + 1;
+
+14 end
+
+15 Master Procedure.
+
+16 initialization: W ­ the set of workers, P S.x = initial model;
+
+17 provide P S.x to workers;
+
+18 while not stop condition do
+
+19 wait for each worker w to provide w.x.
+
+20 request each worker w to transfer its model update x.
+
+21 for each worker w do
+
+22
+
+P S.x
+
+=
+
+P S.x
+
++
+
+1 |W
+
+|
+
+w.x
+
+23 end
+
+24 provide P S.x to workers;
+
+25 end
+
+Now we compare our main result, stated in Theorem 3.9 with the main result of Zinkevich et al. (2009a), stated in Theorem 8, where the convergence bound is O( 2 log T + T ). While the behavior in the second phase is the same O( T ), in the first training phase, our result O( 2) is better than in Zinkevich et al. (2009a) O( 2 log T ), since our result does not have the dependency on T .
+
+Denote convex (cost) functions by fi : X  R, and their parameter vector by x. Our goal is to
+
+find a sequence of xi such that the cumulative notation, we identify the average empirical and
+
+loss i fi(xi expected loss
+
+) is minimized. With some abuse of both by f . This is possible, simply
+
+by redefining p(f ) to be the uniform distribution over F . Denote by
+
+f = 1 F
+
+fi(x) or f (x) = Efp(f)[f (x)] and x = arg min f (x) .
+i xX
+
+the average risk. We assume that x exists (convexity does not guarantee a bounded minimizer) and that it satisfies ||x||  R (this is always achievable, simply by intersecting X with the unit-ball of radius R).
+
+We remind that in Algorithm 2, in each cycle each worker computes an update to its local parameter vector, based on  locally computed gradients and PS averages these per-worker updates from all the workers to update its own parameter vector.
+
+In Algorithm 2 at time t, each worker w computes the gradient of the same function f on its own parameter vector xt,w and its own mini-batch. We denote this function at worker w and time t ft,w and denote the gradient of this function, computed at the local parameter vector xt,w, gt,w = ft,w (xt,w ).
+For the analysis, we define the global parameter vector at time t (as opposite to per-worker parameter vector xt,w) as average of per-worker parameter vectors
+
+1
+
+xt = |W |
+
+xt,w .
+
+wW
+
+(1)
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Also we denote
+
+1
+
+ft(xt) = |W |
+
+ft,w(xt) .
+
+wW
+
+(2)
+
+We assume that each ft,w, and thus ft, is convex, and subdifferentials of ft are bounded ||ft(x)||  L by some L > 0. Denote by x the minimizer of f (x). We want to find a bound on the regret R, associated with a sequence X = x1, ..., xT of parameter vectors
+
+T
+R[X] = ft(xt) - ft(x) .
+t=1
+
+(3)
+
+Such bounds can be converted into bounds on the expected loss, as in Shalev-Shwartz & Singer (2007), for an example. Note that with the definitions (1) and (2), the regret in (3) is well-defined. We denote
+
+g~t
+
+=
+
+ft(xt)
+
+=
+
+1 |W |
+
+ft,w(xt) .
+
+wW
+
+(4)
+
+This is how a gradient is computed in synchronous distributed SGD algorithms. Since all ft are convex, we can upper bound R[X] via
+
+TT
+R[X]  < ft(xt), xt - x >= < g~t, xt - x > .
+t=1 t=1
+
+(5)
+
+Let
+
+us
+
+define
+
+a
+
+distance
+
+function
+
+between
+
+x
+
+and
+
+x
+
+:
+
+D(x||x
+
+)
+
+=
+
+1 2
+
+||x
+
+-
+
+x
+
+||2.
+
+In
+
+Algorithm
+
+2,
+
+each
+
+worker at the beginning of cycle i, i.e. at time i, receives the copy of a new PS parameter vector. In
+
+Lemmas 3.1 ­ 3.3 we study properties of Algorithm 2 at this point in time. In Lemma 3.1, we show
+
+that the copy of PS model at time i, equals to the average of local parameter vectors of workers
+
+from iteration (i - 1), which, according to (1), equals to x(i-1).
+
+Lemma 3.1. The copy of a new PS parameter vector that each worker receives at iteration (i + 1), equals to the average of local parameter vectors of workers from iteration i
+
+1
+
+P S.x(i+1) = |W |
+
+xw,(i+1) = x(i+1) .
+
+wW
+
+(6)
+
+The proof may be found in Appendix A. Next, when a worker receives at iteration i the copy
+of a new PS parameter vector, which, according to Lemma 3.1, equals to x(i-1), it adds to this parameter vector its latest model update xw,i  x(i-1) + w.x. Note that this operation resets all the local parameter vectors of the worker, computed in the last cycle: the operation moves all the
+local parameter vectors {xw,(i-1)+t|t = 0, . . . , } along the vector xw,(i-1) - x(i-1) towards the average parameter vector x(i-1):
+
+xw,(i-1)+t  xw,(i-1)+t + (xw,(i-1) - x(i-1) ), t = 0, . . . ,  .
+
+(7)
+
+Lemma 3.2 shows that computing average parameter vector (1) is invariant under rest operation (7).
+
+Lemma 3.2. Computing average parameter vector, according to (1), is invariant to the reset operation (7), i.e. for each i  N
+
+1 xi+t = |W |
+
+(xw,i+t + (xw,i - xi)) , t = 0, . . . ,  .
+
+wW
+
+(8)
+
+The proof may be found in Appendix A. Now, Lemma 3.3 bounds the distance between parameter vectors for any pair of workers after the reset operation at iteration i.
+Lemma 3.3. Suppose gradients of cost functions ft are bounded ||ft(x)||  L by some L. Let w, w  W be any two workers. Then after the reset operation (7), at iteration i,
+
+||xi,w - xi,w ||  L (i-1) .
+
+(9)
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+The proof may be found in Appendix A. After the reset operation at iteration i, in the next  iterations, each worker computes  gradients locally to advance its local parameter vector
+xi+t,w = xi+t-1,w - i+t-1gi+t-1,w, 1  t   .
+
+Using this expression, we can re-write (1)
+
+xi+t
+
+=
+
+xi+t-1
+
+-
+
+i+t-1
+
+1 |W |
+
+gi+t-1,w .
+
+wW
+
+(10)
+
+We abuse notation and denote an average over gradients gi+t,w as
+
+1
+
+gi+t = gi+t(xi+t) = |W |
+
+gi +t,w .
+
+wW
+
+(11)
+
+Note the difference between (4) and (11). We use expression (4) as one way to define the average gradient, with which we start to bound regret in (5). In this expression, each gradient uses the same parameter vector, defined in (1), to compute its gradient. Expression (11), is another way to compute an average gradient, where each worker uses its own local parameter vector to compute gradient. With notation (11) we rewrite (10)
+
+xi+t = xi+t-1 - i+t-1gi+t-1 , t = 1 . . . ,  .
+
+(12)
+
+Next, to prove our regret bounds, we adapt Lemma 1 from Zinkevich et al. (2009b). In Zinkevich et al. (2009b), Lemma 1 is proved for an asynchronous algorithm, in which each worker computes exactly one gradient and transfers it to PS to merge with its parameter vector. We adapt this lemma to Algorithm 2, in which each worker computes  gradients locally and then all the workers transfer their updates of their local parameter vectors to PS, which averages them and uses this average to update its own parameter vector.
+
+Lemma 3.4. For all x, for all i and 0  t < , if X = Rn, the following expansion holds:
+
+<
+
+xi+t
+
+-
+
+x, g~i+t
+
+>=
+
+1 2
+
+i+t
+
+||gi+t||2
+
++
+
+D(x||xi+t) - D(x||xi+t+1) i+t
+
++ < xi+t - x, g~i+t - gi+t > .
+
+(13)
+
+The proof may be found in Appendix A. The decomposition (13) is very similar to standard regret
+decomposition bounds, such as Zinkevich et al. (2009a). We add to this decomposition a new term < xi+t - x, g~i+t - gi+t > to adapt the analysis to peculiarities of Algorithm 2. This term characterizes the difference between two ways to compute an average gradient at a specific time.
+
+In Algorithm 2, at iteration i, for each i, each worker starts computing gradients after it adds its local update of its local parameter vector to the copy of a common PS parameter vector and computes  gradients locally. As workers compute more gradients in iterations i + t, t = 1, . . . , , their local parameter vectors get more far apart from each other. However, for sufficiently small step size, the distance between local parameter vectors in different workers remains small. The key to proving our bounds is to impose further smoothness constraints on ft. The rationale is quite simple: we want to ensure that small changes in x do not lead to large changes in the gradient. More specifically we assume that the gradient of ft is a Lipschitz-continuous function. That is,
+
+||ft(x) - ft(x )||  H||x - x || .
+
+(14)
+
+for some constant H. Following Theorem 2 from Zinkevich et al. (2009b), we use Lemma 3.4 to prove Theorem 3.5. The key difference between Theorem 3.5 and Theorem 2 from Zinkevich et al. (2009b), is that we introduce a new expression and bound it to adapt the analysis to Algorithm 2.
+
+Theorem 3.5. Suppose gradients of cost functions ft are bounded ||ft(x)||  L by some
+
+L and that H also upper-bounds the change in the gradients, as in (14). Also suppose that
+
+maxx,x
+
+X
+
+D(x||x
+
+)
+
+<
+
+F 2.
+
+Given
+
+t
+
+=
+
+ ,
+t
+
+for
+
+some constant
+
+
+
+>
+
+0,
+
+the regret
+
+of
+
+Algorithm
+
+2
+
+is
+
+bounded by
+
+R[X ]
+
+
+
+ L2 T
+
++
+
+F2 T
+
++
+
+2 F LH(2
+
++
+
+ 2 T
+
+-
+
+2 )
+
+.
+
+
+
+(15)
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Consequently,
+
+for
+
+2
+
+=
+
+F2 2 L2
+
+,
+
+we
+
+obtain
+
+the
+
+bound
+
+
+
+R[X]  4F LH 2 + F (3L + 4F H)  T .
+
+(16)
+
+The proof may befound in Appendix A. According to Theorem 3.5, the convergence rate of Algorithm 2 is O( 2 +  T ). As in Zinkevich et al. (2009a), we note that this result is expected, because an adversary can rearrange training instances so that each worker receives training instances that are very similar to training instances in other workers during  asynchronous iterations. In this case multiple workers do not perform better than a single worker and, thus, parallel algorithm is not better than a sequential one.
+We will use the results of Theorem 3.5 to prove our main result in Theorem 3.9
+
+3.1 DECORRELATED GRADIENT ANALYSIS
+
+In this section we assume that training samples at different workers are drawn independently from the same underlying distribution. Also, to improve the convergence rate, we should limit the divergence of different workers from each other, as they asynchronously advance their local parameter vectors. Namely, we introduce an assumption on variance of gradients, computed in the same point at different workers. We denote g = f  and assume that variation of gradients at different workers, is modeled by an additive Gaussian noise ft,w(x) = g(x) + et,w, for et,w  N (0, C), where C is a covariance matrix.
+
+We start with the following lemma that bounds the distance between parameter vectors at any two workers w, w  W after each one of them makes j asynchronous steps, starting from parameter
+
+vectors xi,w and xi,w .
+
+Lemma 3.6. Assume that variation of the gradient of the cost function is governed by an additive
+
+Gaussian noise
+
+ft,w(x) = g(x) + et,w ,
+
+for et,w  N (0, C) for covariance matrix C. Then for any two worker w, w  W ,
+
+(17)
+
+j-1
+
+||xi+j,w - xi+j,w ||  ||xi,w - xi,w || (i+kH + 1)
+
+k=0
+
+j-1
+
+j-1
+
++ i+k||ei+k,w - ei+k,w || ·
+
+(i+mH + 1) .
+
+(18)
+
+k=0
+
+m=k+1
+
+The proof may be found in Appendix A. Lemma 3.6 bounds the distance between local parameter
+
+vectors in two different workers, as they proceed with asynchronous iterations. Lemma 3.7 uses this bound to prove a bound on the expected value of this difference.
+
+Lemma 3.7. Denote var(|et,w|) = s. Also, in addition to the conditions of Lemma 3.6, assume that the cost functions ft are i.i.d. Then, for
+
+t  t0 = (10 H)2 ,
+
+(19)
+
+the expectation of the difference ||xi+j,w - xi+j,w || is bounded by
+
+E||xi+j,w - xi+j,w ||  1.2 · E||xi,w - xi,w || + 1.2 · i s .
+
+(20)
+
+The proof may be found in Appendix A. Using (20) for j = , before reset operation (7),
+
+E||x(i+1),w - x(i+1),w ||  1.2 · E||xi,w - xi,w || + 1.2 · i s .
+
+(21)
+
+After reset operation, updates of local parameter vectors of w and w , computed in iterations t = i + 1, . . . , (i + 1), are added to the common copy of a PS model. This results in reduction of RHS of (21) by ||xi,w - xi,w ||, resulting in
+
+E||x(i+1),w - x(i+1),w ||  0.2 · E||xi,w - xi,w || + 1.2 · i s .
+
+(22)
+
+In (22), the bound on expected distance between local parameter vectors of workers w and w at iteration (i + 1), depends on the distance at the previous cycle, at iteration i. Lemma 3.8 develops a similar bound without the dependence on the distance from the previous cycle.
+
+8
+
+Under review as a conference paper at ICLR 2019
+
+Lemma 3.8. Let i0 be the smallest index, s.t. i0  t0, for t0 defined in (19). Then, for s
+j0 = log L , and any i  i0 + j0,
+E||x(i+1),w - x(i+1),w ||  2 · i  s .
+
+(23) (24)
+
+The proof may be found in Appendix A. Now, when we bounded the difference between parameter vectors in different workers, we can use this bound along with the assumption (14) to bound the difference between two ways to compute an average gradient: (4) and (11). This leads to our main result ­ bound on the expected regret of Algorithm 2.
+
+Theorem 3.9. In addition to the conditions of Theorem 3.5, assume that the cost functions ft are
+i.i.d. and that variation of gradients of the cost functions is governed by an additive Gaussian law, i.e. ft,w(x) = g(x) + et,w, for et,w  N (0, C), s.t.
+
+ · var(et,w)  1 .
+
+(25)
+
+Given
+
+t
+
+=
+
+ t
+
+for
+
+some
+
+constant
+
+
+
+>
+
+0,
+
+the
+
+expected
+
+regret
+
+of
+
+Algorithm
+
+2
+
+is
+
+bounded
+
+as
+
+follows
+
+ER[X]  4F LH(1 + 22H) 2 +
+
+L2 + F 2 + 4F H
+
+ T.
+
+
+
+(26)
+
+Consequently,
+
+for
+
+
+
+=
+
+F L
+
+,
+
+ER[X]  4F LH
+
+1+2
+
+F
+
+2
+H
+
+2 +
+
+F2 2F L + 4 H
+
+ T.
+
+LL
+
+(27)
+
+The proof may be found in Appendix A.
+4 EXPERIMENTAL RESULTS
+In this section we provide an initial experimental support for the effectiveness of our algorithm and show discrepancy in local parameter vectors of the asynchronous workers in two approaches: averaging models updates and gradient delay. We start with the discrepancy. For this experiment we trained ResNet50 model (Szegedy et al. (2017)) on CIFAR-10 data (Krizhevsky et al.). We show the results in Figure 1, where different gradient average plots correspond to different values of staleness.
+To produce a point in a gradient average plot for a given values of staleness and the number of workers, each worker starts computing an update to its local parameter vector from a parameter vector that is common to all the workers. Workers proceed computing the gradients, updating their local parameter vectors asynchronously until each worker computes the number of gradients, as the chosen value of staleness. At this point we compute the average over the last parameter vectors in the workers. Next we compute the average distance between the last parameter vectors of the workers and the average parameter vector. This average distance is plotted in Figure 1 for the corresponding values of staleness and the number of workers.
+To produce a point in the gradient delay plot, we simulate the worst case in gradient delay: workers read the central parameter vector P S.x in a sequence. The first worker reads the initial value of P S.x, the second after P S.x is advanced with one gradient, the third after P S.x is advanced with two gradients, etc., until the last worker read P S.x after it is advanced the number of times as the number workers minus 1. Each worker computes only one gradient and uses it to advance its local parameter vector. Since the last value of P S.x represents the most up-to-date model in the system, the average distance is now computed between this model and all the local models of the workers. This average distance is shown in the gradient delay plot.
+As we see, from Figure 1, staleness is an effective tool to keep low discrepancy of local parameter vectors of asynchronous workers ­ the discrepancy is roughly linear in the value of the maximal staleness parameter. In contrast, in gradient delay, this discrepancy is linear in the number of workers and, thus, is limited only by the number of workers, which may be large in very large clusters.
+9
+
+Under review as a conference paper at ICLR 2019
+
+Figure 1: Average distance for various values of staleness and number of workers.
+Next, we provide an initial experimental support for scalability of our algorithm. We trained GoogleNet model (Szegedy et al. (2016)) on ImageNet ILSVRC12 dataset (Russakovsky et al. (2015)) on a cluster with 4 machines. Each machine was equipped with a single Nvidia GeForce GTX TITAN X GPU card. The machines were interconnected using 1 giga bit communication switch. We used mini-batches of size 32 images and set the maximal staleness parameter to the value of 16. Also we implemented a linear scaling rule, where training with n workers, we increase the learning rate n times and reduce the number of iterations in each worker n times. We added a linear warm-up of 50K iterations to gradually increase the base learning rate from 0.01 to n · 0.01. After training, we test the resulting model using ImageNets own 50,000 images validation set. From Figure 2 and Figure 3, we see that our method achieves linear scalability without degradation of the test accuracy. We measured average idle time of workers and found it to be practically 0 for staleness value of at least 8.
+
+Figure 2: Speedup vs the number of workers.
+
+Figure 3: Top-5 test accuracy.
+
+5 CONCLUSIONS
+We presented a new asynchronous distributed SGD method. We show empirically that it reduces both idle time and gradient delay. We analyze the synchronous part of the algorithm, and show theoretical regret bounds.
+The proposed method shows promising results on distributed training of deep neural networks. We show that our method eliminates waiting times, which allows significant improvements in run time, compared to fully synchronous setup. The very fact of efficient hiding of communication overhead opens opportunity for distributed training over commodity clusters. Furthermore, the experiments show linear scaling of training time from 1 to 4 GPU's without compromising the final test accuracy.
+10
+
+Under review as a conference paper at ICLR 2019
+
+REFERENCES
+Jianmin Chen, Xinghao Pan, Rajat Monga, Samy Bengio, and Rafal Jozefowicz. Revisiting distributed synchronous sgd. 2016.
+Jeffrey Dean, Greg Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Mark Mao, Marc'aurelio Ranzato, Andrew Senior, Paul Tucker, Ke Yang, Quoc V. Le, and Andrew Y. Ng. Large scale distributed deep networks. pp. 1223­1231, 2012. URL http://papers.nips.cc/paper/ 4687-large-scale-distributed-deep-networks.pdf.
+Alex Krizhevsky, Vinod Nair, and Geoffrey Hinton. Cifar-10 (canadian institute for advanced research). URL http://www.cs.toronto.edu/~kriz/cifar.html.
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, et al. Imagenet large scale visual recognition challenge. International Journal of Computer Vision, 115(3):211­252, 2015.
+Shai Shalev-Shwartz and Yoram Singer. Online learning: Theory, algorithms, and applications. 2007.
+Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jon Shlens, and Zbigniew Wojna. Rethinking the inception architecture for computer vision. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 2818­2826, 2016.
+Christian Szegedy, Sergey Ioffe, Vincent Vanhoucke, and Alexander A. Alemi. Inception-v4, inception-resnet and the impact of residual connections on learning. In AAAI, pp. 4278­4284. AAAI Press, 2017.
+Yang You, Igor Gitman, and Boris Ginsburg. Scaling SGD batch size to 32k for imagenet training. CoRR, abs/1708.03888, 2017. URL http://arxiv.org/abs/1708.03888.
+Sixin Zhang, Anna E Choromanska, and Yann LeCun. Deep learning with elastic averaging sgd. In Advances in Neural Information Processing Systems, pp. 685­693, 2015.
+Martin Zinkevich, John Langford, and Alex J Smola. Slow learners are fast. In Advances in neural information processing systems, pp. 2331­2339, 2009a.
+Martin Zinkevich, John Langford, and Alex J Smola. Slow learners are fast. In Advances in neural information processing systems, pp. 2331­2339, 2009b.
+
+APPENDIX A PROOFS
+Proof of Lemma 3.1.
+
+Proof. We prove this statement by induction on i. At i = 0, the statement holds, since in the begin-
+ning all workers start from the common random model. Now assume that the statement holds for i. At iteration i, PS collects update to local parameter vector from each worker xw,i - xw,(i-1), averages them and uses the average to update its own parameter vector
+
+1 P S.xi = P S.x(i-1) + |W |
+
+(xw,i - xw,(i-1) )
+
+wW
+
+1 = P S.x(i-1) + |W |
+
+xw,i
+
+-
+
+1 |W |
+
+xw,(i-1)
+
+wW
+
+wW
+
+(28)
+
+According to the inductive assumption, the last summand in (28) equals P S.x(i-1).
+
+Proof of Lemma 3.2.
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+Proof. We start with RHS of (8)
+
+1 11
+
+|W | (xw,i+t + (xw,i - xi)) = |W |
+
+xw,i+t + |W |
+
+xw,i - xi .
+
+wW
+
+wW
+
+wW
+
+(29)
+
+By the definition of average parameter vector (1), the first summand in RHS of (29) equals xi+t, while the last two summands cancel each other.
+
+Proof of Lemma 3.3.
+
+Proof. At iteration (i - 1) after reset operation (7), workers w and w start updating their local parameter vectors for  iterations, so that at the end of the cycle before the reset operation (7),
+
+-1
+
+xi,w - xi,w = x(i-1),w -
+
+(i-1) +k g(i-1) +k,w
+
+k=0
+
+-1
+
+- x(i-1),w -
+
+(i-1) +k g(i-1) +k,w
+
+k=0
+
+-1
+
+= (x(i-1),w - x(i-1),w ) -
+
+(i-1)+k(g(i-1)+k,w - g(i-1)+k,w ) .
+
+k=0
+
+(30)
+
+The reset operation (7) at iteration i adds the updates of workers w and w , computed at iterations (i - 1) + 1, . . . , i, to the common copy of PS model, so that x(i-1),w - x(i-1),w = 0. Thus, after the reset operation
+
+-1
+
+xi,w - xi,w = -
+
+(i-1)+k(g(i-1)+k,w - g(i-1)+k,w ) .
+
+k=0
+
+(31)
+
+Finally, from (31), our assumption on the size of the gradient ft(x) and from decreasing learning rate, during this cycle that started at iteration (i - 1), the distance between workers w and w grows
+at most by
+
+||xi,w - xi,w ||  L2(i-1) = L (i-1) .
+
+Proof of Lemma 3.4.
+
+Proof. We decompose our progress as follows
+
+D(x||xi+t+1) - D(x||xi+t)
+
+=
+
+1 ||x 2
+
+- xi+t
+
++ xi+t
+
+- xi+t+1||2 -
+
+1 ||x 2
+
+- xi+t||2
+
+(32)
+
+=
+
+1 ||x 2
+
+- xi+t
+
++ i+tgi+t||2
+
+-
+
+1 ||x 2
+
+- xi+t||2
+
+(33)
+
+=
+
+1 2
+
+i2+t||gi+t||2
+
+-
+
+i+t
+
+<
+
+xi+t - x, gi+t
+
+>
+
+=
+
+1 2
+
+i2+t||gi+t||2
+
+-
+
+i+t
+
+<
+
+xi+t - x, gi+t
+
+- g~i+t
+
++ g~i+t
+
+>
+
+=
+
+1 2
+
+i2+t||gi+t||2
+
+-
+
+i+t
+
+<
+
+xi+t
+
+-
+
+x, g~i+t
+
+>
+
++i+t
+
+<
+
+xi+t
+
+-
+
+x, g~i+t
+
+-
+
+gi+t
+
+>
+
+.
+
+To prove (33) from (32), we used (12) Dividing both sides by i+t and moving < xi+t - x, g~i+t > to the LHS completes the proof.
+
+Proof of Theorem 3.5.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Proof. First we state a useful inequality: For n vectors ai, i = 1, . . . , n (by induction on n):
+nn
+ai  |ai|
+i=1 i=1
+
+(34)
+
+Also we will use the following sum bounds:
+
+n n(n + 1) i= 2
+i=1
+
+and
+
+b 1  b
+
+1
+
+
+
+
+
+dx = b - a - 1  b - a + 1 .
+
+i=a 2 i
+
+a-1 2 x
+
+(35) (36)
+
+We start with summing (13) along iterations:
+
+T
+< xt - x, g~t >
+
+t=1
+
+=
+
+T t=1
+
+1 2
+
+t||gt||2
+
++
+
+T t=1
+
+D(x||xt)
+
+- D(x||xt+1) t
+
++
+
+T t=1
+
+<
+
+xt
+
+-
+
+x,
+
+g~t
+
+-
+
+gt
+
+>
+
+T
+=
+t=1
+
+1 2
+
+t||gt||2
+
++ D(x||x1) - D(x||xT +1) + T 1 T t=2
+
+D(x||xt)
+
+1- 1 t t-1
+
+T
++ < xt - x, g~t - gt > .
+
+t=1
+
+(37)
+
+Next, we borrow the derivation of expressions (38) and (39) from the proof of Theorem 2, Zinkevich et al. (2009a). Note, however, that we added a new term to (37) ­ the last term that is specific to Algorithm 2. This term does not appear in the proof of Theorem 2, Zinkevich et al. (2009a). By the Lipschitz property of gradients and the definition of t, we can bound the first summand of the above regret expression via
+
+T
+
+1 2
+
+t||gt
+
+||2
+
+t=1
+
+
+
+T t=1
+
+11 2 t |W |
+
+wW
+
+||gt,w ||2
+
+
+
+T t=1
+
+1 2
+
+t
+
+L2
+
+=
+
+T t=1
+
+1 2
+
+ L2 t
+
+
+
+ L2 T
+
+.
+
+(38)
+
+Also
+
+D(x||x1) 1
+
++
+
+T t=2
+
+D(x||xt)
+
+11 -
+t t-1
+
+F2  T.
+
+
+(39)
+
+We
+
+omit
+
+the
+
+negative
+
+factor
+
+-
+
+D(x||xT +1) T
+
+.
+
+Now
+
+we
+
+start
+
+the
+
+analysis
+
+of
+
+the
+
+last
+
+term
+
+in
+
+(37),
+
+which
+
+is new and specific to Algorithm 2. Using (34), we bound the last summand of (37)
+
+TT
+< xt - x, gt - g~t >  ||xt - x|| · ||g~t - gt|| .
+t=1 t=1
+
+(40)
+
+Substituting (38), (39) and (40) into (37), we get
+
+R[X ]
+
+
+
+ L2 T
+
++
+
+F2 T
+
++
+
+
+
+T
+
+||xt - x|| · ||g~t - gt|| ,
+
+t=1
+
+(41)
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Next, we proceed with bounding the last multiplicative factor in the RHS of (40)
+
+||g~t - gt|| =
+
+1 |W |
+
+gt,w
+
+-
+
+1 |W |
+
+ft,w (xt )
+
+1 = |W |
+
+(gt,w - ft,w(xt))
+
+wW
+
+wW
+
+wW
+
+
+
+1 |W |
+
+||gt,w
+
+-
+
+ft,w (xt )||
+
+
+
+H |W |
+
+||xt,w - xt|| .
+
+wW
+
+wW
+
+(42)
+
+In (42) we used inequality (34) and (14). Also note that if t is the last iteration in a cycle, gt,w is computed on the parameter vector before the reset operation (7) is applied. Now we bound each summand in (42). For t = i + j
+
+j-1 1
+
+xi+j,w - xi+j = xi,w +
+
+-i+kgi+k,w - |W |
+
+k=0
+
+w W
+
+j-1
+xi,w + -i+kgi+k,w
+k=0
+
+1 j-1 1
+
+= |W |
+
+(xi,w - xi,w ) -
+
+i+k |W |
+
+(gi+k,w - gi+k,w )
+
+w W
+
+k=0
+
+w W
+
+(43)
+
+Using Lemma 3.3, the assumption that gradients of cost functions are bounded by L, and learning rate decreases as iterations increase,
+
+||xi+j,w
+
+-
+
+xi+j ||
+
+
+
+L (i-1)
+
++
+
+j-1
+
+i
+
+1 |W |
+
+2L  2L (i-1) .
+
+k=0
+
+w W
+
+(44)
+
+Substituting (44) into (42), gives
+
+||gi+j
+
+- g~i+j ||
+
+
+
+H |W |
+
+2L (i-1)  2 LH(i-1) .
+
+wW
+
+(45)
+
+Now, using the fact that learning rate is a decreasing function and the assumption that distance between any pair of points is bounded by F 2, we substitute (45) into (40) to get
+
+TT
+
+T
+
+< xt - x, gt - g~t >  2F  LHt-2 = 2F  LH t-2 .
+
+t=1 t=1
+
+t=1
+
+(46)
+
+Note that for t < 1, we use t = 1. Next, we separate the iteration t into two ranges: t = 1, . . . , 2
+
+and t > 2
+
+2
+t-2
+t=1
+
++
+
+T -2 t=1
+
+t
+
+=
+
+2
+
+T -2
++ 2
+t=1
+
+1 2t
+
+
+
+2
+
+ + 2 T
+
+- 2
+
+.
+
+(47)
+
+Substituting (47) into (46)
+
+T
+
+< xt - x, gt - g~t >
+
+  2 F LH(2 + 2 T - 2 ) .
+
+t=1
+
+(48)
+
+Substituting (38), (39) and (48) into (37), we prove (15).
+
+Using 2
+
+=
+
+F2 2 L2
+
+in (15), we prove
+
+(16).
+
+Proof of Lemma 3.6.
+
+Proof. We prove the lemma by induction on j. For j = 0, the statement of lemma holds. Now assume that the lemma holds for j - 1. Then
+||xi+j,w - xi+j,w || = ||xi+j-1,w - xi+j-1,w - i+j-1(g(xi+j-1,w) - g(xi+j-1,w ))
+- i+j-1(ei+j-1,w - ei+j-1,w )||  ||xi+j-1,w - xi+j-1,w || + i+j-1||g(xi+j-1,w) - g(xi+j-1,w )||
++ i+j-1||ei+j-1,w - ei+j-1,w || .
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+We use (14) in the above expression
+
+||xi+j,w - xi+j,w ||  (i+j-1H + 1)||xi+j-1,w - xi+j-1,w || + i+j-1||ei+j-1,w - ei+j-1,w ||
+
+Now, applying the inductive assumption
+
+j-2
+
+||xi+j,w - xi+j,w ||  (i+j-1H + 1)||xi,w - xi,w || · (i+kH + 1)
+
+k=0
+
+j-2
+
+j-2
+
++ (i+j-1H + 1) i+k||ei+k,w - ei+k,w || ·
+
+(i+mH + 1)
+
+k=0
+
+m=k+1
+
++ i+j-1||ei+j-1,w - ei+j-1,w ||
+
+(49)
+
+Inserting (i+j-1H + 1) into product in the first summand in (49) amd into the sum in the second summand,
+
+j-1
+
+||xi+j,w - xi+j,w ||  ||xi,w - xi,w || (i+kH + 1)
+
+k=0
+
+j-2
+
+j-1
+
++ i+k||ei+k,w - ei+k,w || ·
+
+(i+mH + 1) + i+j-1||ei+j-1,w - ei+j-1,w ||
+
+k=0
+
+m=k+1
+
+(50)
+
+Now, note that the last summand in (50) corresponds to the summand in (18) for k = j - 1. This completes the proof.
+
+Proof of Lemma 3.7.
+
+Proof. First note that from (19) it follows that
+
+tH  0.1 .
+
+(51)
+
+Since i shrinks down, as i grows up, and tH + 1 > 1, (18) yields
+
+||xi+j,w - xi+j,w ||  (i H + 1)
+-1
+· ||xi,w - xi,w || + i ||ei+k,w - ei+k,w ||
+k=0
+
+.
+
+(52)
+
+After the expansion of (iH + 1) in (52) into Taylor sequence and applying a simple algebra
+
+(iH + 1)  1 + iH + (iH)2 (1 - iH)-1
+
+(53)
+
+From (51) we can bound
+
+(iH + 1)  1.2 .
+
+(54)
+
+Assigning (54) into (52),
+
+-1
+||xi+j,w - xi+j,w ||  1.2 · ||xi,w - xi,w || + 1.2 · i ||ei+k,w - ei+k,w || .
+k=0
+
+(55)
+
+Since ei+k,w and ei+k,w are i.i.d. with mean 0,
+
+E||ei+k,w - ei+k,w || = var(ei+k,w - ei+k,w ) = 2var(ei+k,w) .
+
+(56)
+
+Taking expectation of the both sides of (55), substituting (56) into the resulting inequality and using the assumption on variance of random variables et,w, we complete the proof.
+
+Proof of Lemma 3.8.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Proof. From Lemma 3.3,
+
+||xi0,w - xi0,w ||  2L (i0-1) .
+
+(57)
+
+From (22), each cycle j after iteration i0, reduces the distance between w and w by factor of 0.2,
+
+while adding to the distance the value of 1.2 · i+j s. This means that after the number of cycles
+
+j0
+
+j0
+
+= log
+
+1.2 · i0 s 2L (i0-1)
+
+= log
+
+s L
+
+,
+
+for any i  i0 + j0, the first summand in (22) gets bounded by 0.8 · i s.
+
+Proof of Theorem 3.9.
+
+Proof. To prove this theorem, we follow the proof of Theorem 3.5 and develop an alternative bound on ||xt,w - xt|| in (42).
+
+We will split the sum in (40) into two ranges of t: t < t0 + j0 and t  t0 + j0 for t0, j0, defined
+in (19) and (23) respectively. To simplify notation, from (23), we can assume that j0 is a constant and we can assume that t0 + j0  2t0. For t < 2t0, we use (48) to show
+
+2t0 -1
+
+||xt
+
+-
+
+x||
+
+·
+
+||gt
+
+-
+
+g~t||
+
+
+
+2 F LH(2
+
++
+
+ 2 2t0
+
+-
+
+2 )
+
+.
+
+t=1
+
+(58)
+
+For t  2t0, we first observe
+
+||xt,w
+
+-
+
+xt||
+
+=
+
+1 |W |
+
+(xt,w - xt,w )
+
+1 |W |
+
+||xt,w - xt,w || .
+
+w W
+
+w W
+
+Next we use (24) to bound the above expression.
+
+(59)
+
+E||xt,w - xt||  2t-  s . Substituting this bound into (42), we get
+
+(60)
+
+E||gt - g~t||  2Ht-  s .
+
+(61)
+
+Using (61) in (40) for t  2t0
+
+TT
+
+T
+
+E
+
+< xt - x, gt - g~t > 
+
+E(||xt - x|| · ||gt - g~t||) 
+
+F E||gt - g~t|| >
+
+t=2t0
+
+t=2t0
+
+t=2t0
+
+T  F 2Ht-  s  4F H T  s .
+
+(62)
+
+t=t0
+
+Combining (58) and (62) in (40) and using the definition (19) of t0
+
+T E < xt - x, gt - g~t >  4 2F LH(1 + 22H) + 4F H T  s
+t=1
+
+(63)
+
+Using
+
+the
+
+assumption
+
+(25),
+
+and
+
+substituting
+
+into
+
+(41)
+
+we
+
+prove
+
+(26).
+
+Finally we
+
+use
+
+value
+
+
+
+=
+
+F L
+
+to
+
+prove (27).
+
+16
+
+

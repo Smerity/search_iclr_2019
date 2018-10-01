@@ -1,0 +1,2079 @@
+Under review as a conference paper at ICLR 2019
+TOWARDS CONSISTENT PERFORMANCE ON ATARI USING EXPERT DEMONSTRATIONS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Despite significant advances in the field of deep Reinforcement Learning (RL), today's algorithms still fail to learn human-level policies consistently over a set of diverse tasks such as Atari 2600 games. We identify three key challenges that any algorithm needs to master in order to perform well on all games: processing diverse reward distributions, reasoning over long time horizons, and exploring efficiently. In this paper, we propose an algorithm that addresses each of these challenges and is able to learn human-level policies on nearly all Atari games. A new transformed Bellman operator allows our algorithm to process rewards of varying densities and scales; an auxiliary temporal consistency loss allows us to train stably using a discount factor of  = 0.999 (instead of  = 0.99) extending the effective planning horizon by an order of magnitude; and we ease the exploration problem by using human demonstrations that guide the agent towards rewarding states. When tested on a set of 42 Atari games, our algorithm exceeds the performance of an average human on 40 games using a common set of hyper parameters.
+1 INTRODUCTION
+In recent years, significant advances in the field of deep Reinforcement Learning (RL) have led to artificial agents that are able to reach human-level control on a wide array of tasks such as some Atari 2600 games (Bellemare et al., 2015). In many of the Atari games, these agents learn control policies that far exceed the capabilities of an average human player (Gruslys et al., 2018; Hessel et al., 2018; Horgan et al., 2018). However, learning human-level policies consistently across the entire set of games remains an open problem.
+We argue that an algorithm needs to overcome three key challenges in order to perform well on all Atari games. The first challenge is processing diverse reward distributions. An algorithm must learn stably regardless of reward density and scale. Mnih et al. (2015) showed that clipping rewards to the canonical interval [-1, 1] is one way to achieve stability. However, this clipping operation may change the set of optimal policies. For example, the agent no longer differentiates between striking a single pin or all ten pins in BOWLING. Hence, optimizing the unaltered reward signal in a stable manner is crucial to achieving consistent performance across games. The second challenge is reasoning over long time horizons, which means the algorithm should be able to choose actions in anticipation of rewards that might be far away. For example, in MONTEZUMA'S REVENGE, individual rewards might be separated by several hundred time steps. In the standard -discounted RL setting, this means the algorithm should be able to handle discount factors close to 1. The third and final challenge is efficient exploration of the MDP. An algorithm that explores efficiently is able to discover long trajectories with a high cumulative reward in a reasonable amount of time even if individual rewards are very sparse. While each problem has been partially addressed in the literature, none of the existing deep RL algorithms have been able to address these three challenges at once.
+In this paper, we propose a new Deep Q-Network (DQN) (Mnih et al., 2015) style algorithm that specifically addresses these three challenges. In order to learn stably independent of the reward distribution, we use a transformed Bellman operator that reduces the variance of the action-value function. Learning with the transformed operator allows us to process the unaltered environment rewards regardless of scale and density. We prove that the optimal policy does not change in deterministic MDPs and show that under certain assumptions the operator is a contraction in stochastic
+1
+
+Under review as a conference paper at ICLR 2019
+MDPs (i.e., the algorithm converges to a fixed point) (see Sec. 3.2). Our algorithm learns stably even at high discount factors due to an auxiliary temporal consistency (TC) loss. This loss prevents the network from prematurely generalizing to unseen states (Sec. 3.3) allowing us to use a discount factor as high as  = 0.999 in practice. This extends the effective planning horizon of our algorithm by one order of magnitude when compared to other deep RL approaches on Atari. Finally, we improve the efficiency of DQN's default exploration scheme by combining the distributed experience replay approach of Horgan et al. (2018) with the Deep Q-learning from Demonstrations (DQfD) algorithm of Hester et al. (2018). The resulting architecture is a distributed actor-learner system that combines offline expert demonstrations with online agent experiences (Sec. 3.4).
+We experimentally evaluate our algorithm on a set of 42 games for which we have demonstrations from an expert human player (see Table 6). Using the same hyper parameters on all games, our algorithm exceeds the performance of an average human player on 40 games, the expert player on 34 games, and state-of-the-art agents on at least 28 games. Furthermore, we significantly advance the state-of-the-art on sparse reward games. Our algorithm completes the first level of MONTEZUMA'S REVENGE and it achieves a score of 3997 points on PITFALL! without compromising performance on dense reward games and while only using 5 demonstration trajectories.
+2 RELATED WORK
+Reinforcement Learning with Expert Demonstrations (RLED): RLED seeks to use expert demonstrations to guide the exploration process in difficult RL problems. Some early works in this area (Atkeson & Schaal, 1997; Schaal, 1997) used expert demonstrations to find a good initial policy before fine-tuning it with RL. More recent approaches have explicitly combined expert demonstrations with RL data during the learning of the policy or action-value function (Chemali & Lazaric, 2015; Kim et al., 2013; Piot et al., 2014). In these works, expert demonstrations were used to build an imitation loss function (classification-based loss) or max-margin constraints. While these algorithms worked reasonably well in small problems, they relied on handcrafted features to describe states and were not applied to large MDPs. In contrast, approaches using deep neural networks allow RLED to be explored in more challenging RL tasks such as Atari or robotics. In particular, our work builds upon DQfD (Hester et al., 2018), which used a separate replay buffer for expert demonstrations, and minimized the sum of a temporal difference loss and a supervised classification loss. Another similar approach is Replay Buffer Spiking (RBS) (Lipton et al., 2016), wherein the experience replay buffer is initialized with demonstration data, but this data is not kept for the full duration of the training. In robotics tasks, similar techniques have been combined with other improvements to successfully solve difficult exploration problems (Nair et al., 2017; Vecerík et al., 2017).
+Deep Q-Networks (DQN): DQN (Mnih et al., 2015) used deep neural networks as function approximators to apply RL to Atari games. Since that work, many extensions that significantly improve the algorithm's performance have been developed. For example, DQN uses a replay buffer to store off-policy experiences and the algorithm learns by sampling batches uniformly from the replay buffer; instead of using uniform samples, Schaul et al. (2015) proposed prioritized sampling where transitions are weighted by their absolute temporal difference error. This concept was further improved by Ape-X DQN (Horgan et al., 2018) which decoupled the data collection and the learning processes by having many actors feed data to a central prioritized replay buffer that an independent learner can sample from.
+Durugkar & Stone (2017) observed that due to over-generalization in DQN, updates to the value of the current state also have an adverse effect on the values of the next state. This can lead to unstable learning when the discount factor is high. To counteract this effect, they constrained the TD update to be orthogonal to the direction of maximum change of the next state. However, their approach only worked on toy domains such as Cart-Pole. Finally, van Hasselt et al. (2016a) successfully extended DQN to process unclipped rewards with an algorithm called PopArt, which adaptively rescales the targets for the value network to have zero mean and unit variance.
+3 ALGORITHM
+In this section, we describe our algorithm, which consists of three components: (1) The transformed Bellman operator; (2) The temporal consistency (TC) loss; (3) Combining Ape-X DQN and DQfD.
+2
+
+Under review as a conference paper at ICLR 2019
+
+3.1 DQN BACKGROUND
+Let X , A, r, p,  be a finite, discrete-time MDP where X is the state space, A the action space, r the reward function which represents the one-step reward distribution r(x, a) of doing action a in state x,   [0, 1] the discount factor and p a stochastic kernel modelling the one-step Markovian dynamics (p(x |x, a) is the probability of transitioning to state x by choosing action a in state x). The quality of a policy  is determined by the action-value function
+
+Q : X × A  R, (x, a)  E  tr(xt, at) | x0 = x, a0 = a ,
+t0
+where E is the expectation over the distribution of the admissible trajectories (x0, a0, x1, a1, . . . ) obtained by executing the policy  starting from state x and taking action a. The goal is to find a policy  that maximizes the state-value V (x) := maxaA Q(x, a) for all states x, i.e., find  such that V (x) = sup V (x) for all x  X . While there may be several optimal policies, they all share a common optimal action-value function Q (Puterman, 1994). Furthermore, acting greedily with respect to the optimal action-value function Q yields an optimal policy. In addition, Q is the unique fixed point of the Bellman optimality operator T defined as
+
+(T Q)(x, a) := Ex p(·|x,a)
+
+r(x, a) +  max Q(x , a )
+a A
+
+,
+
+(x, a)  X × A
+
+for any Q : X × A  R. Because T is a -contraction, we can learn Q using a fixed point iteration. Starting with an arbitrary function Q(0) and then iterating Q(k) := T Q(k-1) for k  N generates a sequence of functions that converges to Q.
+
+DQN (Mnih et al., 2015) is an online-RL algorithm using a deep neural network f with parameters  as a function approximator of the optimal action-value function Q. The algorithm starts with a random initialization of the network weights (0) and then iterates
+
+(k) := arg min Ex,a [L(f(x, a) - (T f(k-1) )(x, a))] ,
+
+
+(1)
+
+where the expectation is taken with respect to a random sample of states and actions from an experience replay buffer and L is the Huber loss (Huber, 1964) defined as
+
+L : R  R, x 
+
+1 2
+
+x2
+
+|x| -
+
+1 2
+
+if |x|  1 otherwise
+
+In practice, the minimization problem in (1) is only approximately solved by performing a finite and fixed number of stochastic gradient descent (SGD) steps1 and all expectations are approximated by
+sample averages.
+
+3.2 TRANSFORMED BELLMAN OPERATOR
+
+Mnih et al. (2015) have empirically observed that the errors induced by the limited network capacity, the approximate finite-time solution to (1), and the stochasticity of the optimization problem can cause the algorithm to diverge if the variance of the action-value function is too high. In order to reduce the variance, they clip the reward distribution to the interval [-1, 1]. While this achieves the desired goal of stabilizing the algorithm, it significantly changes the set of optimal policies. For example, consider a simplified version of BOWLING where an episode only consists of a single throw. If the original reward is the number of hit pins and the rewards were clipped, any policy that hits at least a single pin would be optimal under the clipped reward function. Instead of reducing the magnitude of the rewards, we propose to focus on the action-value function instead. We use a function h : R  R that reduces the scale of the action-value function. Our new operator Th is defined as
+
+(ThQ)(x, a) := Ex p(·|x,a)
+
+h
+
+r(x, a) +  max h-1(Q(x , a ))
+a A
+
+, (x, a)  X × A.
+
+Proposition 3.1. Let Q be the fixed point of T and Q : X × A  R, then
+
+1Mnih et al. (2015) refer to the number of SGD iterations as target update period.
+
+3
+
+Under review as a conference paper at ICLR 2019
+(i) If h(z) = z for  > 0, then ThkQ -k--- h  Q = Q.
+(ii) If h is strictly monotonically increasing and the MDP is deterministic (i.e., p(·|x, a) and r(x, a) are point measures for all x, a  X × A), then ThkQ -k--- h  Q.
+Proposition 3.1 shows that in the basic cases when either h is linear or the MDP is deterministic, Th has the unique fixed point h  Q. We present a proof in Sec. B in the appendix. Furthermore, the fixed point iteration ThkQ converges to h  Q for all Q. We treat the case of stochastic MDPs in the appendix (see Proposition C.1). The following proposition (see a proof in Sec. B in the appendix) shows that contracting h can achieve the desired goal of decreasing the scale and variance of the action-value function. Proposition 3.2. Let h : R  R be a contraction mapping with fixed point 0 (i.e., h(0) = 0), then
+1. |(h  Q)(x, a)|  |Q(x, a)| for all x, a  X × A.
+2. Var((h  Q)(X, A))  Var(Q(X, A)) for all random variables X, A on X × A.
+In our algorithm, we use h : z  sign(z)( |z| + 1 - 1) + z with  = 10-2 where the additive regularization term z ensures that h-1 is Lipschitz continuous (see Proposition C.1). We chose this function because it is an invertible contraction mapping with fixed point 0 and has a closed-form inverse (see Proposition C.2).
+In practice, DQN minimizes the problem in (1) by sampling transitions of the form t = (x, a, r , x ) from a replay buffer where x  X , a  (·|x), r  r(x, a), and x  p(x, a). Let t1, ..., tN be N transitions from the buffer with normalized sampling weights w1, ..., wN , then for k  N the loss function in (1) using the operator Th is approximated as
+N
+Ex,a [L(f(x, a) - (Thf(k-1) )(x, a))]  wiL f(xi, ai) - h(ri + h-1(f(k-1) (xi, ai)))
+i=1
+=: LTD(; (ti)iN=1, (wi)Ni=1, (k-1)) where ai := arg maxaA f(k-1) (xi, a) for DQN and ai := arg maxaA f(xi, a) for Double DQN (van Hasselt et al., 2016b).
+3.3 TEMPORAL CONSISTENCY (TC) LOSS
+The stability of DQN, which minimizes the TD-loss LTD, is primarily determined by the target Thf(k-1) . While the transformed Bellman operator provides an atemporal reduction of the target's scale and variance, instability can still occur as the discount factor  approaches 1. Increasing the discount factor decreases the temporal difference in value between non-rewarding states. In particular, unwanted generalization of the neural network f to the next state x (due to the similarity of temporally adjacent target values) can result in catastrophic TD backups. We resolve the problem by adding an auxiliary temporal consistency (TC) loss of the form
+N
+LTC(; (ti)iN=1, (wi)iN=1, (k-1)) := wiL (f(xi, ai) - f(k-1) (xi, ai))
+i=1
+where k  N is the current iteration. The TC-loss penalizes weight updates that change the next action-value estimate f(x , a ). This makes sure that the updated estimates adhere to the operator Th and thus are consistent over time.
+3.4 APE-X DQFD
+In this section, we describe how we combine the transformed Bellman operator and the TC loss with the DQfD algorithm (Hester et al., 2018) and distributed prioritized experience replay (Horgan et al., 2018). The resulting algorithm, which we call Ape-X DQfD following Horgan et al. (2018), is a distributed DQN algorithm with expert demonstrations that is robust to the reward distribution and can learn at discount factors an order of magnitude higher than what was possible before (i.e.,  = 0.999 instead of  = 0.99). Our algorithm consists of three components: (1) replay buffers; (2) actor
+4
+
+Under review as a conference paper at ICLR 2019
+
+Prioritized samples
+
+25% 75% Training batch
+
+Prioritized samples
+
+Learner Minimize TD loss
+Network weights
+
+Prioritized samples Updated priorities
+
+Replay Buffer Agent experience
+
+Actor Agent
+Environment
+
+Agent transitions and initial priorities
+
+Expert Replay Buffer
+Expert experience
+Expert transitions
+Demonstration data
+
+Updated priorities
+
+Learner
+Minimize TD loss and imitation loss
+
+Updated priorities
+
+Actor Replay Buffer
+Agent experience
+
+Network weights
+Actor Agent
+Environment
+
+Agent transitions and initial priorities
+
+(a) Ape-X DQN
+
+(b) Ape-X DQfD (ours)
+
+Figure 1: The figure compares our architecture (b) to the one proposed by Horgan et al. (2018) (a).
+
+processes; and (3) a learner process. Fig. 1 shows how our architecture compares to the one used by Horgan et al. (2018).
+
+Replay buffers. Following Hester et al. (2018), we maintain two replay buffers: an actor replay buffer and an expert replay buffer. Both buffers store 1-step and 10-step transitions and are prioritized (Schaul et al., 2015). The transitions in the actor replay buffer come from actor processes that interact with the MDP. In order to limit the memory consumption of the actor replay buffer, we regularly remove transitions in a FIFO-manner. The expert replay buffer is filled once offline before training commences.
+
+Actor processes. Horgan et al. (2018) showed that we can significantly improve the performance
+
+of DQN with prioritized replay buffers by having many actor processes. We follow their approach
+
+and use m = 128 actor processes. Each actor i follows an i-greedy policy based on the current
+
+estimate of the action-value function. The noise levels i are chosen as i := 0.1i+3(1-i) where
+
+i
+
+:=
+
+i-1 m-1
+
+.
+
+Notably,
+
+this
+
+exploration
+
+is
+
+closer
+
+to
+
+the
+
+one
+
+used
+
+by
+
+Hester
+
+et
+
+al.
+
+(2018)
+
+and
+
+is
+
+much
+
+lower (i.e., less random exploration) than the schedule used by Horgan et al. (2018).
+
+Learner process. The learner process samples experiences from the two replay buffers and minimizes
+a loss in order to approximate the optimal action-value function. Following Hester et al. (2018), we
+combine the TD-loss LTD with a supervised imitation loss. Let t1, ..., tN be transitions of the form ti = (xi, ai, ri, xi, ei) with normalized sampling weights w1, ..., wN where ei is 1 if the transition is part of the best (i.e., highest episode return) expert episode and 0 otherwise. The imitation loss is a
+max-margin loss of the form
+
+N
+
+LIM(; (ti)iN=1, (wi)Ni=1, (k-1)) :=
+
+wiei
+
+max[f
+aA
+
+(xi
+
+,
+
+a)
+
++
+
+a=ai
+
+]
+
+-
+
+f
+
+(xi
+
+,
+
+ai
+
+)
+
+i=1
+
+(2)
+
+where   R is the margin and a=ai is 1 if a = ai and 0 otherwise. Combining the imitation loss with the TD loss and the TC loss yields the total loss formulation
+
+L(; (ti)Ni=1, (wi)iN=1, (k-1)) := (LTD + LTC + LIM)(; (ti)Ni=1, (wi)Ni=1, (k-1)).
+Algo. 1, provided in the appendix, shows the entire learner procedure. Note that while we only apply the imitation loss LIM on the best expert trajectory, we still use all expert trajectories for the other two losses.
+Our learning algorithm differs from the one used by Hester et al. (2018) in three important ways. First, we do not have a pre-training phase where we minimize L only using expert transitions. We learn with a mix of actor and expert transitions from the beginning. Second, we maintain a fixed ratio of actor and expert transitions. For each SGD step, our training batch consists of 75% agent transitions and 25% expert transitions. The ratio is constant throughout the entire learning process. Finally, we only apply the imitation loss LIM to the best expert episode instead of all episodes.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Rainbow DQfD Ape-X DQN Ape-X DQfD Ape-X DQfD (deeper) Random Avg. Human Best Expert Trajectory
+
+Algorithm
+Rainbow DQN DQfD
+Ape-X DQN
+Ape-X DQfD Ape-X DQfD (deeper)
+
+­ 11 / 42 34 / 42
+32 / 42 36 / 42
+
+31 / 42 ­
+35 / 42
+39 / 42 40 / 42
+
+9 / 42 7 / 42
+­
+15 / 42 28 / 42
+
+10 / 42 11 / 42 28 / 42
+­ 33 / 42
+
+7 / 42 2 / 42 15 / 42
+9 / 42 ­
+
+41 / 42 40 / 42 40 / 42
+40 / 42 42 / 42
+
+32 / 42 25 / 42 35 / 42
+39 / 42 40 / 42
+
+24 / 42 13 / 42 31 / 42
+32 / 42 34 / 42
+
+Table 1: The table shows on which fraction of the tested games one approach performs at least as well as the other. The scores used for the comparison are using the no-op starts regime. As described in Sec. 4.2, we compare the agents' scores to the scores obtained by an average human player and an expert player. Ape-X DQfD (deeper) out-performs the average human on 40 of 42 games.
+
+Algorithm
+Rainbow DQN DQfD
+Ape-X DQN
+Ape-X DQN* (c, 0.99) Ape-X DQN* (u, 0.99) Ape-X DQN* (c, 0.999) Ape-X DQN* (u, 0.999)
+Ape-X DQfD Ape-X DQfD (deeper)
+
+No-op starts
+
+Mean
+
+Median
+
+42 Games
+
+57 Games
+
+42 Games
+
+57 Games
+
+1022% 364% 1770%
+
+874% ­
+1695%
+
+231% 113% 421%
+
+231% ­
+434%
+
+1091% 866% 1546% 1215%
+
+­ ­ ­ ­
+
+314% 315% 357% 280%
+
+­ ­ ­ ­
+
+1536% 2346%
+
+­ ­
+
+339% 702%
+
+­ ­
+
+Human starts
+
+Mean
+
+Median
+
+42 Games
+
+57 Games
+
+42 Games
+
+57 Games
+
+897% ­
+1651%
+
+776% ­
+1591%
+
+159% ­
+354%
+
+153% ­
+358%
+
+971% 785% 1423% 1085%
+
+­ ­ ­ ­
+
+269% 200% 240% 239%
+
+­ ­ ­ ­
+
+1461% 2028%
+
+­ ­
+
+302% 547%
+
+­ ­
+
+Table 2: The table shows the human-normalized performance of our algorithm and the baselines.
+
+For
+
+each
+
+game,
+
+we
+
+normalize
+
+the
+
+score
+
+as
+
+alg. score-random score avg. human score-random score
+
+× 100
+
+and
+
+then
+
+aggregate
+
+over
+
+all
+
+games (mean or median). Because we only have demonstrations on 42 out of the 57 games, we report
+
+the performances on 42 games and also 57 games for baselines not using demonstrations. Results
+
+of Ape-X DQN using our hyper parameters are marked with an asterisk*. The experiment Ape-X
+
+DQN* (u, 0.999) uses the exact same hyper parameters and network architecture used for the Ape-X
+
+DQfD experiments.
+
+4 EXPERIMENTAL EVALUATION
+
+We evaluate our approach on the same subset of 42 games from the Arcade Learning Environment (ALE) (Bellemare et al., 2015) used by Hester et al. (2018). We report the performance using the no-op starts and the human starts test regimes (Mnih et al., 2015).
+
+4.1 HYPER PARAMETERS
+Our hyper parameter setting deviates from the one used by Horgan et al. (2018) in several ways (see Tab. 3 in the appendix). As described in Sec. 3, we use a higher discount factor than Ape-X DQN (Horgan et al., 2018) ( = 0.999 instead of  = 0.99) and we do not clip the environment rewards to [-1, 1]. These changes are motivated by our goal of finding an algorithm that learns consistently on all games. In order to distinguish the contribution of changed hyper parameters from the algorithmic contributions, we rerun Ape-X DQN using variations of our hyper parameters (column Ape-X DQfD in Tab. 3). We use the naming strategy Ape-X DQN* ([c|u], [0.99|0.999]) when reporting the results where [c|u] indicates the type of reward processing (clipped or unclipped) and [0.99|0.999] is the discount factor. Tab. 2 and Fig. 6 shows the results.
+We can draw two conclusions regarding reward clipping in Ape-X DQN. First, the overall performance as measured by the mean and median scores decreases when using the unclipped rewards. This shows that simplifying the reward structure of the MDPs helps Ape-X DQN learn better policies. However, when aiming at consistency (i.e., having one algorithm perform well on all games), reward clipping is the wrong thing to do. When looking at our introductory example BOWLING (Fig. 6), we see that indeed reward clipping hurts performance and Ape-X DQN is able to learn a good policy only when it sees the true environment rewards. As the following experiments show, using the transformed
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Bellman operator can help recover some of the performance losses incurred by using unclipped rewards.
+
+4.2 BENCHMARK RESULTS
+
+We compare our approach to Ape-X DQN (Horgan et al., 2018), on which our actor-learner architecture is based, DQfD (Hester et al., 2018), which introduced the expert replay buffer and the imitation loss, and Rainbow DQN (Hessel et al., 2018), which combines all major DQN extensions from the literature into a single algorithm. Note that the scores reported in (Horgan et al., 2018) were obtained by running 360 actors. Due to resource constraints, we limit the number of actors to 128 for all Ape-X DQfD experiments. Besides comparing our performance to other RL agents, we are also interested in comparing our scores to a human player. Because our demonstrations were gathered from an expert player, the expert scores are mostly better than the level of human performance reported in the literature (Mnih et al., 2015; Wang et al., 2016). Hence, we treat the historical human scores as the performance of an average human and the scores of our expert as expert performance.
+
+We first analyse the performance of Ape-X DQfD with the standard dueling DQN architecture (Wang et al., 2016) that is also used by the baselines. We report the scores as Ape-X DQfD in Tables 1 and 2. We designed the algorithm to achieve higher consistency over a broad range of games and the scores shown in Table 1 reflect that goal. Whereas previous approaches outperformed an average human on at most 35 out of 42 games, Ape-X DQfD with the standard dueling architecture achieves a new state-of-the-art result of 39 out of 42 games. This means we significantly improve the performance on the tails of the distribution of scores over the games. When looking at this performance in the context of the median human-normalized scores reported in Table 2, we see that we significantly increase the set of games where we learn good policies at the expense of achieving lower peak scores on some games.
+
+One of the significant changes in our experimental setup is moving from a discount factor of  = 0.99
+
+to  = 0.999. Jiang et al. (2015) argue that this increases the complexity of the learning problem
+
+and, thus, requires a bigger hypothesis space. Hence, in addition to the standard architecture, we also
+
+evaluated a slightly wider (i.e., double the number of convolutional kernels) and deeper (one extra
+
+fully connected layer) network architecture (see Fig. 9). With the deeper architecture, our algorithm
+
+outperforms an average human on 40 out of 42 games. Furthermore, it is the first deep RL algorithm
+
+to learn non-trivial policies on all games including sparse reward games such as MONTEZUMA'S
+
+REVENGE, PRIVATE EYE, and PITFALL!. For example, we achieve 3997 points in PITFALL!, which
+
+is below the 6464 points of an average human but far above any baseline. Finally, with a median
+
+human-normalized
+
+score
+
+of
+
+702%
+
+and
+
+exceeding
+
+every
+
+baseline
+
+on
+
+at
+
+least
+
+2 3
+
+of
+
+the
+
+games,
+
+we
+
+demonstrate strong peak performance and consistency over the entire benchmark.
+
+4.3 IMITATION VS. INSPIRATION
+Although we use demonstration data, the goal of RLED algorithms is still to learn an optimal policy that maximizes the expected -discounted return. While Table 1 shows that we exceed the best expert episode on 34 games using the deeper architecture, it is hard to grasp the qualitative differences between the expert policies and our algorithm's policies. In order to qualitatively compare the agent and the expert, we provide videos in the appendix (see Sec. G) and we plot the cumulative episode return of the best expert and agent episodes in Fig. 2. We see that our algorithm ( ) finds more time-efficient policies than the expert ( ) in all cases. This is a strong indicator that our algorithm does not do pure imitation but improves upon the demonstrated policies.
+
+4.4 ABLATION STUDY
+We evaluate the performance contributions of the three key ingredients of Ape-X DQfD (transformed Bellman operator, the TC-loss, and demonstration data) by performing an ablation study on a subset of 6 games. We chose sparse-reward games (MONTEZUMA'S REVENGE, PRIVATE EYE), dense-reward games (MS. PACMAN, SEAQUEST), and games where DQfD performs well (HERO, KANGAROO) (see Fig. 3).
+Transformed Bellman operator ( ): When using the standard Bellman operator T instead of the transformed one, Ape-X DQfD is stable but the performance is significantly worse.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Episode return
+
+Mean episode return
+
+Mean episode return
+
+120K 100K
+80K 60K 40K 20K
+0 0
+
+Hero
+
+40K
+
+30K
+
+20K
+
+10K
+
+5K 10K 15K 20K 25K 30K 35K 40K Episode length [Frames]
+
+0 0
+
+Montezuma's Revenge
+2K 4K 6K 8K 10K 12K 14K 16K Episode length [Frames]
+
+60K 50K 40K 30K 20K 10K
+0 0
+
+Ape-X DQfD (deeper)
+
+Expert
+
+Ms. Pacman
+5K 10K 15K 20K 25K 30K 35K 40K Episode length [Frames]
+
+Figure 2: The figure shows the cumulative undiscounted episode return over time and compares the best expert episode to the best Ape-X DQfD episode on three games. On HERO, the algorithm exceeds the expert's performance, on MONTEZUMA'S REVENGE, it matches the expert's score but reaches it faster, and on MS. PACMAN, the expert is still superior.
+
+100K
+50K
+0 15K 10K
+5K 0 0
+
+Hero Ms. Pacman
+
+50K 40K 30K 20K 10K
+0
+100K
+
+Kangaroo Private Eye
+
+30K 20K 10K
+0 400K 300K
+
+Montezuma's Revenge Seaquest
+
+200K 50K
+100K
+
+20 40 60 80 100 120 140 Training time [h]
+
+0 0 20 40 60 80 100 120 140
+Training time [h]
+
+0 0 20 40 60 80 100 120 140
+Training time [h]
+
+Full algorithm
+
+w/o Transformed Q-learning
+
+w/o TC loss
+
+w/o Demonstrations
+
+w/o Imitation loss
+
+Figure 3: Results of our ablation study using the standard network architecture. The experiment without expert data ( ) was performed with the higher exploration schedule used in (Horgan et al., 2018).
+
+TC loss ( ): In our setup, the TC loss is paramount to learning stably. We see that without the TC loss the algorithm learns faster at the beginning of the training process. However, at some point during training, the performance collapses and often the process dies with floating point exceptions.
+Expert demonstrations ( and ): Unsurprisingly, removing demonstrations entirely ( ) severely degrades the algorithm's performance on sparse reward games. However, in games that an greedy policy can efficiently explore, such as SEAQUEST, the performance is on par or worse. Hence, the bias induced by the expert data is beneficial in some games and harmful in others. Just removing the imitation loss LIM ( ) does not have a significant effect on the algorithm's performance. This stands in contrast to the original DQfD algorithm and is most likely because we only apply the loss on a single expert trajectory.
+4.5 COMPARISON TO RELATED WORK
+The problems of handling diverse reward distributions and network over-generalization in deep RL have been partially addressed in the literature (see Sec. 2). Specifically, van Hasselt et al. (2016a) proposed PopArt and Durugkar & Stone (2017) used constrained TD updates. We evaluate the performance of our algorithm when using alternative solutions and report the results in Fig. 4.
+PopArt ( ): We use the standard Bellman operator T in combination with PopArt, which adaptively normalizes the targets in (1) to have zero mean and unit variance. While the modified algorithm manages to learn in some games, the overall performance is significantly worse than Ape-X DQfD. One possible limiting factor that makes PopArt a bad choice for our framework is that training batches contain highly rewarding states from the very beginning of training. SGD updates performed before
+
+8
+
+Under review as a conference paper at ICLR 2019
+
+Mean episode return
+
+Mean episode return
+
+100K
+50K
+0 10K
+8K 6K 4K 2K
+0 0
+
+Hero Ms. Pacman
+
+50K 40K 30K 20K 10K
+0
+100K
+50K
+
+Kangaroo Private Eye
+
+Montezuma's Revenge
+10K
+5K
+0
+Seaquest
+15K 10K
+5K
+
+5 10 15 20 25 30 35 40 Training time [h]
+
+0 0 5 10 15 20 25 30 35 40
+Training time [h]
+
+0 0 5 10 15 20 25 30 35 40
+Training time [h]
+
+Full algorithm
+
+w/o Transformed Q-learning, w/ PopArt
+
+w/o TC loss, w/ Constrained TD updates
+
+Figure 4: The figures show how our algorithm compares when we substitute the transformed Bellman operator to PopArt and when we substitute the TC loss to constrained TD updates. Note that the scales differ from the ones in Fig. 3 because the experiments only ran for 40 hours.
+
+the moving statistics have adequately adapted the moments of the target distribution might result in catastrophic changes to the network's weights.
+Constrained TD updates ( ): We replaced the TC-loss with the constrained TD update approach (Durugkar & Stone, 2017) that removes the target network and constrains the gradient to prevent an SGD update from changing the predictions at the next state. We did not find the approach to work in our case.
+
+5 CONCLUSION
+In this paper, we presented a deep Reinforcement Learning (RL) algorithm that achieves human-level performance on a wide variety of MDPs on the Atari 2600 benchmark. It does so by addressing three challenges: handling diverse reward distributions, acting over longer time horizons, and efficiently exploring on sparse reward tasks. We introduce novel approaches for each of these challenges: a transformed Bellman operator, a temporal consistency loss, and a distributed RLED framework for learning from human demonstrations and task reward. Our algorithm exceeds the performance of an average human on 40 out of 42 Atari 2600 games.
+
+REFERENCES
+Christopher Atkeson and Stefan Schaal. Robot learning from demonstration. In Proc. of ICML, 1997.
+Marc Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The Arcade Learning Environment: An evaluation platform for general agents. In Proc. of IJCAI, 2015.
+Jessica Chemali and Alessandro Lazaric. Direct policy iteration with demonstrations. In Proc. of IJCAI, 2015.
+Ishan Durugkar and Peter Stone. TD learning with constrained gradients. In Deep Reinforcement Learning Symposium, NIPS, 2017.
+Audrunas Gruslys, Will Dabney, Mohammad Gheshlaghi Azar, Bilal Piot, Marc Bellemare, and Remi Munos. The reactor: A fast and sample-efficient actor-critic agent for reinforcement learning. In Proc. of ICLR, 2018.
+Matteo Hessel, Joseph Modayil, Hado Van Hasselt, Tom Schaul, Georg Ostrovski, Will Dabney, Dan Horgan, Bilal Piot, Mohammad G. Azar, and David Silver. Rainbow: Combining improvements in deep reinforcement learning. In Proc. of AAAI, 2018.
+
+9
+
+Under review as a conference paper at ICLR 2019
+Todd Hester, Matej Vecerik, Olivier Pietquin, Marc Lanctot, Tom Schaul, Bilal Piot, Andrew Sendonaris, Gabriel Dulac-Arnold, Ian Osband, and John Agapiou. Deep Q-learning from demonstrations. Proc. of AAAI, 2018.
+Dan Horgan, John Quan, David Budden, Gabriel Barth-Maron, Matteo Hessel, Hado van Hasselt, and David Silver. Distributed prioritized experience replay. In Proc. of ICLR, 2018.
+Peter J. Huber. Robust estimation of a location parameter. Ann. Math. Statist., 35(1):73­101, 03 1964.
+Nan Jiang, Alex Kulesza, Satinder Singh, and Richard Lewis. The dependence of effective planning horizon on model accuracy. In Proceedings of the 2015 International Conference on Autonomous Agents and Multiagent Systems, pp. 1181­1189. International Foundation for Autonomous Agents and Multiagent Systems, 2015.
+Beomjoon Kim, Amir-massoud Farahmand, Joelle Pineau, and Doina Precup. Learning from limited demonstrations. In Proc. of NIPS, 2013.
+Zachary Lipton, Xiujun Li, Jianfeng Gao, Lihong Li, Faisal Ahmed, and Li Deng. Bbq-networks: Efficient exploration in deep reinforcement learning for task-oriented dialogue systems. In Proc. of AAAI, 2016.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015.
+Ashvin Nair, Bob McGrew, Marcin Andrychowicz, Wojciech Zaremba, and Pieter Abbeel. Overcoming exploration in reinforcement learning with demonstrations. arXiv preprint arXiv:1709.10089, 2017.
+Bilal Piot, Matthieu Geist, and Olivier Pietquin. Boosted bellman residual minimization handling expert demonstrations. In Proc. of ECML/PKDD, 2014.
+Marc L. Puterman. Markov decision processes: discrete stochastic dynamic programming. John Wiley & Sons, 1994.
+Stefan Schaal. Learning from demonstration. In Proc. of NIPS, 1997. Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver. Prioritized experience replay. In
+Proc. of ICLR, 2015. Hado van Hasselt, Arthur Guez, Matteo Hessel, Volodymyr Mnih, and David Silver. Learning values
+across many orders of magnitude. In Proc. of NIPS, 2016a. Hado van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double Q-
+learning. In Proc. of AAAI, 2016b. Matej Vecerík, Todd Hester, Jonathan Scholz, Fumin Wang, Olivier Pietquin, Bilal Piot, Nicolas Heess,
+Thomas Rothörl, Thomas Lampe, and Martin Riedmiller. Leveraging demonstrations for deep reinforcement learning on robotics problems with sparse rewards. arXiv preprint arXiv:1707.08817, 2017. Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas. Dueling network architectures for deep reinforcement learning. In Proc. of ICML, 2016.
+10
+
+Under review as a conference paper at ICLR 2019
+
+A HYPERPARAMETER COMPARISON
+
+Parameter
+End episodes on loss of life
+
+Ape-X DQN true
+
+n-step transition parameter
+
+n=3
+
+Exploration of i-th actor
+
+where m is the total
+
+number of actors and
+
+i
+
+:=
+
+i-1 m-1
+
+.
+
+i := 0.1i+3(1-i)
+
+Number of actors
+
+360
+
+Optimizer
+
+RMSProp
+
+Discount factor Reward processing
+
+ = 0.99 Clip to [-1, 1]
+
+Ape-X DQfD false
+n = 1 and n = 10 i := 0.4i+7(1-i)
+128 ADAM  = 0.999 None
+
+Why?
+The demonstration trajectories recorded by the expert were recorded without the loss-of-life signal.
+n = 1 and n = 10 were the choices in the original DQfD paper.
+DQfD used low exploration noise ( = 0.01) because the demonstrations help explore the MDP.
+We use fewer actors in order to reduce resource consumption.
+We found ADAM to yield slightly better performance than RMSProp.
+A high discount factor is crucial to solving hard-exploration games.
+With clipped rewards, games such as BOWLING cannot be solved.
+
+Table 3: The table compares the hyper parameters of Ape-X DQN (Horgan et al., 2018) and Ape-X DQfD. In addition to highlighting the differences, we explain the reason behind the change.
+
+B PROOFS FROM THE MAIN TEXT
+Proof of Proposition 3.1. (i) is equivalent to linearly scaling the reward r by a constant  > 0, which implies the proposition. For (ii) let Q be the fixed point of T and note that h  Q = h  T Q = h  T (h-1  h  Q) = Th(h  Q) where the last equality only holds if the MDP is deterministic.
+
+Proof of Proposition 3.2. Let Lh  1 be the Lipschitz constant of h. (i) |(h  Q)(x, a)| = |(h 
+
+Q)(x, a) - 0| = |(h  Q)(x, a) - h(0)|  Lh|Q(x, a) - 0|  |Q(x, a)|. (ii) Let X , A be
+
+independent
+
+copies
+
+of
+
+X, A.
+
+It
+
+holds
+
+Var((h
+
+
+
+Q)(X, A))
+
+=
+
+1 2
+
+EX,X
+
+,A,A
+
+[|(h
+
+
+
+Q)(X, A)
+
+-
+
+(h
+
+
+
+Q)(X , A )|2]  L2hEX,X ,A,A [|Q(X, A) - Q(X, A )|]  Var(Q(X, A)).
+
+C TRANSFORMED BELLMAN OPERATOR IN STOCHASTIC MDPS
+
+The following proposition shows that transformed Bellman operator is still a contraction for small  if we assume a stochastic MDP and a more generic choice of h. However, the fixed point might not be h  Q.
+
+Proposition C.1. Let h be strictly monotonically increasing, Lipschitz continuous with Lipschitz
+
+constant Lh, and have a Lipschitz continuous inverse h-1 with Lipschitz constant Lh-1 . For
+
+
+
+<
+
+1 Lh Lh-1
+
+,
+
+Th
+
+is
+
+a
+
+contraction.
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+Proof. Let Q, U : X × A  R be arbitrary. It holds
+
+ThQ - ThU
+
+ = max
+x,aX ×A
+
+Ex p(·|x,a)
+
+h
+
+r(x, a) +  max h-1(Q(x , a ))
+a A
+
+-h r(x, a) +  max h-1(Q(x , a ))-
+a A
+
+(1)
+
+
+
+Lh
+
+max
+x,aX ×A
+
+Ex
+
+p(·|x,a)
+
+max h-1(Q(x , a )) - max h-1(U (x , a ))
+
+a A
+
+a A
+
+Lh
+
+max
+x,aX ×A
+
+Ex
+
+p(·|x,a)
+
+max h-1(Q(x , a )) - h-1(U (x , a ))
+a A
+
+(2)
+
+
+
+LhLh-1
+
+
+
+max
+x,aX ×A
+
+Ex
+
+p(·|x,a)
+
+max |Q(x , a ) - U (x , a )|
+a A
+
+ LhLh-1  Q - U  < Q - U 
+
+<1
+
+where we used Jensen's inequality in (1) and the Lipschitz properties of h and h-1 in (1) and (2).
+
+For our algorithm, we use h : R  R, x  sign(x)( |x| + 1 - 1) + x with  = 10-2. While
+
+Proposition C.2 shows that the transformed operator is a contraction, the discount factor  we use in
+
+practice
+
+is
+
+higher
+
+than
+
+1 Lh Lh-1
+
+.
+
+We
+
+leave
+
+a
+
+deeper
+
+investigation
+
+of
+
+the
+
+contraction
+
+properties
+
+of
+
+Th
+
+in
+
+stochastic MDPs for future work.
+
+Proposition C.2. Let  > 0 and h : R  R, x  sign(x)( |x| + 1 - 1) + x. It holds
+
+(i) h is strictly monotonically increasing.
+
+(ii)
+
+h is Lipschitz continuous with Lipschitz constant Lh
+
+=
+
+1 2
+
++ .
+
+(iii) h is invertible with h-1 : R  R, x  sign(x)
+
+
+1+4(|x|+1+)-1 2
+
+2
+-1
+
+.
+
+(iv) h-1 is strictly monotonically increasing.
+
+(v)
+
+h-1 is Lipschitz continuous with Lipschitz constant Lh-1
+
+=
+
+1 
+
+.
+
+We use the following Lemmas in order to prove Proposition C.2.
+
+Lemma C.1. h : R  R, x  sign(x)( |x| + 1 - 1) + x is differentiable everywhere with
+
+derivative
+
+d dx
+
+h(x)
+
+=
+
+1
+2 |x|+1
+
++
+
+
+
+for
+
+all
+
+x
+
+
+
+R.
+
+Proof of Lemma C.1. For x > 0, h is differentiable as a composition of differentiable functions with
+
+d dx
+
+h(x)
+
+=
+
+1 2 x+1
+
++
+
+.
+
+Analogously,
+
+h
+
+is
+
+differentiable
+
+for
+
+x
+
+<
+
+0
+
+with
+
+d dx
+
+h(x)
+
+=
+
+1 2 -x+1
+
++
+
+.
+
+For
+
+x = 0, we find
+
+=0
+
+
+
+
+1 2
+
+lim h(x + z) - h(x) = lim z + 1 - 1 + z l'Ho=spital lim  1 + = 1 + 
+
+z0+
+
+z
+
+z0+
+
+z
+
+z0+ 2 z + 1
+
+2
+
+and
+
+similarly
+
+limz0-
+
+h(x+z)-h(x) z
+
+=
+
+1 2
+
++
+
+.
+
+Hence,
+
+d dx
+
+h(x)
+
+=
+
+1
+2 |x|+1
+
++
+
+
+
+for
+
+all
+
+x
+
+
+
+R.
+
+Lemma C.2. h-1 : R  R, x  sign(x)
+
+2
+
+1+4(|x|+1+)-1 2
+
+- 1 is differentiable every-
+
+where
+
+with
+
+derivative
+
+d dx
+
+h-1
+
+(x)
+
+=
+
+1 
+
+1-  1
+1+4(|x|+1+)
+
+for all x  R.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Proof of Lemma C.2. For x = 0, h-1 is differentiable as a composition of differentiable functions. For x = 0, it holds
+
+=0
+
+lim h-1(x + z) - h-1(x) = lim 1 (
+
+z0+
+
+z
+
+z0+ z
+
+1 + 4(z + 1 + ) - 1)2 - 1 42
+
+l'Ho=spital lim
+z0+
+
+1 42
+
+2(
+
+1 2
+
++ 4(z + 1 + ) - 1 + 4(z + 1 + )
+
+1) 4
+
+= lim 1 1 - z0+ 
+
+1 1 + 4(z + 1 + )
+
+=
+
+1
+
+1 2
+
++
+
+
+
+.
+
+and similarly limz0-
+
+h-1 (x+z )-h-1 (x) z
+
+=
+
+1 2
+
+1 +
+
+,
+
+which
+
+concludes
+
+the
+
+proof.
+
+Proof of Proposition C.2. We prove all statements individually.
+
+(i)
+
+d dx
+
+h(x)
+
+=
+
+1
+2 |x|+1
+
++
+
+x
+
+>
+
+0
+
+for
+
+all
+
+x
+
+
+
+R,
+
+which
+
+implies
+
+the
+
+proposition.
+
+(ii) Let x, y  R with x < y, using the mean value theorem, we find
+
+dd
+
+|h(x) - h(y)|  sup h() |x - y|  sup h() |x - y| =
+
+(x,y) dx
+
+R dx
+
+1 2
+
++
+
+
+
+|x - y|.
+
+=Lh
+
+(iii) (i) Implies that h is invertible and simple substitution shows h  h-1 = h-1  h = id.
+
+(iv)
+
+d dx
+
+h-1
+
+(x)
+
+=
+
+1 
+
+1-  1
+1+4(|x|+1+)
+
+> 0 for all x  R, which implies the proposition.
+
+(v) Let x, y  R with x < y, using the mean value theorem, we find
+
+|h-1(x) - h-1(y)|  sup d h-1() |x - y|  sup d h-1() |x - y| = 1 |x - y|.
+
+(x,y) dx
+
+R dx
+
+
+
+=Lh-1
+
+D LEARNER ALGORITHM
+
+Algorithm 1 The algorithm used by the learner to estimate the action-value function.
+
+(0)  Random sample
+
+for k = 1, 2, ... do
+
+(k)  (k-1)
+
+for j = 1, ..., Tupdate do
+
+Tupdate is the target network update period
+
+(ti, wi)iN=1 SAMPLEPRIORITIZED(N)
+
+Sample 75% agent and 25% expert transitions
+
+(k)  ADAMSTEP(L((k); (ti)Ni=1, (wi)Ni=1, (k-1)))
+
+Update the parameters using Adam
+
+(pi)iN=1  LTD((k); ti, 1, (k-1)) N
+
+Compute the updated priorities based on the TD error
+
+i=1
+
+UPDATEPRIORITIES((t1, w1), ..., (tN , wN ))
+
+Send the updated priorities to the replay buffers
+
+end for
+
+end for
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+E FULL EXPERIMENTAL RESULTS
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+60K 50K 40K 30K 20K 10K
+0
+100K 80K 60K 40K 20K 0
+80K
+60K
+40K
+20K
+0
+500K 400K 300K 200K 100K
+0 -100K
+30 20 10
+0 -10 -20 -30
+80K
+
+Alien Asteroids Beam Rider Chopper Command Double Dunk Gopher
+
+15K
+10K
+5K
+0 800K 600K 400K 200K
+0 250 200 150 100
+50 0
+400K 300K 200K 100K
+0 1.5K
+1K
+500
+0 15K
+
+60K 10K
+
+40K 5K
+
+20K 0
+
+0 James Bond
+20K
+
+-5K 60K
+
+15K 40K
+
+10K 20K
+5K 0
+0
+
+Montezuma's Revenge 40K 30K 20K 10K
+0 -10K
+
+60K 50K 40K 30K 20K 10K
+0
+
+Pong 30 20 10 0 -10 -20 -30
+
+150K 100K
+50K 0
+-50K
+
+400K
+
+Road Runner
+
+400K
+
+300K 200K 100K
+
+300K 200K 100K
+0
+
+0 -100K
+
+1.2M 1M
+800K 600K 400K 200K
+0 0
+
+Video Pinball
+20 40 60 80 100 120 140 Training time [h]
+
+400K
+300K
+200K
+100K
+0 0
+
+Amidar Atlantis Bowling Crazy Climber Enduro Gravitar Kangaroo Ms. Pacman Private Eye Seaquest Yars' Revenge 20 40 60 80 100 120 140 Training time [h]
+
+40K 30K 20K 10K
+0
+8K 6K 4K 2K
+0
+150 100
+50 0
+-50
+200K 150K 100K
+50K 0
+100 50 0 -50
+-100
+150K
+100K
+50K
+0
+100K 80K 60K 40K 20K 0
+40K 30K 20K 10K
+0
+100K 80K 60K 40K 20K 0
+20K 15K 10K
+5K 0 0
+
+Assault
+Bank Heist
+Boxing
+Defender
+Fishing Derby
+Hero
+Krull
+Name This Game
+Q*bert
+Solaris
+20 40 60 80 100 120 140 Training time [h]
+Ape-X DQfD Ape-X DQfD (deeper) Best expert trajectory Avg. human
+
+1.2M 1M
+800K 600K 400K 200K
+0
+200K
+150K
+100K
+50K
+0
+800 600 400 200
+0 -200
+100K 80K 60K 40K 20K 0 -20K
+35 30 25 20 15 10
+40 30 20 10
+0 -10 -20
+150K
+100K
+50K
+0
+50K 40K 30K 20K 10K
+0 -10K
+60K 50K 40K 30K 20K 10K
+0
+300K 250K 200K 150K 100K
+50K 0 0
+
+Asterix Battle Zone
+Breakout Demon Attack
+Freeway Ice Hockey Kung Fu Master
+Pitfall! Riverraid Up'n'Down 20 40 60 80 100 120 140 Training time [h]
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Figure 5: Training curves on all 42 games. We report the performance using the standard network architecture (Wang et al., 2016) and the slightly deeper version (see Fig. 9).
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+30K
+20K
+10K
+0
+-10K
+150K
+100K
+50K
+0
+-50K
+50K 40K 30K 20K 10K
+0
+150K
+100K
+50K
+0
+-50K
+30 20 10
+0 -10 -20 -30
+80K
+
+Alien Asteroids Beam Rider Chopper Command Double Dunk Gopher
+
+10K 8K 6K 4K 2K 0
+600K 500K 400K 300K 200K 100K
+0
+250 200 150 100
+50 0
+250K 200K 150K 100K
+50K 0
+1.5K
+1K
+500
+0
+15K
+
+Amidar Atlantis Bowling Crazy Climber Enduro Gravitar
+
+30K 25K 20K 15K 10K
+5K 0
+8K 6K 4K 2K
+0
+150 100
+50 0
+-50
+150K 100K
+50K 0
+-50K
+100 50 0 -50
+-100
+150K
+
+Assault Bank Heist
+Boxing Defender Fishing Derby
+Hero
+
+800K 600K 400K 200K
+0 -200K
+200K
+150K
+100K
+50K
+0
+800 600 400 200
+0 -200
+100K 80K 60K 40K 20K 0 -20K
+40 30 20 10
+0 -10
+60
+
+Asterix Battle Zone
+Breakout Demon Attack
+Freeway Ice Hockey
+
+60K 10K 100K
+
+40
+
+40K 5K 50K
+
+20
+
+20K 0 0 0
+
+0 20K James Bond
+
+15K
+
+10K
+
+5K
+
+0
+40K 30K 20K 10K
+0 -10K
+30 20 10
+0 -10 -20 -30
+400K
+
+Montezuma's Revenge Pong
+Road Runner
+
+-5K
+50K 40K 30K 20K 10K
+0 -10K
+60K 50K 40K 30K 20K 10K
+0
+150K
+100K
+50K
+0
+-50K
+300K
+
+300K
+
+200K
+
+200K
+
+100K
+
+100K
+
+0
+
+0
+800K 600K 400K 200K
+0 -200K
+0
+
+Video Pinball
+20 40 60 80 100 120 140 Training time [h]
+
+-100K
+200K 150K 100K
+50K 0 0
+
+Kangaroo Ms. Pacman Private Eye
+Seaquest Yars' Revenge
+
+-50K
+100K 80K 60K 40K 20K 0
+40K
+30K
+20K
+10K
+0
+500K 400K 300K 200K 100K
+0 -100K
+20K
+15K
+10K
+5K
+0 0
+
+20 40 60 80 100 120 140 Training time [h]
+
+Krull
+Name This Game
+Q*bert
+Solaris
+20 40 60 80 100 120 140 Training time [h] Ape-X DQfD Ape-X DQN* (c, 0.99) Ape-X DQN* (c, 0.999) Ape-X DQN* (u, 0.99) Ape-X DQN* (u, 0.999) Best expert trajectory Avg. human
+
+-20
+120K 100K
+80K 60K 40K 20K
+0
+50K 40K 30K 20K 10K
+0 -10K
+40K
+30K
+20K
+10K
+0
+300K 250K 200K 150K 100K
+50K 0 0
+
+Kung Fu Master
+Pitfall!
+Riverraid
+Up'n'Down
+20 40 60 80 100 120 140 Training time [h]
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Mean episode return
+
+Figure 6: The curves show the effect of using clipped/unclipped rewards and low/high discount factors on all games.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Game
+Alien Amidar Assault Asterix Asteroids Atlantis Bank Heist Battle Zone Beam Rider Bowling Boxing Breakout Chopper Command Crazy Climber Defender Demon Attack Double Dunk Enduro Fishing Derby Freeway Gopher Gravitar
+Hero Ice Hockey James Bond
+Kangaroo Krull
+Kung Fu Master Montezuma's Revenge
+Ms. Pacman Name This Game
+Pitfall! Pong
+Private Eye Q*bert
+Riverraid Road Runner
+Seaquest Solaris
+Up'n'Down Video Pinball Yars' Revenge
+
+Rainbow
+9491.7 5131.2 14198.5 428200.3 2712.8 826659.5 1358.0 62010.0 16850.2
+30.0 99.6 417.5 16654.0 168788.5 55105.0 111185.2 -0.3 2125.9 31.3 34.0 70354.6 1419.3 55887.4
+1.1 19809.0 14637.5
+8741.5 52181.0
+384.0 5380.4 13136.0
+0.0 20.9 4234.0 33817.5 22920.8 62041.0 15898.9 3560.3 125754.6 533936.5 102557.0
+
+DQfD
+4737.5 2325.0 1755.7 5493.6 3796.4 920213.9 1280.2 41708.2 5173.3
+97.0 99.1 308.1 6993.1 151909.5 27951.5 3848.8 -20.4 1929.8 38.4 31.4 7810.3 1685.1 105929.4 -9.6 2095.0 14681.5 9825.3 29132.0 4638.4 4695.7 5188.3 57.3 10.7 42457.2 21792.7 18735.4 50199.6 12361.6 2616.8 82555.0 19123.1 61575.7
+
+Ape-X DQN
+40804.9 8659.2
+24559.4 313305.0 155495.1 944497.5
+1716.4 98895.0 63305.2
+17.6 100.0 800.9 721851.0 320426.0 411943.5 133086.4
+23.5 2177.4
+44.4 33.7 120500.9 1598.5 31655.9 33.0 21322.5 1416.0 11741.4 97829.5 2500.0 11255.2 25783.3 -0.6 20.9 49.8 302391.3 63864.4 222234.5 392952.3 2892.9 401884.3 565163.2 148594.8
+
+Ape-X DQfD
+11313.6 8463.8
+22855.0 399888.0 116846.4 911025.0
+2061.9 60540.0 47129.4
+216.3 100.0 419.7 96653.0 176598.5 51442.0 100200.9
+23.0 1663.1
+66.1 32.0 114702.6 4214.3 112042.4
+3.4 12889.0 47676.5 104160.3 67957.5 29384.0 12857.1 24465.8
+3996.7 21.0
+100747.4 71224.4 24147.7
+507213.0 13603.8 2529.8
+324505.2 243320.1 109980.9
+
+Ape-X DQfD (deeper)
+50113.6 12291.7 35046.9 418433.5 112573.6 1057521.5
+2578.9 128925.0
+87257.4 210.9 98.5 641.9
+840023.5 247651.0 218006.3 141444.6
+23.2 1910.1
+68.0 31.7 114168.9 3920.5 114248.2 32.9 16956.3 48599.0 140670.6 137804.5 27926.5 20872.7 31569.4 3997.5 20.9 100724.9 91603.5 47609.9 578806.5 318418.0 3428.9 469548.3 922518.0 498947.1
+
+Random
+128.3 11.8
+166.9 164.5 871.3 13463.0
+21.7 3560.0
+254.6 35.2 -0.1 1.6
+644.0 9337.0 1965.5
+208.3 -16.0 81.8 -77.1
+0.1 250.0 245.5 1580.3
+-9.7 33.5 100.0 1151.9 304.0 25.0 197.8 1747.8 -348.8 -18.0 662.8 183.0 588.3 200.0 215.5 2047.2 707.2 20452.0 1476.9
+
+Avg. Human
+7128.0 1720.0 742.0 8503.0 47389.0 29028.0 753.0 37188.0 16926.0 161.0
+12.0 30.0 7388.0 35829.0 18689.0 1971.0 -16.0 860.0 -39.0 30.0 2412.0 3351.0 30826.0
+1.0 303.0 3035.0 2666.0 22736.0 4753.0 6952.0 8049.0 6464.0
+15.0 69571.0 13455.0 17118.0
+7845.0 42055.0 12327.0 11693.0 17668.0 54577.0
+
+Expert
+29160.0 2341.0 2274.0
+18100.0 18100.0 22400.0
+7465.0 60000.0 19844.0
+149.0 15.0 79.0
+11300.0 61600.0 18700.0
+6190.0 -14.0 803.0 20.0 32.0
+22520.0 13400.0 99320.0
+1.0 650.0 36300.0 13730.0 25920.0 34900.0 55021.0 19380.0 47821.0
+0.0 72800.0 99450.0 39710.0 20200.0 101120.0 17840.0 16080.0 32420.0 83523.0
+
+Table 4: Scores obtained by evaluating the best checkpoint for 200 episodes using the no-op starts regime.
+
+-80.2% -36.8% 7.1% 17.8% 17.9% 36.5% 44.8% 122.0% 139.7% 193.2% 201.3% 209.5% 247.1% 263.4% 264.5% 279.9% 408.6% 424.6% 487.5% 511.9% 588.0% 616.9% 623.0% 658.2% 720.0% 845.6% 863.1% 1260.4% 1527.5% 1800.0% 2122.9% 4102.7% 4942.9% 5121.4% 5186.2% 6082.4% 6357.3% 6602.2% 7288.7% 7668.0% 12660.2% 12927.9%
+
+Human-relative performance [%]
+
+10000%
+5000%
+1000% 500% 100% 0% -100%
+
+Solaris Pitfall! Freeway
+Pong Gravitar Bowling Private Eye
+Enduro Asteroids Riverraid Fishing Derby Ms. Pacman Bank Heist Battle Zone Ice Hockey
+Hero Name This Game
+Beam Rider Montezuma's Revenge
+Kung Fu Master Q*bert Amidar Alien
+Seaquest Boxing
+Crazy Climber Yars' Revenge
+Defender Kangaroo Double Dunk Breakout Up'n'Down
+Asterix Video Pinball
+Gopher James Bond
+Atlantis Assault Road Runner Demon Attack Chopper Command
+Krull
+
+Figure 7: The human-relative score of Ape-X DQfD (deeper) using the no-ops starts regime. The
+
+score
+
+is
+
+computed
+
+as
+
+alg. score-avg. human score avg. human score-random score
+
+× 100.
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+Game
+
+Rainbow
+
+Alien Amidar Assault Asterix Asteroids Atlantis Bank Heist Battle Zone Beam Rider Bowling Boxing Breakout Chopper Command Crazy Climber Defender Demon Attack Double Dunk Enduro Fishing Derby Freeway Gopher Gravitar
+Hero Ice Hockey James Bond
+Kangaroo Krull
+Kung Fu Master Montezuma's Revenge
+Ms. Pacman Name This Game
+Pitfall! Pong
+Private Eye Q*bert
+Riverraid Road Runner
+Seaquest Solaris
+Up'n'Down Video Pinball Yars' Revenge
+
+6022.9 202.8
+14491.7 280114.0
+2249.4 814684.0
+826.0 52040.0 21768.5
+39.4 54.9 379.5 10916.0 143962.0 47671.3 109670.7 -0.6 2061.1 22.6 29.1 72595.7 567.5 50496.8 -0.7 18142.3 10841.0 6715.5 28999.8 154.0 2570.2 11686.5 -37.6 19.0 1704.4 18397.6 15608.1 54261.0 19176.0 2860.7 92640.6 506817.2 93007.9
+
+DQfD
+­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­
+
+Ape-X DQN
+17731.5 1047.3
+24404.6 283179.5 117303.4 918714.5
+1200.8 92275.0 72233.7
+30.2 80.9 756.5 576601.5 263953.5 399865.3 133002.1 22.3 2042.4 22.4 29.0 121168.2 662.0 26345.3 24.0 18992.3 577.5 8592.0 72068.0 1079.0 6135.4 23829.9 -273.3 18.7 864.7 380152.1 49982.8 127111.5 377179.8 3115.9 347912.2 873988.5 131701.1
+
+Ape-X DQfD
+1025.5 310.5 23384.3 327929.0 95066.6 912443.0 1695.9 42150.0 46454.5 178.3
+64.5 145.1 90152.5 141468.0 37771.8 97458.8
+20.5 1538.3
+26.3 23.8 115654.7 972.0 104942.1
+3.3 12041.0 25953.5 111496.1 50421.5 22781.0
+1880.8 22874.6
+3367.5 14.0
+61895.1 41419.6 18720.1 486082.0 15526.1
+2235.6 200709.3 194845.0
+82521.8
+
+Ape-X DQfD (deeper)
+6983.4 1177.5 34716.5 297533.8 95170.9 1020311.0 2020.5 74410.0 82997.1
+174.4 69.7
+365.5 681202.5 196633.5 123734.8 142189.0
+21.8 1754.9
+24.0 26.8 115392.1 1021.8 107144.0 18.4 15010.0 28616.0 122870.1 102258.0 22730.5 4007.4 29416.0 3208.7 18.6 54976.0 51159.3 42288.9 507490.0 269480.0 1835.8 298361.8 832691.1 466181.8
+
+Random
+­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­
+
+Avg. Human
+6371.3 1540.4 628.9 7536.0 36517.3 26575.0 644.5 33030.0 14961.0 146.5
+9.6 27.9 8930.0 32667.0 14296.0 3442.8 -14.4 740.2
+5.1 25.6 2311.0 3116.0 25839.4
+0.5 368.5 2739.0 2109.1 20786.8 4182.0 15375.0 6796.0 5998.9
+15.5 64169.1 12085.0 14382.2
+6878.0 40425.8 11032.6
+9896.1 15641.1 47135.2
+
+Expert
+­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­ ­
+
+Table 5: Scores obtained by evaluating the best checkpoint for 200 episodes using the human starts regime.
+
+-102.4% -74.9% -73.0% -44.0%
+-23.7% -14.5%
+4.7% 9.2% 9.8% 23.0% 25.1%
+123.4% 140.4% 164.5% 175.5%
+202.3% 220.9%
+331.3% 335.2% 397.8%
+446.2% 448.1% 462.6% 541.4%
+569.6% 702.8% 887.5% 917.8% 980.6% 1293.5% 2262.5% 3139.3% 3934.0% 4289.6% 4370.6% 5223.7% 5486.7% 7378.3% 7496.4% 7578.8% 8113.4% 12616.1%
+
+Human-relative performance [%]
+
+10000%
+5000%
+1000% 500% 100% 0% -100%
+
+Solaris Ms. Pacman
+Gravitar Pitfall! Amidar
+Private Eye Freeway Pong Alien
+Fishing Derby Bowling Enduro
+Battle Zone Asteroids
+Ice Hockey Riverraid
+Bank Heist Q*bert Hero
+Kung Fu Master Montezuma's Revenge
+Name This Game Beam Rider Boxing Seaquest
+Crazy Climber Defender
+Yars' Revenge Kangaroo Breakout
+Double Dunk Up'n'Down Asterix
+Demon Attack James Bond
+Video Pinball Gopher Assault
+Road Runner Atlantis
+Chopper Command Krull
+
+Figure 8: The human-relative score of Ape-X DQfD (deeper) using the human starts regime. The
+
+score
+
+is
+
+computed
+
+as
+
+alg. score-avg. human score avg. human score-random score
+
+× 100.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+F EXPERIMENTAL SETUP & HYPER PARAMETERS
+
+Game
+Alien Amidar Assault Asterix Asteroids Atlantis Bank Heist Battle Zone Beam Rider Bowling Boxing Breakout Chopper Command Crazy Climber Defender Demon Attack Double Dunk Enduro Fishing Derby Freeway Gopher Gravitar
+Hero Ice Hockey James Bond
+Kangaroo Krull
+Kung Fu Master Montezuma's Revenge
+Ms Pacman Name This Game
+Pitfall Pong Private Eye Q-Bert River Raid Road Runner Seaquest Solaris Up N Down Video Pinball Yars' Revenge
+
+Min score
+9690 1353 1168 4500 14170 10300 900 35000 12594
+89 0 17 4700 30600 5150 1800 -22 383 -10 30 2500 2950 35155 -4 400 12400 8040 8300 32300 31781 11350 3662 -12 70375 80700 17240 8400 56510 2840 6580 8409 48361
+
+Max score
+29160 2341 2274 18100 18100 22400 7465 60000 19844
+149 15 79 11300 61600 18700 6190 -14 803 20 32 22520 13400 99320 1 650 36300 13730 25920 34900 55021 19380 47821 0 74456 99450 39710 20200 101120 17840 16080 32420 83523
+
+Number of transitions
+19133 16790 13224 9525 22801 17516 32389 9075 38665 9991 8438 10475 7710 18937 6421 17409 11855 42058 6388 10239 38632 15377 32907 17585 9050 20984 32581 12989 17949 21896 43571 35347 17719 10899 75472 46233 5574 57453 28552 10421 10051 21334
+
+Number of episodes
+5 5 5 5 5 12 7 5 4 5 5 9 5 5 5 5 5 5 4 5 5 5 5 5 5 5 5 5 5 3 5 5 3 5 5 5 5 7 6 4 5 4
+
+Table 6: The table shows the performance of our expert player and the amount of available demonstrations per game. Note that the total number of episodes/trajectories is very low.
+
+18
+
+Conv(Kernel:8×8 Stride:4×4 Channels:32)
+
+Under review as a conference paper at ICLR 2019
+
+FullyConnected( Units:1)
+
+FullyConnected( Units:512)
+
+ReLU
+
+Conv(Kernel:4×4 Stride:2×2 Channels:64)
+
+Conv(Kernel:3×3 Stride:1×1 Channels:64)
+
+ReLU
+
+ReLU
+
+ReLU ReLU
+
++-
+mean
+
+FullyConnected( Units:18)
+
+FullyConnected( Units:512)
+
+FullyConnected( Units:1)
+
+FullyConnected( Units:512)
+
+FullyConnected( Units:512)
+
+Conv(Kernel:8×8 Stride:4×4 Channels:64)
+
+ReLU
+
+Conv(Kernel:4×4 Stride:2×2 Channels:128)
+
+Conv(Kernel:3×3 Stride:1×1 Channels:128)
+
+ReLU
+
+ReLU
+
+ReLU
+
+ReLU
+
+ReLU
+
+ReLU
+
++-
+mean
+
+FullyConnected( Units:18)
+
+FullyConnected( Units:512)
+
+FullyConnected( Units:512)
+
+Figure 9: The two network architectures that we used. The upper one is the standard dueling architecture of Wang et al. (2016) and the lower one is a slightly wider and deeper version.
+
+Parameter Comment
+
+Learner configuration
+
+Batch size Agent transitions per batch Expert transitions per batch
+Adam learning rate Adam regularizer
+Maximum gradient norm Target update period Discount factor
+Margin
+
+We use tf.clip_by_global_norm Referred to as Ttarget in the text Referred to as  in the text
+Referred to as  in the text
+
+Arcade Learning Environment (ALE) parameters
+
+Use full Atari action set Repeat actions Expose lives
+
+Table 7: The table shows all of our hyper parameters.
+
+Value
+256 192 64 5 · 10-5
+0.01 256
+40.0 2500  0.999 0.999
+Yes 4
+No
+
+19
+
+Under review as a conference paper at ICLR 2019
+G VIDEOS
+Due to the size of the videos, we uploaded them to an anonymized Google Drive account. M ' R :ONTEZUMA S EVENGE https://drive.google.com/file/d/1oW57PKpWSYvc-KaZBG0Z-VQwn29Rkiql/view H :ERO https://drive.google.com/file/d/1AXfTuXvUHPDXWskZKV0-2WbzJu-dbSLL/view B :OWLING https://drive.google.com/file/d/1MKeFOilKn7rX4MH-koZlHKTQINWZGybU/view B :REAKOUT https://drive.google.com/file/d/1ZKce3Vva2VfXguC1m09ZEkKB_qDOJeNj/view
+20
+
+

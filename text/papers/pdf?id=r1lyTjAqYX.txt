@@ -1,0 +1,861 @@
+Under review as a conference paper at ICLR 2019
+RECURRENT EXPERIENCE REPLAY IN DISTRIBUTED REINFORCEMENT LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Building on the recent successes of distributed training of RL agents, in this paper we investigate the training of RNN-based RL agents from experience replay. We investigate the effects of parameter lag resulting in representational drift and recurrent state staleness and empirically derive an improved training strategy. Using a single network architecture and fixed set of hyper-parameters, the resulting agent, Recurrent Replay Distributed DQN, triples the previous state of the art on Atari-57, and surpasses the state of the art on DMLab-30. R2D2 is the first agent to exceed human-level performance in 52 of the 57 Atari games.
+1 INTRODUCTION
+Reinforcement learning (RL) has seen a rejuvenation of research interest recently due to repeated successes in solving challenging problems such as reaching human-level play on Atari 2600 games (Mnih et al., 2015), beating the world champion in the game of Go (Silver et al., 2017), and playing competitive 5-player DOTA (OpenAI, 2018b). The earliest of these successes leveraged experience replay for data efficiency and stacked a fixed number of consecutive frames to overcome the partial observability in Atari 2600 games. However, with progress towards increasingly difficult, partially observable domains, the need for more advanced memory-based representations increases, necessitating more principled solutions such as recurrent neural networks (RNNs). The use of LSTMs (Hochreiter & Schmidhuber, 1997) within RL has been widely adopted to overcome partial observability (Hausknecht & Stone, 2015; Mnih et al., 2016; Espeholt et al., 2018; Gruslys et al., 2018).
+In this paper we investigate the use of recurrent neural networks with experience replay. We have two primary contributions. First, we perform an empirical study into the effects of various approaches to RNN training with experience replay and how these are affected in distributed training settings. Second, we present an agent that integrates these findings to achieve significant advances in the state-of-the-art on both Atari-57 (Bellemare et al., 2013) and DMLab-30 (Beattie et al., 2016) using a single network architecture and set of hyper-parameters.
+2 BACKGROUND
+2.1 REINFORCEMENT LEARNING
+Our work is set within the Reinforcement Learning (RL) framework (Sutton & Barto, 1998), in which an agent interacts with an environment to maximize the sum of discounted,   [0, 1), rewards. We model the environment as a Partially Observable Markov Decision Process (POMDP) given by the tuple (S, A, T , R, , O) (Monahan, 1982; Jaakkola et al., 1995; Kaelbling et al., 1998). The underlying Markov Decision Process (MDP) is defined by (S, A, T , R), where S is the set of states, A the set of actions, T a transition function mapping state-actions to probability distributions over next states, and R : S × A  R is the reward function. Finally,  gives the set of observations potentially received by the agent and O is the observation function mapping (unobserved) states to probability distributions over observations. Within this framework, the agent receives an observation o  , which may only contain partial information about the underlying state s  S. When the agent takes an action a  A the environment responds by transitioning to state s  T (·|s, a) and giving the agent a new observation, o  (·|s ), and reward, r  R(s, a).
+1
+
+Under review as a conference paper at ICLR 2019
+
+Although there are many approaches to RL in POMDPs, we focus on using recurrent neural networks (RNNs) with backpropagation through time (BPTT) (Werbos, 1990) to learn a representation that disambiguates the true state of the POMDP.
+The Deep Q-Network agent (DQN) (Mnih et al., 2015) learns to play games from the Atari-57 benchmark by using frame-stacking of 4 consecutive frames as observations, and training a convolutional network to represent a value function with Q-learning (Watkins & Dayan, 1992), from data continuously collected in a replay buffer (Lin, 1993). Other algorithms like the A3C (Mnih et al., 2016), use an LSTM and are trained directly on the online stream of experience without using a replay buffer. Hausknecht & Stone (2015) combined DQN with an LSTM by storing sequences in replay and initializing the recurrent state to zero during training.
+
+2.2 DISTRIBUTED REINFORCEMENT LEARNING
+Recent advances in reinforcement learning have achieved significantly improved performance by leveraging distributed training architectures which separate learning from acting, collecting data from many actors running in parallel on separate environment instances (Horgan et al., 2018; Espeholt et al., 2018; Gruslys et al., 2018; OpenAI, 2018b;a; Jaderberg et al., 2018).
+Distributed replay allows the Ape-X agent (Horgan et al., 2018) to decouple learning from acting, with actors feeding experience into the distributed replay buffer and the learner receiving (randomized) training batches from it. In addition to distributed replay with prioritized sampling (Schaul et al., 2016), Ape-X uses n-step return targets (Sutton, 1988), the double Q-learning algorithm (van Hasselt et al., 2016), the dueling DQN network architecture (Wang et al., 2016) and 4-framestacking. Ape-X achieved state-of-the-art performance on Atari-57, significantly out-performing the best single-actor algorithms. It has also been used in continuous control domains and again showed state-of-the-art results, further demonstrating the performance benefits of distributed training in RL.
+IMPALA (Espeholt et al., 2018) is a distributed reinforcement learning architecture which uses a first-in-first-out queue with a novel off-policy correction algorithm called V-trace, to learn sequentially from the stream of experience generated by a large number of independent actors. IMPALA stores sequences of transitions along with an initial recurrent state in the experience queue, and since experience is trained on exactly once, this data generally stays very close to the learner parameters. Espeholt et al. (2018) showed that IMPALA could achieve strong performance in the Atari-57 and DMLab-30 benchmark suites, and furthermore was able to use a single large network to learn all tasks in a benchmark simultaneously while maintaining human-level performance.
+
+2.3 THE RECURRENT REPLAY DISTRIBUTED DQN AGENT
+
+We propose a new agent, the Recurrent Replay Distributed DQN (R2D2), and use it to study the interplay between recurrent state, experience replay, and distributed training. R2D2 is most similar to Ape-X, built upon prioritized distributed replay and n-step double Q-learning (with n = 5), generating experience by a large number of actors (typically 256) and learning from batches of replayed experience by a single learner. Like Ape-X, we use the dueling network architecture of Wang et al. (2016), but provide an LSTM layer after the convolutional stack, similarly to Gruslys et al. (2018). Instead of regular (s, a, r, s ) transition tuples, we store fixed-length (m = 80) sequences of (s, a, r) in replay, with adjacent sequences overlapping each other by 40 time steps, and never crossing episode boundaries. When training, we unroll both online and target networks (Mnih et al., 2015) on the same sequence of states to generate value estimates and targets. We leave details of our exact treatment of recurrent states in replay for the next sections.
+Like Ape-X, we use 4-frame-stacks and the full 18-action set when training on Atari. On DMLab, we use single RGB frames as observations, and the same action set discretization as Hessel et al. (2018b). Following the modified Ape-X version in Pohlen et al. (2018), we do not clip rewards, but instead use an invertible value function rescaling of the form h(x) = sign(x)( |x| + 1 - 1) + x which results in the following n-step targets for the Q-value function:
+
+n-1
+
+y^t = h
+
+rt+kk + nh-1 (Q(xt+n, a; )) , a = arg max Q(xt+n, a; -).
+
+k=0
+
+a
+
+2
+
+Under review as a conference paper at ICLR 2019
+Here, - denotes the target network parameters which are copied from the online network parameters  every 2500 learner steps.
+Our replay prioritization differs from that of Ape-X in that we use a mixture of max and mean absolute n-step TD-errors i over the sequence: p =  maxi i + (1 - )¯i. We set  and the priority exponent to 0.9. This more aggressive scheme is motivated by our observation that averaging over long sequences tends to wash out large errors, thereby compressing the range of priorities and limiting the ability of prioritization to pick out useful experience. We also found no benefit from using the importance weighting that has been typically applied with prioritized replay (Schaul et al., 2016), and therefore omitted this step in R2D2.
+Finally, compared to Ape-X, we used the slightly higher discount of  = 0.997, and disabled the loss-of-life-as-episode-end heuristic that has been used in Atari agents in some of the work since (Mnih et al., 2015). A full list of hyper-parameters is provided in the appendix.
+We train the R2D2 agent with a single GPU-based learner, performing approximately 5 network updates per second (each update on a mini-batch of 64 length-80 sequences), and each actor performing  260 environment steps per second on Atari ( 130 per second on DMLab).
+3 TRAINING RECURRENT RL AGENTS WITH EXPERIENCE REPLAY
+In order to achieve good performance in a partially observed environment, an RL agent requires a state representation that encodes information about its state-action trajectory in addition to its current observation. The most common way to achieve this is by using an RNN, typically an LSTM (Hochreiter & Schmidhuber, 1997), as part of the agent's state encoding. To train an RNN from replay and enable it to learn meaningful long-term dependencies, whole state-action trajectories need to be stored in replay and used for training the network. Hausknecht & Stone (2015) compared two strategies of training an LSTM from replayed experience:
+· Using a zero start state to initialize the network at the beginning of sampled sequences. · Replaying whole episode trajectories.
+The zero start state strategy's appeal lies in its simplicity, and it allows independent decorrelated sampling of relatively short sequences, which is important for robust optimization of a neural network. On the other hand, it forces the RNN to learn to recover meaningful predictions from an atypical initial recurrent state (`initial recurrent state mismatch'), which may limit its ability to fully rely on its recurrent state and learn to exploit long temporal correlations. The second strategy on the other hand avoids the problem of finding a suitable initial state, but creates a number of practical, computational, and algorithmic issues due to varying and potentially environment-dependent sequence length, and higher variance of network updates because of the highly correlated nature of states in a trajectory when compared to training on randomly sampled batches of experience tuples.
+The authors observed little difference between their two strategies for the empirical agent performance on a set of Atari games, and therefore opted for the simpler zero state strategy. One possible explanation for this is that in some cases (as we will see below), an LSTM tends to converge to a more `typical' state if allowed a certain number of `burn-in' steps, and so recovers from a bad initial recurrent state on a sufficiently long sequence. We also hypothesize that while the zero state strategy may suffice in the largely fully observable Atari domain, it prevents a recurrent network from learning actual long-term dependencies in more memory-critical domains (e.g. on DMLab).
+To fix these issues, we propose and evaluate two strategies for training a recurrent neural network from randomly sampled replay sequences, that can be used individually or in combination:
+· Storing the recurrent state in replay and using it to initialize the network at training time. This partially remedies the weakness of the zero start state strategy, however it may suffer from the effect of `representational drift' leading to `recurrent state staleness`, as the stored recurrent state generated by a sufficiently old network could differ significantly from a typical state produced by a more recent version.
+· Allow the network a `burn-in period' by using a portion of the replay sequence only for unrolling the network and producing a start state, and update the network only on the
+3
+
+Under review as a conference paper at ICLR 2019
+
+4Q 4Q
+
+Initial State (64 actors)
+Zero-State Zero-State + Burn-in Stored-State Stored-State + Burn-in
+
+Initial State (256 actors)
+
+Final State (64 actors)
+
+Final State (256 actors)
+
+k k k k k
+
+Figure 1: Left two columns: Q-value discrepancy Q as a measure for recurrent state staleness, measured at first state (top) and last state (bottom) of replay sequences, for agents training on a selection of Atari and DMLab levels with different training strategies and numbers of actors. Right: Empirical agent performance of the 256-actor versions of the agents.
+
+remaining part of the sequence. We hypothesize that this allows the network to (partially) recover from a poor start state (zero, or stored but stale) and find itself in a better initial state before being required to produce accurate value outputs.
+
+In all our experiments we will be using the proposed agent architecture from Section 2.3 with replay sequences of length m = 80, with an optional burn-in prefix of l = 40 steps. Our aim is to assess the effect representational drift and recurrent state staleness and how they are affected by the different training strategies. For that we will compare the Q-values produced by the network on sampled replay sequences when unrolled using one of these strategies and the Q-values produced when using the true stored recurrent states at each step.
+
+More formally, let ot, . . . , ot+m and ht, . . . , ht+m denote the replay sequence of observations and stored recurrent states, and denote by ht+1 = h(ot, ht; ) and q(ot, ht; ) the recurrent state and Q-value vector (Q(ot, a))aA output by the recurrent neural network with parameter vector , respectively. We write h^t for the start state used in the training step determined by one of the above strategies (either 0, ht or the resulting recurrent state from unrolling the network with parameters ^ on the sequence prefix ot-l, . . . , ot-1) and h^t+1, . . . , h^t+m (where h^i+1 = h(oi, h^i; ^)) for the
+sequence of recurrent network states produced by the RNN at training time. We estimate the impact
+of representational drift and recurrent state staleness by their effect on the Q-value estimates, by
+measuring Q-value discrepancy
+
+Q =
+
+q(ot+i, h^t+i; ^) - q(ot+i, ht+i; ^) 2 | maxa(q(ot+i, h^t+i; ^))a|
+
+for the first (i = 0) and last (i = m - 1) states of the replay sequence. The normalization by the
+
+maximal Q-value helps comparability between different environments and training stages, as the Q-
+
+value range of an agent can vary drastically between these. Note that we are not directly comparing
+
+the Q-values produced at acting and training time, q(ot, ht; ) and q(ot, h^t; ^), as these can naturally be expected to be distinct as the agent is being trained, but instead focus on the difference that results
+
+from applying the same network (parameterized by ^) to the distinct recurrent states.
+
+In Figure 1 (first two columns), we are comparing agents trained with the different strategies on several Atari and DMLab environments in terms of this proposed metric. It can be seen that the zero start state heuristic results in a significantly more severe effect of recurrent state staleness on the outputs of the network. As hypothesized above, this effect is greatly reduced for the last sequence states compared to the first ones, after the RNN has had time to `recover' from the atypical start state, but the effect of staleness is still substantially worse here for the zero state than the stored state strategy.
+
+Interestingly, the burn-in (from zero start state) strategy mitigates the staleness problem almost as effectively as the stored state strategy (though their combination works best). This is noteworthy,
+
+4
+
+Under review as a conference paper at ICLR 2019
+as the only difference between the pure zero state and the burn-in strategy lies in the fact that the latter unrolls the network over a prefix of states on which the network does not receive updates. In informal experiments (not shown here) we verified that this is not due to the different unroll lengths themselves (i.e., that using just the zero state strategy on sequences of length l + m would perform worse). We hypothesize that the beneficial effect of burn-in lies in the fact that it prevents `destructive updates' to the RNN parameters resulting from it producing highly inaccurate initial outputs on the first few time steps after a zero state initialization. Another potential downside of the pure zero state heuristic is that it prevents the agent from strongly relying on its recurrent state and exploit long-term temporal dependencies, see Section 6.
+On the right side of Figure 1, we compare the empirical performance of the training strategies on several Atari and DMLab tasks. As expected from the above observations, the comparison shows clear under-performance of zero start state compared to the other approaches in several of the tasks, and an overall advantage of the stored state strategy with burn-in. Note that, at least on the almost fully observable Atari environments, one cannot necessarily expect the different strategies to give rise to substantially different agent performances, as these environments should not strongly require the agent to use its recurrent memory effectively.
+We conclude the section with the observation that both stored state and burn-in strategy provide substantial advantages over the naive zero state training strategy, in terms of (indirect) measures of the effect of representation drift and recurrent state staleness, and empirical performance. Since they combine beneficially, we are going to use both of these strategies in the empirical evaluation of our proposed agent in Section 5.
+4 EFFECT OF DISTRIBUTED RL AGENT TRAINING
+In this section, we investigate the effects of distributed training of an agent using a recurrent neural network, where a large number of actors feed their experience into a replay buffer for a single learner.
+On the one hand, the distributed setting typically presents a less severe problem of representational drift than the single-actor case, such as the one studied in (Hausknecht & Stone, 2015). This is because in relative terms, the large amount of generated experience is replayed less frequently (on average, an experience sample is replayed less than once in the Ape-X agent, compared to eight times in DQN), and so distributed agent training tends to give rise to a smaller degree of `parameter lag' (the mean age, in parameter updates, of the network parameters used to generate an experience, at the time it is being replayed).
+On the other hand, the distributed setting allows for easy scaling of computational resources according to hardware or time constraints. An ideal distributed agent should therefore be robust to changes in, e.g., the number of actors, without careful parameter re-tuning. As we have seen in the previous section, RNN training from replay is sensitive to the issue of representational drift, the severity of which can depend on exactly these parameters.
+To investigate these effects, we train our proposed agent architecture with a substantially smaller number of actors. This has a direct (inversely proportional) effect on the parameter lag. Specifically, in our experiments, as the number of actors is changed from 256 to 64, the mean parameter lag goes from 1500 to approximately 5500 parameter updates, which in turn impacts the magnitude of representation drift and recurrent state staleness, as measured by Q in the previous section.
+The left column in Figure 1 shows an overall increase of the average Q for the smaller number of actors, both for first and last states of replayed sequences. This supports the above intuitions and highlights the increased importance of an improved training strategy (compared to the zero state strategy) in the distributed training setting, if an empirical level of agent performance is to be maintained across ranges of extrinsic and potentially hardware dependent parameters.
+5 EXPERIMENTAL EVALUATION
+Based on our findings regarding RNN training in the distributed setting in the previous two sections, we chose to use the stored state strategy with burn-in period for training the R2D2 agent. In this
+5
+
+Under review as a conference paper at ICLR 2019
+
+Game Score
+
+Asteroids
+
+Montezuma's Revenge
+
+Gravitar
+R2D2 Ape-X
+
+MsPacman
+
+Space Invaders
+
+SeaQuest
+
+Game Score
+
+0123
+Wall Time (Days)
+
+0123
+Wall Time (Days)
+
+0123
+Wall Time (Days)
+
+Figure 2: Atari-57 results. Left: median human-normalized scores and training times of various agent architectures. Diagram reproduced and extended from (Horgan et al., 2018). Right: Example individual learning curves of R2D2 and Ape-X.
+
+section we evaluate the empirical performance of R2D2 on two challenging benchmark suites for deep reinforcement learning: Atari-57 (Bellemare et al., 2013) and DMLab-30 (Beattie et al., 2016).
+One of the fundamental contributions of Deep Q-Networks (DQN) (Mnih et al., 2015) was to set as standard practice the use of a single network architecture and set of hyper-parameters across the entire suite of 57 Atari games. Unfortunately, expanding past Atari this standard has not been maintained and, to the best of our knowledge, at present there is no algorithm applied to both Atari57 and DMLab-30 under this standard. In particular, we will compare performance with Ape-X and IMPALA for which hyper-parameters are tuned separately for each benchmark.
+For R2D2, we use a single neural network architecture and a single set of hyper-parameters across all experiments. This demonstrates greater robustness and generality than has been previously observed in deep RL. It is also in pursuit of this generality, that we decided to disable the (Atari-specific) heuristic of treating life losses as episode ends, and did not apply reward clipping. Despite this, we observe state-of-the-art performance in both Atari and DMLab, validating the intuitions derived from our empirical study.
+5.1 ATARI-57
+The Atari-57 benchmark is built upon the Arcade Learning Environment (ALE) (Bellemare et al., 2013), and consists of 57 classic Atari 2600 video games. Initial human-level performance was achieved by DQN (Mnih et al., 2015), and since then RL agents have improved significantly through both algorithmic and architectural advances. Currently, state of the art for a single actor is achieved by the recent distributional reinforcement learning algorithms IQN (Dabney et al., 2018) and Rainbow (Hessel et al., 2018a), and for multi-actor results, Ape-X (Horgan et al., 2018).
+Figure 2 (left) shows the median human-normalized scores across all games for R2D2 and related methods (see appendix for full Atari-57 scores and learning curves). R2D2 achieves an order of magnitude higher performance than all single-actor agents and triples the previous state-of-the-art performance of Ape-X using fewer actors (256 instead of 360), resulting in higher sample- and timeefficiency. Table 1 lists mean and median human-normalized scores for R2D2 and other algorithms, highlighting these improvements.
+In addition to achieving state-of-the-art results on the entire task suite, R2D2 also achieves the highest ever reported agent scores on a large fraction of the individual Atari games. In Figure 2 (right) we highlight some of these individual learning curves of R2D2. As an example, notice the performance on MS.PACMAN is even greater than that of the agent reported in Van Seijen et al. (2017), which
+6
+
+Under review as a conference paper at ICLR 2019
+
+Game Score
+
+emstm watermaze lt procedural small 3 bots natlab forage variable
+
+platforms hard
+
+R2D2 IMPALA
+
+psylab seq comp
+
+rat goal driven large
+
+Game Score
+
+Human-Normalized Scores
+
+0 1 2 3 40 1 2 3 4
+
+Wall Time (Days)
+
+Wall Time (Days)
+
+01 2 34
+Wall Time (Days)
+
+Figure 3: DMLab-30 comparison with IMPALA (left) final scores and (right) learning curves.
+
+Human-Normalized Score
+
+Ape-X Reactor IMPALA, deep-experts IMPALA, PBT R2D2
+
+(Horgan et al., 2018) (Gruslys et al., 2018) (Espeholt et al., 2018) (Hessel et al., 2018b)
+
+Atari-57 Median Mean
+
+358.1% 187% 191.8% N/A 1304.9%
+
+1584.2% N/A 957.6% N/A 3525.4%
+
+DMLab-30 Median Mean-Capped
+
+N/A N/A 49.0% 77.9% 84.3%
+
+N/A N/A 45.8% 61.5% 59.8%
+
+Table 1: Comparison of Atari-57 and DMLab-30 results. Unlike the IMPALA agent from (Espeholt et al., 2018), `IMPALA, PBT' uses population-based training and the same improved action set from (Hessel et al., 2018b) as R2D2.
+
+was engineered specifically for this game. Furthermore, we notice that Ape-X achieves super-human performance for the same number of games as Rainbow (49), and that its improvements came from improving already strong scores. R2D2 on the other hand is super-human on 52 out of 57 games, leaving only the five most challenging exploration problems with below human-level performance: MONTEZUMA'S REVENGE, PITFALL, SKIING, SOLARIS and PRIVATE EYE. We believe progress on the exploration problem combined with an agent such as R2D2, can in the near future reach super-human performance across the entire Atari-57 suite.
+5.2 DMLAB-30
+DMLab-30 is a suite of 30 problems set in a 3D first-person game engine, testing for a wide range of different challenges (Beattie et al., 2016). While Atari can largely be approached with only frame-stacking, DMLab-30 requires long-term memory to achieve reasonable performance. Perhaps because of this, and the difficulty of integrating recurrent state with experience replay, topperforming agents have, to date, always come in the form of actor-critic algorithms trained in (near) on-policy settings. For the first time we show state-of-the-art performance on DMLab-30 using a value-function-based agent.
+Figure 3 (left) compares R2D2 with IMPALA. We again see R2D2 significantly out-performing related methods, while using the same set of hyper-parameters across all domains, and a significantly smaller neural network than for example IMPALA. Indeed, Table 1 that even when compared to the population-based training (PBT) version of IMPALA, R2D2 achieves better final median performance.
+7
+
+Under review as a conference paper at ICLR 2019
+
+Mean Episode Return
+
+breakout
+800
+
+700
+
+600
+
+500
+
+400
+
+300
+
+200
+
+100 0
+
+RR22DD22(FF)
+
+0 1 2 #3Up4date5 s 6 7 1e58
+
+gravitar
+6000 5000 4000 3000 2000 1000
+0
+0 1 2 #3Up4date5 s 6 7 1e58
+
+ms_pacman
+30000 25000 20000 15000 10000 5000
+
+150000 100000 50000
+
+qbert
+
+1000000 800000 600000 400000 200000
+
+seaquest
+
+0
+0 1 2 #3Up4date5 s 6 7 1e58
+
+0
+0 1 2 #3Up4date5 s 6 7 1e58
+
+0
+0 1 2 #3Up4date5 s 6 7 1e58
+
+emstm_watermaze ms_pacman
+
+Figure 4: Ablation study: recurrent vs. feed-forward variant of R2D2.
+
+25000 Mean Episode Reward 100 % Greedy Action Match 20
+
+20000 80 16
+
+15000 60 12
+
+10000
+5000
+0
+
+
+Zero State Stored State 120 80
+k
+
+40
+
+40 20 0 0120
+
+80 40
+k
+
+8 4 0 0120
+
+4305 223005 115050
+
+
+120
+
+80
+
+40
+
+k
+
+100 80 60 40 20 0 0120
+
+80 40
+k
+
+0.8 0.6 0.4 0.2 0 0120
+
+Q
+80 40
+k
+80 40
+k
+
+0 0
+
+Figure 5: Effect of restricting R2D2's policy's memory on MS.PACMAN and EMSTM WATERMAZE.
+
+6 ANALYSIS OF AGENT PERFORMANCE
+Atari-57 is a class of environments which are almost fully observable (given 4-frame-stack observations), and agents trained on it are not necessarily expected to benefit from a memory-augmented representation. The main algorithmic difference between R2D2 and its predecessor, Ape-X, is the use of a recurrent neural network, and it is therefore surprising by how large a margin R2D2 surpasses the previous state of the art on Atari. In this section we analyze the role of the LSTM network and our proposed training strategy for the high performance of the R2D2 agent.
+Since the performance of asynchronous or distributed RL agents can depend on subtle implementational details and even factors such as precise hardware setup, it is impractical to perform a direct comparison to the Ape-X agent as reported in (Horgan et al., 2018). Instead, here we verify that the LSTM and its training strategy play a crucial role for the success of R2D2 by a comparison of the R2D2 agent with a purely feed-forward variant, all other parameters held fixed. This ablation in Figure 4 shows very clearly that the LSTM component is crucial for boosting the agent's peak performance as well as learning speed, explaining most of the performance difference to Ape-X.
+In our next experiment we test to what extent the R2D2 agent relies on its memory, and how this is impacted by the different training strategies. For this we select the Atari game MS.PACMAN, on which R2D2 shows state-of-the-art performance despite the game being virtually fully observable, and the DMLab task EMSTM WATERMAZE, which strongly requires the use of memory. We train two agents on each game, using the zero and stored state strategies, respectively. We then evaluate these agents by restricting their policy to a fixed history length: at time step t, their policy uses an LSTM unrolled over time steps ot-k+1, . . . , ot, with the hidden state ht-k replaced by zero instead of the actual hidden state (note this is only done for evaluation, not at training time of the agents).
+In Figure 5 (left) we decrease the history length k from  (full history) down to 0 and show the degradation of agent performance (measured as mean score over 10 episodes) as a function of k. We additionally show the difference of max-Q-values and the percentage of correct greedy actions (where the unconstrained variant is taken as ground truth).
+We first observe that restricting the agent's memory gradually decreases its performance, indicating its nontrivial use of memory on both domains. Crucially, while the agent trained with stored state
+8
+
+Under review as a conference paper at ICLR 2019
+shows higher performance when using the full history, its performance decays much more rapidly than for the agent trained with zero start states. This is evidence that the zero start state strategy, used in past RNN-based agents with replay, limits the agent's ability to learn to make use of its memory. While this doesn't necessarily translate into a performance difference (like in MS.PACMAN), it does so whenever the task requires an effective use of memory (like EMSTM WATERMAZE). This advantage of the stored state compared to the zero state strategy may explain the large performance difference between R2D2 and its close cousin Reactor (Gruslys et al., 2018), which trains its LSTM policy from replay with the zero state strategy.
+Finally, the right and middle columns of Figure 5 show a monotonic decrease of the quality of Qvalues and the resulting greedy policy as the available history length k is decreased to 0, providing a simple causal link between the constraint and the empirical agent performance.
+7 CONCLUSIONS
+Here we take a step back from evaluating performance and discuss our empirical findings in a broader context. There are two surprising findings in our results.
+First, although zero state initialization was often used in previous works (Hausknecht & Stone, 2015; Gruslys et al., 2018), we have found that it leads to misestimated action-values, especially in the early states of replayed sequences. Moreover, without burn-in, updates through BPPT to these early time steps with poorly estimated outputs seem to give rise to destructive updates and hinder the network's ability to recover from suboptimal initial recurrent states. This suggests that either the context-dependent recurrent state should be stored along with the trajectory in replay, or an initial part of replayed sequences should be reserved for burn-in, to allow the RNN to rely on its recurrent state and exploit long-term temporal dependencies, and the two techniques can also be combined beneficially. We have also observed that the underlying problems of representational drift and recurrent state staleness are potentially exacerbated in the distributed setting, highlighting the importance of robustness to these effects through an adequate training strategy of the RNN.
+Second, we found that the impact of LSTM training goes beyond providing the agent with memory. Instead, LSTM training also serves a role not previously studied in RL, potentially by enabling better representation learning, and thereby improves performance even on domains that are fully observable and don't obviously require memory.
+Finally, taking a broader view on our empirical results, we note that scaling up of RL agents through parallelization and distributed training allows them to benefit from huge experience throughput and achieve ever-increasing results over broad simulated task suites such as Atari-57 and DMLab-30. Impressive as these results are in terms of raw performance, they come at the price of high sample complexity, consuming billions of simulated time steps in hours or days of wall-clock time. One widely open avenue for future work lies in improving the sample efficiency of these agents, to allow applications to domains that do not easily allow fast simulation at similar scales. Another remaining challenge, very apparent in our results on Atari-57, is exploration: Save for the 5 hardest-exploration games from the Atari-57, R2D2 surpasses human-level performance on this task suite significantly, essentially `solving' many of the games therein.
+REFERENCES
+Charles Beattie, Joel Z Leibo, Denis Teplyashin, Tom Ward, Marcus Wainwright, Heinrich Ku¨ttler, Andrew Lefrancq, Simon Green, V´ictor Valde´s, Amir Sadik, et al. DeepMind Lab. arXiv preprint arXiv:1612.03801, 2016.
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The Arcade Learning Environment: an evaluation platform for general agents. Journal of Artificial Intelligence Research, 47:253­279, 2013.
+Will Dabney, Georg Ostrovski, David Silver, and Remi Munos. Implicit quantile networks for distributional reinforcement learning. In Jennifer Dy and Andreas Krause (eds.), Proceedings of the 35th International Conference on Machine Learning, volume 80 of Proceedings of Machine Learning Research, pp. 1096­1105, Stockholmsmssan, Stockholm Sweden, 10­15 Jul 2018. PMLR.
+9
+
+Under review as a conference paper at ICLR 2019
+Lasse Espeholt, Hubert Soyer, Remi Munos, Karen Simonyan, Volodymir Mnih, Tom Ward, Yotam Doron, Vlad Firoiu, Tim Harley, Iain Dunning, et al. Impala: Scalable distributed deep-rl with importance weighted actor-learner architectures. arXiv preprint arXiv:1802.01561, 2018.
+Audrunas Gruslys, Will Dabney, Mohammad Gheshlaghi Azar, Bilal Piot, Marc Bellemare, and Remi Munos. The reactor: A fast and sample-efficient actor-critic agent for reinforcement learning. In International Conference on Learning Representations, 2018. URL https: //openreview.net/forum?id=rkHVZWZAZ.
+Matthew Hausknecht and Peter Stone. Deep recurrent Q-learning for partially observable MDPs. CoRR, abs/1507.06527, 7(1), 2015.
+Matteo Hessel, Joseph Modayil, Hado Van Hasselt, Tom Schaul, Georg Ostrovski, Will Dabney, Dan Horgan, Bilal Piot, Mohammad Azar, and David Silver. Rainbow: combining improvements in deep reinforcement learning. In Proceedings of the AAAI Conference on Artificial Intelligence, 2018a.
+Matteo Hessel, Hubert Soyer, Lasse Espeholt, Wojciech Czarnecki, Simon Schmitt, and Hado van Hasselt. Multi-task deep reinforcement learning with popart. arXiv preprint arXiv:1809.04474, 2018b.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Dan Horgan, John Quan, David Budden, Gabriel Barth-Maron, Matteo Hessel, Hado Van Hasselt, and David Silver. Distributed prioritized experience replay. arXiv preprint arXiv:1803.00933, 2018.
+Tommi Jaakkola, Satinder P Singh, and Michael I Jordan. Reinforcement learning algorithm for partially observable markov decision problems. In Advances in neural information processing systems, pp. 345­352, 1995.
+Max Jaderberg, Wojciech M Czarnecki, Iain Dunning, Luke Marris, Guy Lever, Antonio Garcia Castaneda, Charles Beattie, Neil C Rabinowitz, Ari S Morcos, Avraham Ruderman, et al. Humanlevel performance in first-person multiplayer games with population-based deep reinforcement learning. arXiv preprint arXiv:1807.01281, 2018.
+Leslie Pack Kaelbling, Michael L Littman, and Anthony R Cassandra. Planning and acting in partially observable stochastic domains. Artificial intelligence, 101(1-2):99­134, 1998.
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Long-Ji Lin. Reinforcement learning for robots using neural networks. Technical report, CarnegieMellon Univ Pittsburgh PA School of Computer Science, 1993.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529, 2015.
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In International conference on machine learning, pp. 1928­1937, 2016.
+George E Monahan. State of the arta survey of partially observable markov decision processes: theory, models, and algorithms. Management Science, 28(1):1­16, 1982.
+OpenAI. Learning dexterous in-hand manipulation. arXiv preprint: arxiv:1808.00177, 2018a.
+OpenAI. Openai five. https://blog.openai.com/openai-five/, 2018b.
+Tobias Pohlen, Bilal Piot, Todd Hester, Mohammad Gheshlaghi, Dan Horgan, David Budden, Gabriel Barth-Maron, Hado Van Hasselt, John Quan, Mel Vecerik, Matteo Hessel, Remi Munos, and Olivier Pietquin. Observe and look further: Achieving consistent performance on atari. arXiv preprint: arxiv:1805.11593, 2018.
+10
+
+Under review as a conference paper at ICLR 2019
+Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver. Prioritized experience replay. In Proceedings of the International Conference on Learning Representations (ICLR), 2016.
+David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of go without human knowledge. Nature, 550(7676):354, 2017.
+Richard S Sutton. Learning to predict by the methods of temporal differences. Machine Learning, 3(1):9­44, 1988.
+Richard S. Sutton and Andrew G. Barto. Reinforcement Learning: An Introduction. MIT Press, 1998.
+Hado van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double Qlearning. In Proceedings of the AAAI Conference on Artificial Intelligence, 2016.
+Harm Van Seijen, Mehdi Fatemi, Joshua Romoff, Romain Laroche, Tavian Barnes, and Jeffrey Tsang. Hybrid reward architecture for reinforcement learning. In Advances in Neural Information Processing Systems, pp. 5392­5402, 2017.
+Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas. Dueling network architectures for deep reinforcement learning. In Proceedings of the International Conference on Machine Learning (ICML), 2016.
+Christopher JCH Watkins and Peter Dayan. Q-learning. Machine Learning, 8(3):279­292, 1992. Paul J Werbos. Backpropagation through time: what it does and how to do it. Proceedings of the
+IEEE, 78(10):1550­1560, 1990.
+11
+
+Under review as a conference paper at ICLR 2019
+
+APPENDIX
+
+HYPER-PARAMETERS
+
+R2D2 uses the same 3-layer convolutional network as DQN (Mnih et al., 2015), followed by an LSTM with 512 hidden units, which feeds into the advantage and value heads of a dueling network (Wang et al., 2016), each with a hidden layer of size 512.
+
+Number of actors Actor parameter update interval
+Sequence length m Replay buffer size Priority exponent
+Discount  Minibatch size
+Optimizer
+Optimizer settings Target network update interval
+
+256
+400 environment steps
+80 (+ prefix of l = 40 in all burn-in experiments) 4 × 106 observations (105 part-overlapping sequences)
+0.9 0.997
+64
+Adam (Kingma & Ba, 2014) learning rate = 10-4,  = 10-4
+2500 updates
+
+Table 2: Hyper-parameters values used in R2D2. All missing parameters follow the ones in Ape-X (Horgan et al., 2018).
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+FULL RESULTS
+
+GAMES
+explore goal locations large explore goal locations small explore object locations large explore object locations small explore object rewards few explore object rewards many explore obstructed goals large explore obstructed goals small language answer quantitative question language execute random task language select described object language select located object lasertag one opponent large lasertag one opponent small lasertag three opponents large lasertag three opponents small natlab fixed large map natlab varying map randomized natlab varying map regrowth psychlab arbitrary visuomotor mapping psychlab continuous recognition psychlab sequential comparison psychlab visual search rooms collect good objects test rooms exploit deferred effects test rooms keys doors puzzle rooms select nonmatching object rooms watermaze skymaze irreversible path hard skymaze irreversible path varied
+
+IMPALA(DEEP)
+83.1 209.4 37.0 57.8 39.8 58.7 39.5 135.2 219.4 -49.9 324.6 189.0
+-0.2 -0.1 -0.1 19.1 34.7 36.1 20.7 16.4 29.9 0.0 0.0 9.0 15.6 28.0 7.3 26.9 13.6 45.1
+
+R2D2 292.4 469.2 41.48 83.36
+70.0 3.36 35.2 354.4 -0.4 0.12 -3.6 2.0 0.0 0.0 0.08 37.64 3.16 38.56 20.88 30.64 30.72 56.6 79.8 9.76 48.0 54.08 66.96 46.52 100.0 96.0
+
+Table 3: Performance of R2D2 compared to IMPALA on the DMLab-30 suite of tasks. Note that the IMPALA agent does not use the improved action set from (Hessel et al., 2018b) that R2D2 uses, but on the other hand IMPALA uses substantially larger 15-layer ResNet, and importantly a custom `optimistic asymmetric reward clipping' which yields a big advantage in the LANGUAGE * tasks.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Mean Episode Return
+
+Mean Episode Return
+
+Mean Episode Return
+
+Mean Episode Return
+
+Mean Episode Return
+
+Mean Episode Return
+
+120000 100000 80000 60000 40000 20000
+0
+
+alien 1bdattle_zo2nd e 3d
+
+500000 400000 300000 200000 100000
+0
+1000000
+
+cho1pdper_com2dmand 3d
+
+800000
+
+600000
+
+400000
+
+200000
+
+0
+1dfreeway2d
+34 32 30 28 26 24 22 20
+
+1dkangaro2do
+
+3d
+
+14000
+
+12000
+
+10000
+
+8000
+
+6000
+
+4000
+
+2000
+
+1d pitfall2d
+0.0
+0.5
+1.0
+1.5
+2.0
+
+3d
+
+2.5
+
+1000000
+
+1d seaque2sdt
+
+3d
+
+800000
+
+600000
+
+400000
+
+200000
+
+0
+350000 300000 250000 200000 150000 100000 50000
+0
+
+1dtime_pil2odt 1d zaxxon2d
+
+3d 3d
+
+30000 25000 20000 15000 10000 5000
+0
+150000
+100000
+50000
+0
+300000 250000 200000 150000 100000
+12000 10000 8000 6000 4000 2000
+0
+150000
+100000
+50000
+0
+20 15 10 5 0
+28800 29000 29200 29400 29600 29800 30000 30200
+400 350 300 250 200 150
+
+150000
+
+100000
+
+50000
+
+0 1d 2d 3d
+
+amidar 1bd eam_rid2der
+
+100000 80000 60000 40000 20000
+0 3d
+40000
+
+30000
+
+20000
+
+10000
+
+c1rdazy_clim2dber 3d
+
+0
+
+1d frostbit2ed 1d krull 2d
+
+500000 400000 300000 200000 100000
+0 3d
+120000 100000 80000 60000 40000 20000
+0 3d
+200000
+
+150000
+
+100000
+
+50000
+
+1d pong2d 1d skiing2d 1dtutankha2dm
+1d 2d
+
+3d
+300 250 200 150 100 50
+0 50 3d
+5000
+4000
+3000
+2000
+3d
+500000 400000 300000 200000 100000
+0
+
+assault 1d berzer2kd
+
+1000000 800000 600000 400000 200000
+0 3d
+200
+150
+
+asterix 1d bowlin2gd
+
+250000 200000 150000 100000 50000
+0 3d
+100
+95
+
+100 90
+
+50 85
+
+1d defende2dr
+
+3d
+
+1d gophe2rd
+
+3d
+
+ku1dng_fu_m2adster 3d
+
+1pdrivate_e2dye 3d
+
+1d solaris 2d
+
+1dup_n_do2wdn
+
+3d
+
+1d 2d 3d
+
+140000 120000 100000 80000 60000 40000 20000
+0
+
+d1edmon_at2tdack 3d
+
+1d gravita2rd
+
+3d
+
+6000 5000 4000 3000 2000 1000
+0
+mon1tdezuma_r2edvenge 3d
+2500
+
+2000
+
+1500
+
+1000
+
+500
+
+0
+1d qbert 2d
+
+150000
+
+100000
+
+50000
+
+0
+sp1dace_inva2dders 3d
+
+60000
+
+50000
+
+40000
+
+30000
+
+20000
+
+10000
+
+0
+1d ventur2ed
+2000
+
+3d
+
+20 10 0 10 20
+35000 30000 25000 20000 15000 10000 5000
+25000 20000 15000 10000 5000
+0
+35000 30000 25000 20000 15000 10000 5000
+500000 400000 300000 200000 100000
+0
+1000000
+
+1500 800000
+600000 1000
+400000
+500 200000
+
+0 1d 2d 3d
+
+0
+
+asteroids
+
+1500000
+
+1000000
+
+500000
+
+1d boxing2d
+
+3d
+
+1ddouble_d2udnk 3d
+
+0
+800 700 600 500 400 300 200 100
+0
+
+2000 1500 1000
+
+1d hero 2d
+
+3d
+
+atlantis
+
+1d breakou2dt 1d enduro2d 1dice_hock2edy
+
+40000
+30000
+20000
+10000
+0 3d
+500000
+400000
+300000
+200000
+100000
+0 3d
+80 60 40 20 0 20 40 60 3d
+
+m1ds_pacma2nd 1d riverrai2dd 1sdtar_gun2nder v1dideo_pin2bdall
+1d 2d
+
+60
+40
+20
+0
+45000 40000 35000 30000 25000 20000 15000 10000 3d 600000 500000 400000 300000 200000 100000
+0 3d
+10
+5
+0
+5 3d
+140000 120000 100000 80000 60000 40000 20000
+0 3d
+
+20000
+
+15000
+
+10000
+
+5000
+
+na1md e_this_2gdame 3d
+
+1rdoad_run2nder 3d
+
+1d surroun2dd
+
+3d
+
+w1dizard_of_2dwor 3d
+
+0
+800000 700000 600000 500000 400000 300000 200000 100000
+0
+140 120 100 80 60 40 20
+25 20 15 10 5 0 5 10
+1000000
+
+800000
+
+600000
+
+400000
+
+200000
+
+1d 2d 3d
+
+0
+
+bank_heist
+
+1dcentiped2de
+
+3d
+
+fi1sdhing_der2bdy
+
+1djamesbo2ndd
+
+3d
+
+1d phoeni2xd
+
+3d
+
+1d robotan2kd
+
+3d
+
+1d tennis2d
+
+3d
+
+y1dars_reve2ndge 3d
+
+1d 2d 3d
+
+Figure 6: R2D2 learning curves on 57 Atari games.
+
+14
+
+Mean Episode Return
+
+Mean Episode Return
+
+Mean Episode Return
+
+Under review as a conference paper at ICLR 2019
+
+GAMES
+alien amidar assault asterix asteroids atlantis bank heist battle zone beam rider berzerk bowling boxing breakout centipede chopper command crazy climber defender demon attack double dunk enduro fishing derby freeway frostbite gopher gravitar hero ice hockey jamesbond kangaroo krull kung fu master montezuma revenge ms pacman name this game phoenix pitfall pong private eye qbert riverraid road runner robotank seaquest skiing solaris space invaders star gunner surround tennis time pilot tutankham up n down venture video pinball wizard of wor yars revenge zaxxon
+
+HUMAN
+7127.8 1719.5
+742.0 8503.3 47388.7 29028.1
+753.1 37187.5 16926.5 2630.4
+160.7 12.1 30.5 12017.0 7387.8 35829.4 18688.9 1971.0 -16.4 860.5 -38.8 29.6 4334.7 2412.5 3351.4 30826.4 0.9 302.8 3035.0 2665.5 22736.3 4753.3 6951.6 8049.0 7242.6 6463.7 14.6 69571.3 13455.0 17118.0 7845.0 11.9 42054.7 -4336.9 12326.7 1668.7 10250.0 6.5 -8.3 5229.1 167.6 11693.2 1187.5 17667.9 4756.5 54576.9 9173.3
+
+REACTOR
+6482.1 833.0 11013.5 36238.5 2780.3 308257.5 988.7 61220.0 8566.5 1641.4 75.4 99.4 518.4 3402.8 37568.0 194347.0 113127.8 100188.5 11.4 2230.1 23.2 31.4 8042.1 69135.1 1073.8 35542.2
+3.4 7869.3 10484.5 9930.9 59799.5 2643.5 2724.3 9907.1 40092.3
+-3.5 20.7 15177.1 22956.5 16608.3 71168.0 68.5 8425.8 -10753.4 2165.2 2448.6 70038.0 6.7 23.3 19401.0 272.6 64354.3 1597.5 469365.8 13170.5 102759.8 25215.5
+
+IMPALA(S/D)
+1536.0/15962.1 497.6/1554.8
+12086.9/19148.5 29692.5/300732.0
+3508.1/108590.1 773355.5/849967.5
+1200.3/1223.2 13015.0/20885.0 8219.9/32463.5
+888.3/1852.7 35.7/59.9
+96.3/100.0 640.4/787.3 5528.1/11049.8 5012.0/28255.0 136211.5/136950.0 58718.3/185203.0 107264.7/132827.0
+-0.4/-0.3 0.0/0.0
+32.1/44.9 0.0/0.0
+269.6/317.8 1002.4/66782.3
+211.5/359.5 33853.2/33730.6
+-5.3/3.5 440.0/601.5 47.0/1632.0 9247.6/8147.4 42259.0/43375.5
+0.0/0.0 6501.7/7342.3 6049.6/21537.2 33068.2/210996.5
+-11.1/-1.7 20.4/21.0 92.4/98.5 18901.3/351200.1 17401.9/29608.0 37505.0/57121.0 2.3/13.0 1716.9/1753.2 -29975.0/-10180.4 2368.4/2365.0 1726.3/43595.8 69139.0/200625.0
+-8.1/7.6 -1.9/0.5 6617.5/48481.5 267.8/292.1 273058.1/332546.8 0.0/0.0 228642.5/572898.3 4203.0/9157.5 80530.1/84231.1 1148.5/32935.5
+
+APE-X
+40804.9 8659.2 24559.4 313305.0 155495.1 944497.5 1716.4 98895.0 63305.2 57196.7
+17.6 100.0 800.9 12974.0 721851.0 320426.0 411943.5 133086.4
+12.8 2177.4
+44.4 33.7 9328.6 120500.9 1598.5 31655.9 33.0 21322.5 1416.0 11741.4 97829.5 2500.0 11255.2 25783.3 224491.1 -0.6 20.9 49.8 302391.3 63864.4 222234.5 73.8 392952.3 -10789.9 2892.9 54681.0 434342.5 7.1 23.9 87085.0 272.6 401884.3 1773.5 546197.4 46204.0 148594.8 42285.5
+
+R2D2 109038.4 27751.24 90526.44 999080.0 265861.2 1576068.0 46285.6 513360.0 128236.08 34134.8
+196.36 99.16
+795.36 532921.84 960648.0 312768.0 562106.0 143664.6
+23.12 2376.68
+81.96 34.0 11238.4 122196.0 6750.0 37030.4 71.56 23266.0 14112.0 145284.8 200176.0 2504.0 29928.2 45214.8 811621.6 0.0 21.0 300.0 161000.0 34076.4 498660.0 132.4 999991.84 -29970.32 4198.4 55889.0 521728.0 9.96 24.0 348932.0 393.64 542918.8 1992.0 483569.72 133264.0 918854.32 181372.0
+
+Table 4: Performance of R2D2 compared to Reactor, IMPALA (shallow and deep expert variants),
+
+and Ape-X, 30 no-op starts.
+
+15
+
+

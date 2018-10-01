@@ -1,0 +1,910 @@
+Under review as a conference paper at ICLR 2019
+BATCH NORMALIZATION SAMPLING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Deep Neural Networks (DNNs) thrive in recent years in which Batch Normalization (BN) plays an indispensable role. However, it has been observed that BN is costly due to the reduction operations. In this paper, we propose alleviating this problem through sampling only a small fraction of data for normalization at each iteration. Specifically, we model it as a statistical sampling problem and identify that by sampling less correlated data, we can largely reduce the requirement of the number of data for statistics estimation in BN, which directly simplifies the reduction operations. Based on this conclusion, we propose two sampling strategies, "Batch Sampling" (randomly select several samples from each batch) and "Feature Sampling" (randomly select a small patch from each feature map of all samples), that take both computational efficiency and sample correlation into consideration. Furthermore, we introduce an extremely simple variant of BN, termed as Virtual Dataset Normalization (VDN), that can normalize the activations well with few synthetical random samples. All the proposed methods are evaluated on various datasets and networks, where an overall training speedup by up to 20% on GPU is practically achieved without the support of any specialized libraries, and the loss on accuracy and convergence rate are negligible. Finally, we extend our work to the "micro-batch normalization" problem and yield comparable performance with existing approaches at the case of tiny batch size.
+1 INTRODUCTION
+Recent years, DNNs have achieved remarkable success in a wide spectrum of domains such as computer vision (Krizhevsky et al., 2012) and language modeling (Collobert & Weston, 2008). The success of DNNs largely relies on the representation capability benefit from the deep structure (Delalleau & Bengio, 2011). However, training a deep network is difficult to converge and batch normalization (BN) has been proposed to solve it (Ioffe & Szegedy, 2015). BN leverages the statistics (mean & variance) of mini-batches to standardized the activations.(equation 1). It allows the network to go deeper without significant gradient explosion or vanishing (Santurkar et al., 2018; Ioffe & Szegedy, 2015). Moreover, previous work has demonstrated that BN enables the use of higher learning rate and less awareness on the initialization (Ioffe & Szegedy, 2015), as well as produces mutual information across samples (Morcos et al., 2018) or introduces estimation noises (Bjorck et al., 2018) for better generalization. Despite of BN's effectiveness, it is observed that BN introduces considerable training overhead due to the costly reduction operations. The use of BN can lower the overall training speed (training samples per second) by >30%, and the deceleration occurs in both the forward and backward passes (Wu et al., 2018).
+To alleviate this problem, several methods were reported. Range Batch Normalization (RBN) (Banner et al., 2018) accelerated the forward pass by estimating the variance according to the data range of activations within each batch. A similar approach, L1-norm BN (L1BN) (Wu et al., 2018), simplified both the forward and backward passes by replacing the L2-norm variance with its L1-norm version and re-derived the gradients for back propagation (BP) training. Different from the above two methods, Self-normalization (Klambauer et al., 2017) provided another solution which totally eliminates the need of BN operation with an elaborate activation function called "scaled exponential linear unit" (SELU). SELU can automatically force the activation towards zero mean and unit variance for better convergence. Nevertheless, all of these methods are not sufficiently effective. The strengths of L1BN & RBN are very limited since GPU has sufficient resources to optimize the execution speed of complex arithmetic operations such as root for the vanilla calculation of L2norm variance. SELU relies on strict assumptions, such as normally distributed input data, which
+1
+
+Under review as a conference paper at ICLR 2019
+are impractical for real-world datasets. Therefore, SELU usually fails in very deep networks (e.g. DenseNet-121) where the small estimation error is easy to be scaled exponentially layer by layer.
+In this paper, we provide an alternating solution through statistical sampling. Specifically, We demonstrate that randomly sampling a small fraction of activations for the estimation of means and variances before normalization would consistently reduce the computational cost and effectively maintain the convergence rate. Moreover, we demonstrate that it's beneficial to select the less correlated data within each batch. We propose two optimized sampling strategies, "Batch Sampling" (BS) & "Feature Sampling" (FS). BS randomly selects several samples from each batch while FS randomly selects a small patch from each feature map. The estimated statistics (mean & variance) from the selected small fraction of data can be used to normalize the overall activations well. Inspired by Salimans et al. (2016), we further propose an extremely simple variant of BN to balance the conflict of randomness and regularity, termed as Virtual Dataset Normalization (VDN), that uses few synthetical random samples for statistical estimation. All the methods are evaluated on various datasets and networks with different scale (CIFAR-10/CIFAR-100/ImageNet, ResNet/DenseNet). Our experiments demonstrate that up to 20% speedup for overall training on GPU can be achieved with little accuracy loss. Note that the support of specialized libraries is not needed in our work, which is not like the network pruning (Zhu et al., 2018) or quantization (Hubara et al., 2017) requiring extra library for sparse or low-precision computation, respectively. Most previous acceleration work targeted inference which remained the training inefficiency (Wen et al., 2016; Molchanov et al., 2016; Luo et al., 2017; Zhang et al., 2018b; Hu et al., 2018), and the rest for training acceleration were orthogonal to our work (Lin et al., 2017; Goyal et al., 2017; You et al., 2017). Furthermore, our methods can be extended to the "micro-batch normalization" (micro-BN) problem and yield advanced training performance with tiny batch size.
+In summary, the major contributions of this work are summarized as follows.
+· We introduce a novel way to alleviate BN's computational cost while maintain the accuracy from the perspective of statistical sampling. Two random sampling strategies are proposed, and an extremely simple variant of BN (i.e. VDN with only few synthetical random samples) is further designed. The VDN can be independently used or combined with any sampling strategy for joint optimization.
+· Various benchmarks are evaluated, on which up to 20% practical acceleration for overall training on GPU with negligible accuracy loss and without specialized library support.
+· We extend to the micro-BN scenario and achieve advanced performance.
+2 RELATED WORK
+BN has been applied in most state-of-art models (He et al., 2016; Szegedy et al., 2017) since it was proposed. As aforementioned, BN standardizes the activation distribution to reduce the internal covariate shift. Models with BN have been demonstrated to converge faster and generalize better (Ioffe & Szegedy, 2015; Morcos et al., 2018). Recently, a model called Decorrelated Batch Normalization (DBN) was introduced which not only standardizes but also whitens the activations with ZCA whitening (Huang et al., 2018). Although DBN further improves the normalization performance, it introduces significant extra computational cost.
+Simplifying BN has been proposed to reduce BN's computational complexity. For example, L1BN (Wu et al., 2018) and RBN (Banner et al., 2018) replace the original L2-norm variance with an L1-norm version and the range of activation values, respectively. From another perspective, Selfnormalization uses the customized activation function (SELU) to automatically shift activation's distribution (Klambauer et al., 2017).
+However, as mentioned in Introduction, all of these methods fail to obtain a satisfactory balance between the effective normalization and computational cost, especially on large-scale datasets and models. Our work attempts to address this issue.
+Micro-BN aims to alleviate the diminishing of BN's effectiveness when the amount of data in each GPU node is too small to provide a reliable estimation of activation statistics. Previous works can be classified to two categories: (1) Sync-BN (Zhang et al., 2018a) and (2) Local-BN (Ba et al., 2016; Wu & He, 2018; Ioffe, 2017; Wang et al., 2018). The former addresses this problem by
+2
+
+Under review as a conference paper at ICLR 2019
+
+synchronizing the estimations from different GPUs at each layer, which induces significant interGPU data dependency and slows down training process. The latter solves this problem by either avoiding the use of batch dimension in the batched activation tensor for statistics or using additional information beyond current layer to calibrate the statistics. Our work can also be extended to tackle with micro-BN problem and achieve advanced performance.
+
+3 PROBLEM FORMATION
+
+3.1 BATCH NORMALIZATION AND THE BOTTLENECK ANALYSIS
+
+The activations in one layer for normalization can be described by a d-dimensional activation feature X = (x(1), .., x(d)), where for each feature we have x(k) = (x1(k), .., xm(k)). Note that in convolutional (Conv) layer, d is the number of feature maps (FMs) and m equals to the number of points
+in each FM across all the samples in one batch; while in fully-connected (FC) layer, d and m are the neuron number and batch size, respectively. BN uses the statistics (mean E[x(k)] & variance
+V ar[x(k)]) of the intra-batch data for each feature to normalize that activation by
+
+x(k) = x(k) - E[x(k)] , y(k) = (k)x(k) + (k) V ar[x(k)] +
+
+(1)
+
+where (k) & (k) are trainable parameters introduced to recover the representation capability, is a small constant to avoid numerical error, and E[x(k)] & V ar[x(k)] can be calculated by
+
+E[x(k)] = 1 m
+
+m
+
+x(jk), V
+
+ar[x(k)]
+
+=
+
+1 m
+
+m
+(xj(k) - E[x(k)])2.
+
+j=1
+
+j=1
+
+(2)
+
+The detailed operations of a BN layer in the backward pass can be found in Appendix C. From
+
+Iter. per second.
+Model w/o BN w/ BN C 26.7 17.7(-33.7%) D 7.7 5.2(-32.5%) E 5.4 3.1(-42.6%)
+(a)
+
+  x
+
+
+
+    
+
+ 
+
+   
+
+
+
+ 
+
+
+
+ 
+
+x
+pad 
+
+ 
+
+
+
+
+
+ 
+
+
+
+
+
+ 
+
+(b) (c)
+
+(d)
+
+Figure 1: Illustration of BN cost, operations, and bottleneck: (a) Iterations per second for training various models with or without BN, Model C,D,E are defined in Table 1; (b) usual optimization of the reduction operation using adder tree; (c) the computational graph of BN in the forward pass (upper) and backward pass (lower); (d) the computation graph of BN after sampling in forward pass (upper) and backward pass (lower). x is neuronal activations, µ and  denote the mean and standard deviation of x within one batch, respectively, and is the summation operation.
+Fig. 1(a), we can see that adding BN will significantly slow down the training speed by 32%-43% on ImageNet. The reason of why BN is costly is that it contains several "reduction operations", i.e. jm=1. If the reduction operations are not optimized, it's computational complexity should be O(m). With the optimized parallel algorithm proposed in Che et al. (2008), the reduction operation is transformed to cascaded adders of depth of log(m) as shown in Fig. 1(b). However, the computational cost is still high since we usually have m larger than one million. Besides, different data in one batch is often generated in different GPU kernels, and this data dependency naturally degrades the parallel benefits. As shown in Fig. 1(c), the red " "s represent operations that contain summations, which cause the BN inefficiency.
+
+3.2 PROPOSAL OF BN SAMPLING
+Motivated by above analysis, decreasing the effective value of m at each time for normalization seems a promising way to reduce the BN complexity for achieving acceleration. To this end, we
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+propose BN sampling that samples only a small fraction of data for statistical estimation before normalization at each iteration. In a BN sampling model, Equation (2) can be modified as
+
+E[x(k)]
+
+
+
+E[xs(k)]
+
+=
+
+1 s
+
+s
+
+xj(k),
+
+V ar[x(k)]
+
+
+
+V ar[x(sk)]
+
+=
+
+1 s
+
+s
+(x(jk) - E[xs(k)])2
+
+j=1
+
+j=1
+
+(3)
+
+where xs(k) denotes the sampled data, s is the number of data points after sampling, and we usually have s m. We denote Sampling Ratio as s/m. The computational graph of BN after sampling is illustrated in Fig. 1(d). The key for BN sampling is how to estimate E[x(k)] & V ar[x(k)] for each neuron or FM within one batch with much less data.
+
+3.3 CONSIDERATIONS FOR THE SAMPLING STRATEGY DESIGN
+We consider the BN sampling from both the perspectives of computational cost and model accuracy. In other words, our target is to simplify BN complexity as low as possible while maintain the accuracy as high as possible. We provide more detailed analysis on the computation cost and accuracy maintaining in Appendix C. The major conclusions are summarized here as below.
+· Random sampling is promising to estimate the statistics well and can effectively reduce computational cost of BN operations. (Appendix C.1 & Section 5.2)
+· More regular sampling pattern and more static sampling index are expected for practical acceleration. (Appendix C.1 & Section 5.1)
+· Sampling less correlated data can achieve better estimation in statistics for better accuracy improvement. (Appendix C.2 & Section 5.2)
+
+4 APPROACHES
+
+In this section, we propose a naive sampling baseline and two random sampling strategies (BS and FS). Furthermore, to balance the conflict of randomness and regularity in BN sampling, we introduce an extremely simple variant of BN (i.e. VDN). Finally, we will describe how we extend our framework to the micro-BN scenario.
+
+(a) HW
+N
+
+(b)
+HW C
+N
+
+(c)
+
+HW C
+
+N
+
+W H
+H
+CH
+
+...
+
+(d) HW
+N
+
+C
+
+Figure 2: Illustration of approaches: (a) Naive Sampling; (b) Batch Sampling; (c) Feature Sampling; (d) Virtual Dataset Normalization. `H' and 'W' are the height and width of FMs, respectively, `C' is the number of FMs for current layer, and `N' denotes the number of samples in current batch. The orange and yellow rectangles in (a)-(c) represent the sampled data and those in in (d) are the virtual sample(s). The yellow data are used to estimate the statistics for current FM.
+
+4.1 SAMPLING STRATEGIES
+In order to design an optimal sampling strategy, it's necessary to jointly consider the aforementioned considerations. In this paper, we propose two sampling strategies: BS and FS. Furthermore, a Naive Sampling (NS) strategy is used for comparison baseline. The sampling strategies are illustrated in Fig. 2(a)-(c). Specifically: (1) NS fixedly selects s samples to form a reference batch and use its statistics to perform the normalization (Appendix A-Algorithm 1 in Appendix A). (2) BS randomly selects s samples to form a reference batch (Appendix A-Algorithm 1). (3) FS randomly selects a small patch from each feature map (FM) across all samples (Appendix A-Algorithm 2).
+Data Randomness and Correlation. Here we make two empirical assumptions: within each layer or between layers, (1) data in the same sample are more likely to be correlated; (2) data sharing the
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+same location in FMs are more likely to be correlated. Under these assumptions, BS or FS recovers BN's effectiveness by randomly selecting sample indexes or patch indexes, respectively, to reduce the data correlation as much as possible. In the statistical sense, they are able to estimate the overall information. Specifically, the variable sample indexes (BS) or patch indexes (FS) across different layers guarantee less correlation in data for normalization. Since FS's sampled data come from more samples compared with NS and BS, it brings better statistical estimation.
+Sampling Pattern and Index. Besides the randomness for statistical estimation, according to the second consideration in Section 3.3, we expect more regular sampling pattern and more static sampling index for practical acceleration. Therefore, to balance the estimation loss and execution acceleration, we give the following sampling rules: (1) In NS, the sample index for different channels in each layer and different layers are shared; (2) In BS, the selected samples are continuous and the sample index for different channels are shared, while they are independent between different layers; (3) In FS, the patch shape is rectangular and the patch location is shared by different channels and samples within each layer but variable as layer changes. Furthermore, all the random indexes are updated only once for each epoch.
+
+4.2 VIRTUAL DATASET NORMALIZATION
+
+In fact, there is an implicit conflict between the last two considerations in Section 3.3. The requirements for more regular sampling pattern and static index would improve the efficiency of memory access and the related computation, however, it will increase the data correlation resulting in degraded normalization quality. To balance this conflict, we propose an extremely simple variant of BN, named VDN that completes the normalization using only one synthetical sample. VDN can be implemented with the following three steps: (1) calculating the statistics of the whole training dataset offline; (2) generating s random inputs (virtual samples) at each iteration to concatenate with the original real inputs as the final network inputs; (3) using data from either only virtual samples or the combination of virtual and real samples at each layer for statistical estimation, where the real data can be sampled by any sampling strategies mentioned in Section 4.1. VDN depicted in Fig. 2(d) and the detailed algorithm is given in Appendix A-Algorithm 3. Combining VDN with other sampling strategy can be described as
+
+X[x(k)] = X[xv(k)] + (1 - )X[xs(k)]
+
+(4)
+
+where X stands for "E" or "V ar", xv is the virtual data while xs represents the sampled data.  is a controlling variable: (1) when  = 0 or 1, the statistics come from single method (VDN or any sampling strategy); (2) when   (0, 1), the final statistics are a joint value. An optimal  may be obtained through extensive cross-validation, whereas in this paper, we set  = 0.5 for simplicity. VDN shares some similar attributes with previous work named Virtual Batch Normalization (VBN) (Salimans et al., 2016). VBN was proposed to avoid the problem in which an input x is highly dependent on some of other inputs within the same mini-batch in generative adversarial networks (GANs). In VBN, each sample x is normalized based on the statistics collected from a reference batch of samples. The reference batch is as large as the real one so it introduces considerable computation cost, which is the reason why VBN is only used in generator. In our VDN, we extend to general tasks like image recognition and experiments will demonstrate that the randomly-generated virtual samples are more effective compared to the real ones.
+
+4.3 MICRO-BN
+We further extend our framework to the micro-BN scenario, which also faces the problem that the amount of data used for statistics is too small. In Sync-BN: (1) With FS, each GPU node executes the same patch sampling as normal FS; (2) With BS, we can randomly select the statistics from a fraction of GPUs rather than all nodes; (3) With VDN, the virtual samples can be fed into a single or few GPUs. The first one can just simplify the computational cost within each GPU, while the last two further optimize the inter-GPU data dependency. In Local-BN, since the available data for each GPU is already tiny, the BN sampling strategy will be invalid. Fortunately, the VDN can still be effective by feeding virtue samples into each node.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+5 EXPERIMENTS
+
+Experimental Setup. All of our
+
+proposed approaches are validated
+
+on image classification task using
+
+Table 1: Model configuration.
+
+CIFAR-10, CIFAR-100 and ImageNet datasets from two perspective: (1) Accuracy Evaluation and (2) Acceleration Evaluation. To demonstrate the scalability and generality of our approaches on deep networks, we
+
+Model A B C D E F
+
+Dataset CIFAR-10 CIFAR-10/100 ImageNet ImageNet ImageNet ImageNet
+
+Network ResNet-20 ResNet-56 ResNet-18 ResNet-18 ResNet-50 DenseNet-121
+
+Samples/GPU 128 128 32 128 64 64
+
+GPU
+Titan XP ×1 Titan XP ×1
+V100 ×1 V100 ×2 V100 ×4 V100 ×3
+
+select ResNet-56 on CIFAR-10 & CIFAR-100 and select ResNet-18 and DenseNet-121 on Ima-
+
+geNet. The model configuration can be found in Table 1. The means and variances for BN are
+
+locally calculated in each GPU without inter-GPU synchronization as usual. We denote our ap-
+
+proaches as the format of "Approach-Sampled size/Original size-sampling ratio(%)". For instance,
+
+if we assume batch size is 128, "BS-4/128-3.1%" denotes only 4 samples are sampled in BS and
+
+the
+
+sampling
+
+ratio
+
+equals
+
+to
+
+4 128
+
+=
+
+3.1%.
+
+Similarly,
+
+"FS-1/32-3.1%"
+
+implies
+
+a
+
+1 32
+
+=
+
+3.1%
+
+patch
+
+is
+
+sampled from each FM, and "VDN-1/128-0.8%" indicates only one virtual sample is added. The tra-
+
+ditional BN is denoted as "BN-128/128-100.0%". Other experimental configurations can be found
+
+in Appendix B.
+
+5.1 ACCURACY EVALUATION
+Convergence Analysis. Fig. 3 shows the top-1 validation accuracy and confidential interval of ResNet-56 on CIFAR-10 and CIFAR-100. On one side, all of our approaches can well approximate the accuracy of normal BN when the sampling ratio is larger than 2%, which evidence their effectiveness. On the other side, all the proposed approaches perform better than the NS baseline. In particular, FS performs best, which is robust to the sampling ratio with negligible accuracy loss (e.g. at sampling ratio=1.6%, the accuracy change is -0.0871% on CIFAR-10 and +0.396% on CIFAR-100). VDN outperforms BS and NS with a large margin in extremely small sampling ratio
+
+1 2 4 8 16
+
+1 2 4 8 16
+
+Figure 3: Top-1 validation accuracy of ResNet-56 on CIFAR-10 (left) & CIFAR-100 (right).
+(e.g. 0.8%), whereas the increase of virtual batch size leads to little improvement on accuracy. BS is constantly better than NS. Furthermore, an interesting observation is that the BN sampling could even achieve better accuracy sometimes, such as NS-8/128(72.6±1.5%), BS-8/128(72.3±1.5%), and FS-1/64(71.2±0.96%) against the baseline (70.8±1%) on CIFAR-100. Fig.4 further shows the training curves of ResNet-56 on CIFAR-10 under different approaches. It reveals that FS and VDN would not harm the convergence rate, while BS and NS begin to degrade the convergence when the sampling ratio is smaller than 1.6% and 3.1%, respectively.
+Table 2 shows the top-1 validation error on ImageNet under different approaches. With the same sampling ratio, all the proposed approaches significantly outperform NS, and FS surpasses VDN and BS. Under the extreme sampling ratio of 0.78%, NS and BS don't converge. Due to the limitation of FM size, the smallest sampling ratio of FS is 1.6%, which has only -0.5% accuracy loss. VDN can still achieve relatively low accuracy loss (1.4%) even if the sampling ratio decreases to 0.78%. This implies that VDN is effective for normalization. Moreover, by combining FS-1/64 and VDN-2/128,
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Figure 4: Training curves of ResNet56 on CIFAR-10.
+
+Model
+ResNet-18 (256, 128)
+DenseNet-121 (192, 64)
+
+Table 2: Top-1 validation error on ImageNet.
+
+Approach Sampling Ratio Top-1 Error(%) Accuracy Loss(%)
+
+BN NS
+BS
+VDN
+FS FS+VDN
+
+128/128(100%) 1/128(0.78%) 4/128(3.1%) 1/128(0.78%) 4/128(3.1%) 1/128(0.78%) 2/128(1.6%) 1/64(1.6%) 1/32(3.1%) 4/128(3.1%)
+
+29.8 N.A. 35.2 N.A. 31.7 31.2 30.8 30.3 30.4 30.0
+
+baseline N.A. -5.42 N.A. -1.9 -1.4 -1.0 -0.5 -0.6 -0.2
+
+BN 64/64(100%) FS+VDN 3/64(4.7%)
+
+26.1 26.7
+
+baseline -0.6
+
+we get the lowest accuracy loss (-0.2%). This further indicates that VDN can be combined with other sampling strategies to achieve better results. Since training DenseNet-121 is time-consuming, we just report the results with FS-VDN mixed approach. Although DenseNet-121 is more challenging than ResNet-18 due to the much deeper structure, the "FS-1/64 + VDN-2/64" can still achieve very low accuracy loss (-0.6%). In fact, we observed gradient explosion if we just use VDN on very deep network (i.e. DenseNet-121), which can be conquered through jointly applying VDN and other proposed sampling strategy (e.g. FS+VDN). Fig. 5 illustrates the training curves for better visualization of the convergence. Except the BS with extremely small sampling ratio (0.8%) and NS, other approaches and configurations can achieve satisfactory convergence. Here, we further evaluate the fully random sampling (FRS) strategy, which samples completely random points in both the batch and FM dimensions. We can see that FRS is less stable compared with our proposed approaches (except the NS baseline) and achieves much lower accuracy. One possible reason is that under low sampling ratio, the sampled data may occasionally fall into the worse points, which lead to inaccurate estimation of the statistics.
+
+Figure 5: Training curves of ResNet18 (left) and DenseNet121 (right) on ImageNet.
+Correlation Analysis. In this section, we bring more empirical analyze on the data correlation that affects the error of statistical estimation. Here we denote the estimation errors as Eµ(i) = ||µs(i) - µ(i)||2 and E(i) = ||s(i) - (i)||2, where µs(i) & s(i) are the estimated mean & variance from the sampled data while µ(i) & (i) are the ground truth for the whole batch.
+The analysis is conducted on ResNet-56 over CIFAR-10. The estimation errors of all layers are recorded throughout the first epoch. Fig. 6 and Fig. 7 present the inter-layer correla-
+7
+
+Under review as a conference paper at ICLR 2019
+
+0NS-4/128-3.1%_mean 01..90 0 NS-4/128-3.1%_var
+
+20
+
+0.8 00..67
+
+20
+
+40 000...543 40
+
+0 20 40
+
+0 20 40
+
+0 FS-1/32-3.1%_mean
+20 40
+
+000001......000206408...24642000 FS-1/32-3.1%_var
+
+0 20 40
+
+0 20 40
+
+1.0 0BS-4/128-3.1%_mean 1.0 0 BS-4/128-3.1%_var
+
+0.8 0.8
+
+0.6 20
+
+0.6 20
+
+0.4 0.2 40 0.0
+
+0.4
+
+0.2 0.0
+
+40
+
+1.0 0.8 0.6 0.4 0.2 0.0
+
+0 20 40
+
+0 20 40
+
+001000......000842060...64224V000DN-1/128-0.8%_mean
+
+1.0 0VDN-1/128-0.8%_var
+
+0.8
+
+0.6 0.4
+
+20
+
+0.2
+
+0.00.240
+
+0.4
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0.2
+
+0 20 40
+
+0 20 40
+
+Figure 6: Inter-layer correlation between estimation errors.
+
+tion between estimation errors and the distribution of estimation errors for all layers, respectively. From Fig. 6, we can see that BS presents obviously less inter-layer correlation than NS, which is consistent with previous experimental result that BS converges better than NS.
+For FS and VDN, although it looks like they have averagely higher correlations, there exists negative corrections which effectively improves the model accuracy. Moreover, FS produces better accuracy than NS and BS since its selected data come from all samples with less correlation (details in Appendix C.2). In Fig. 7, FS also shows the least estimation error which further implies its better convergence. The estimation error of VND seems similar to BS and NS here, but we should note that it uses much lower sampling ratio of 0.8% compared to others (3.1%). Although BS and NS have similar estimation error, BS can converge better since it has less inter-layer correlation shown in Fig. 6. Figure 7: Estimation error distribution.
+5.2 ACCELERATION EVALUATION
+After the accuracy evaluation, we will evaluate the acceleration benefit which is our motivation. Fig. 8 shows the normalization speedup during training and overall training improvement.
+
+(a) baseline
+
+(b) baseline
+
+(c) Influence of sampling regularity
+FS
+
+Regular Pattern Static Index
+
+x
+
+x
+
+Speedup (%)
+
++5.0
+
++3.1
+
++10.7
+
+Figure 8: Acceleration evaluation: (a) normalization speedup; (b) overall training speedup; (c) influence of sampling regularity (ImageNet, ResNet-18, FS-1/32-3.1%). In general, BS can gain higher acceleration ratio because it doesn't incur the fine-grained sampling within FMs like in FS and it doesn't require the additional calculation and concatenation of the virtual samples like in VDN. As for FS, it fails to achieve speedup on CIFAR-10 due to the small image size that makes the reduction of operations unable to cover the sampling overhead. The proposed approaches can obtain up to 2x BN acceleration and 20% overall training acceleration. Furthermore, Table 3 gives additional results on DenseNet-121 and provides lateral comparisons
+8
+
+Under review as a conference paper at ICLR 2019
+
+with other methods for BN simplification. Our approaches perform faster training compared with two recent methods. On very deep networks with more BN layers, such as DenseNet-121, the speedup is more significant. It's worthy noting that, our training speedup is obtained without the support of specialized library that makes it easy-to-use. Fig. 8 (c) reveals that "Regular pattern" and "Static Index" help us achieve practical speedup.
+
+Approach
+ResNet-18 (256, 128)
+DenseNet-121 (192, 64)
+
+Table 3: Lateral comparison of overall training speed.
+
+Model
+
+Sampling Ratio Iter. per Second
+
+BN L1BN(Wu et al., 2018) RBN(Banner et al., 2018)
+FS VDN BS
+
+128/128 128/128 128/128 1/32(3.1%) 1/128(0.78%) 4/128(3.1%)
+
+5.21 5.23 5.30 5.77 5.93 6.07
+
+BN FS+VDN
+
+64/64 3/64(4.7%)
+
+2.44 2.97
+
+Speedup(%)
+baseline +0.38 +1.73 +10.7 +13.8 +16.5
+baseline +21.7
+
+5.3 MICRO-BN EXTENSION
+
+At last we extend our work to the micro-BN case where the batch size is significantly reduced on each GPU node. The normalization in Sync-BN is based on the statistics from multiple nodes through synchronization, which is equivalent to that in Fig. 5 with large batch size for each node. Therefore, to avoid repetition, here we just show the results on Local-BN with VDN optimization. We let the overall batch size of 256 break down to 64 workers (each one has only 4 samples for local normalization). We use "(gradient batch size, statistic batch size)" of (256, 4) to denote the configuration (Wang et al., 2018). A baseline of (256, 32) with BN and one previous work Group Normalization (GN) (Wu & He, 2018) are used for comparison. As shown in Fig. 9, although the reduction of batch size will degrade the model accuracy, our VDN can achieve slightly better result (top-1 validation error rate: 30.88%) than GN (top-1 validation error rate: 30.96%), an advanced technique for this scenario with tiny batch size. This promises the correct training of very large model so that each single GPU node can only accommodate several samples.
+
+Figure 9: Training curves in micro-BN case. (ImageNet, ResNet 18)
+
+6 CONCLUSION
+Motivated by the importance but high cost of BN layer in modern DNNs, the concept of BN sampling is introduced to simplify the reduction operations. Then two sampling strategies BS and FS are proposed to randomly select a small fraction of data for normalization in the batch dimension and FM dimension, respectively. To balance the requirement for less data correlation and more regular execution graph, an extremely simple variant of BN named VDN is further proposed, which normalizes activations using only one synthetical sample. Experiments on deep networks evidence that the proposed approaches can achieve up to 20% overall training acceleration with negligible accuracy loss. The accuracy differences among these approaches are analyzed through the visualization of estimation error and estimation correlation. Finally, the VDN can be extended to the micro-BN case with tiny batch size, where it gives comparable accuracy with the state-of-the-art result. This paper preliminary proves the effectiveness and efficiency of BN sampling. All the experiments are conducted on standard Tensorflow library, which is easy-to-use. In the future, developing specialized kernel optimization is promising for more running benefits. For example, the FS pattern at patch grain can be further matched and the padding operation in the backward pass of BN can be removed since our computational graph is fixed during one training epoch.
+
+REFERENCES
+Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hinton. Layer normalization. arXiv preprint arXiv:1607.06450, 2016.
+
+9
+
+Under review as a conference paper at ICLR 2019
+Ron Banner, Itay Hubara, Elad Hoffer, and Daniel Soudry. Scalable methods for 8-bit training of neural networks. arXiv preprint arXiv:1805.11046, 2018.
+Johan Bjorck, Carla Gomes, and Bart Selman. Understanding batch normalization. arXiv preprint arXiv:1806.02375, 2018.
+Shuai Che, Jie Li, Jeremy W Sheaffer, Kevin Skadron, and John Lach. Accelerating computeintensive applications with gpus and fpgas. In Application Specific Processors, 2008. SASP 2008. Symposium on, pp. 101­107. IEEE, 2008.
+Ronan Collobert and Jason Weston. A unified architecture for natural language processing: Deep neural networks with multitask learning. In Proceedings of the 25th international conference on Machine learning, pp. 160­167. ACM, 2008.
+Olivier Delalleau and Yoshua Bengio. Shallow vs. deep sum-product networks. In Advances in Neural Information Processing Systems, pp. 666­674, 2011.
+Sanjay Surendranath Girija. Tensorflow: Large-scale machine learning on heterogeneous distributed systems. 2016.
+Priya Goyal, Piotr Dolla´r, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: training imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016.
+Yiming Hu, Siyang Sun, Jianquan Li, Xingang Wang, and Qingyi Gu. A novel channel pruning method for deep neural network compression. arXiv preprint arXiv:1805.11394, 2018.
+Gao Huang, Zhuang Liu, Van Der Maaten Laurens, and Kilian Q Weinberger. Densely connected convolutional networks. pp. 2261­2269, 2016.
+Lei Huang, Dawei Yang, Bo Lang, and Jia Deng. Decorrelated Batch Normalization. ArXiv e-prints, April 2018.
+Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Quantized neural networks: Training neural networks with low precision weights and activations. Journal of Machine Learning Research, 18:187­1, 2017.
+Sergey Ioffe. Batch renormalization: Towards reducing minibatch dependence in batch-normalized models. In Advances in Neural Information Processing Systems, pp. 1945­1953, 2017.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+Gu¨nter Klambauer, Thomas Unterthiner, Andreas Mayr, and Sepp Hochreiter. Self-normalizing neural networks. In Advances in Neural Information Processing Systems, pp. 971­980, 2017.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. In Advances in neural information processing systems, pp. 1097­1105, 2012.
+Andrew Lavin and Scott Gray. Fast algorithms for convolutional neural networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 4013­4021, 2016.
+Yujun Lin, Song Han, Huizi Mao, Yu Wang, and William J Dally. Deep gradient compression: Reducing the communication bandwidth for distributed training. arXiv preprint arXiv:1712.01887, 2017.
+Jian-Hao Luo, Jianxin Wu, and Weiyao Lin. Thinet: A filter level pruning method for deep neural network compression. arXiv preprint arXiv:1707.06342, 2017.
+10
+
+Under review as a conference paper at ICLR 2019
+Pavlo Molchanov, Stephen Tyree, Tero Karras, Timo Aila, and Jan Kautz. Pruning convolutional neural networks for resource efficient inference. arXiv preprint arXiv:1611.06440, 2016.
+Ari S Morcos, David GT Barrett, Neil C Rabinowitz, and Matthew Botvinick. On the importance of single directions for generalization. arXiv preprint arXiv:1803.06959, 2018.
+Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki Cheung, Alec Radford, and Xi Chen. Improved techniques for training gans. In Advances in Neural Information Processing Systems, pp. 2234­2242, 2016.
+Shibani Santurkar, Dimitris Tsipras, Andrew Ilyas, and Aleksander Madry. How does batch normalization help optimization?(no, it is not about internal covariate shift). arXiv preprint arXiv:1805.11604, 2018.
+Christian Szegedy, Sergey Ioffe, Vincent Vanhoucke, and Alexander A Alemi. Inception-v4, inception-resnet and the impact of residual connections on learning. In AAAI, volume 4, pp. 12, 2017.
+Guangrun Wang, Jiefeng Peng, Ping Luo, Xinjiang Wang, and Liang Lin. Batch kalman normalization: Towards training deep neural networks with micro-batches. arXiv preprint arXiv:1802.03133, 2018.
+Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Learning structured sparsity in deep neural networks. In Advances in Neural Information Processing Systems, pp. 2074­2082, 2016.
+Shuang Wu, Guoqi Li, Lei Deng, Liu Liu, Yuan Xie, and Luping Shi. L1-norm batch normalization for efficient training of deep neural networks. arXiv preprint arXiv:1802.09769, 2018.
+Yuxin Wu and Kaiming He. Group normalization. arXiv preprint arXiv:1803.08494, 2018. Yang You, Zhao Zhang, C Hsieh, James Demmel, and Kurt Keutzer. Imagenet training in minutes.
+CoRR, abs/1709.05011, 2017. Hang Zhang, Kristin Dana, Jianping Shi, Zhongyue Zhang, Xiaogang Wang, Ambrish Tyagi, and
+Amit Agrawal. Context encoding for semantic segmentation. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2018a. Tianyun Zhang, Kaiqi Zhang, Shaokai Ye, Jiayu Li, Jian Tang, Wujie Wen, Xue Lin, Makan Fardad, and Yanzhi Wang. Adam-admm: A unified, systematic framework of structured weight pruning for dnns. arXiv preprint arXiv:1807.11091, 2018b. Maohua Zhu, Jason Clemons, Jeff Pool, Minsoo Rhu, Stephen W Keckler, and Yuan Xie. Structurally sparsified backward propagation for faster long short-term memory training. arXiv preprint arXiv:1806.00512, 2018.
+11
+
+Under review as a conference paper at ICLR 2019
+APPENDIX A IMPLEMENTATION ALGORITHMS
+Notations. We use the convolution layer for illustration, which occupies the major part of most modern networks (He et al., 2016; Huang et al., 2016). The features can be viewed as a 4D tensor. We use "E0,1,2" and "V ar0,1,2" to represent the operations that calculate the means and variances, respectively, where "0, 1, 2" denotes the dimensions for reduction. Algorithm 1: NS/BS Algorithm Data: input batch at layer l: BlRN×Hl×Wl×Cl , l  all layers; sampling size: ns  N, ns  (0, N ] Result: estimation of E[Bl] & V ar[Bl], l  all layers begin
+for ep  all epochs do for l  all layers do if BS: beginl = randint(0, N - ns); else NS: beginl = 0 for it  all iterations do for l  all layers do Bs = Bl[beginl : beginl + ns - 1, :, :, :] E[Bl] = E0,1,2[Bs], V ar[Bl] = V ar0,1,2[Bs]
+Algorithm 2: FS Algorithm Data: input batch at layer l: BlRN×Hl×Wl×Cl , l  all layers; sampling size: hs(l)  (0, Hl] &
+ws(l)  (0, Wl] Result: estimation of E[Bl] & V ar[Bl], l  all layers begin
+for ep  all epochs do for l  all layers do beginh(l) = randint(0, Hl - h(sl)), begin(wl) = randint(0, Wl - ws(l)) for it  all iterations do for l  all layers do Bs = B[:, begin(hl) : beginh(l) + hs(l) - 1, beginw(l) : begin(wl) + ws(l) - 1, :] E[Bl] = E0,1,2[Bs], V ar[Bl] = V ar0,1,2[Bs]
+Algorithm 3: VDN Algorithm Data: Dataset: D  RND×H0×W0×C0 ; input batch: Bl RN×Hl×Wl×Cl ; number of virtual
+samples: nv Result: estimation of E[Bl] & V ar[Bl] at layer l, l  all layers begin
+Calculate µ = E0,1,2[D] & 2 = V ar0,1,2[D] offline for ep  all epochs do
+for it  all iterations do Create virtual samples V  Rnv×H0×W0×C0 , V  N (µ, ) for l  all layers do if l = 0: Bl = [V, Bl], then feed Bl into the network Bs = Bl[0 : nv - 1, :, :, :] E[Bl] = E0,1,2[Bs], V ar[Bl] = V ar0,1,2[Bs]
+APPENDIX B EXPERIMENTAL CONFIGURATION
+All the experiments on CIFAR-10 & CIFAR-100 are conducted on a single Nvidia Titan XP GPU. We use a weight decay of 0.0002 for all weight layers and all models are trained by 130 epochs. The
+12
+
+Under review as a conference paper at ICLR 2019
+
+initial learning rate is set to 0.1 and it is decreased by 10x at 50, 80, 110 epochs. During training, we adopt the "random flip left & right" and all the input images are randomly cropped to 32 × 32. Each model is trained from scratch for 5 times in order to reduce random variation.
+For ImageNet, We use 2 Nvidia V100 GPUs on DGX station for ResNet-18 and 3 for DenseNet121. We use a weight decay of 0.0001 for all weight layers and all models are trained by 100 epochs. The initial learning rate is set to 0.1/256×"Gradient batch size" and we decrease the learning rate by 10x at 30, 60, 80, 90 epochs. During training, all the input images are augmented by random flipping and cropped to 224 × 224. We evaluate the top-1 validation error on the validation set using the centered crop of each image. To reduce random variation, we use the average of last 5 epochs to represent its final error rate. Besides, Wingrad (Lavin & Gray, 2016) is applied in all models to speedup training.
+
+APPENDIX C ANALYSIS OF SPEEDUP AND ESTIMATION ERROR
+
+C.1 SPEEDUP ANALYSIS
+
+Computational Cycle and Memory Access. Our proposed approaches can effectively speedup
+forward passes. Under the condition that we sample s m data for each FM, the total accumulation operations are significantly reduced from m - 1 to s - 1. If using the adder tree optimization
+illustrated in Section 3.1, the tree's depth can be reduce from log(m) to log(s). Thus, the theoretical speedup for the forward pass can reach logs(m) times. For instance, if the FM size is 56 × 56 with batch size of 128 (m = 56 × 56 × 128), under sampling ratio of 1/32, the speedup will be 36.7%.
+The total memory access is reduced by m/s times. For example, when the sampling ratio is 1/32,
+only 3.1% data need to be visited. This also contributes a considerable part in the overall speedup.
+
+Speedup in the Backward Pass. The BN operations in the forward pass have been shown in Equation (1)-(3). Based on the derivative chain rule, we can get the corresponding operations in the backward pass as follows
+
+l =
+
+l
+
+· (k),
+
+l
+
+m
+=(
+
+l ·
+
+x(ik) yi(k)
+
+E[x(k)]
+
+j=1 x(jk)
+
+-1 )
+V ar[x(k)] +
+
+l V ar[x(k)]
+
+=
+
+m j=1
+
+l xj(k)
+
+· (xj
+
+-
+
+E[x(k)]) ·
+
+-1 (V
+2
+
+ar[x(k)] +
+
+)-3/2
+
+.
+
+l = l · 1 + l · 1 + l · 2(xi(k) - E[x(k)])
+
+x(ik) x(ik)
+
+V ar[x(k)] +
+
+E[x(k)] m V ar[x(k)]
+
+m
+
+l (k)
+
+=
+
+m j=1
+
+l  yi(k)
+
+· x(ik),
+
+l m l (k) = j=1 yi(k)
+
+(5)
+
+After
+
+BN
+
+sampling,
+
+the
+
+calculation
+
+of
+
+l  xi(k)
+
+can
+
+be
+
+modified
+
+as
+
+
+
+l 
+
+ x(i k)
+
+= 
+
+· l
+ xi(k)
+
+1 V ar[x(k)]+
+
++
+
+l  E [x(k) ]
+
+·
+
+1 s
+
++
+
+l V ar[x(k)]
+
+·
+
+,2(x(ik) -E [x(k) ])
+s
+
+if xi
+
+S
+
+l  x(ik)
+
+·
+
+1
+V ar[x(k)]+
+
+,
+
+otherwise
+
+,
+
+(6)
+
+while the others remain the same. Here S is the location set for sampled neurons. For neurons
+
+outside S, they didn't participate in the estimation of the mean and variance in the forward pass, so
+
+ E [x(k) ]  x(ik)
+
+and
+
+V ar[x(k)]  x(ik)
+
+equal
+
+to
+
+zeros.
+
+We
+
+should
+
+note
+
+that
+
+although
+
+we
+
+sampled
+
+only
+
+s
+
+data
+
+in
+
+the
+
+forward pass, the reduction operations in the backward pass still have m length since the neurons
+
+outside S also participate in the activation normalization using the estimated statistics from the
+
+sampled data. Therefore, there is no theoretical speedup for the backward pass. In our experiments,
+
+to
+
+assemble
+
+a
+
+dense
+
+and
+
+efficient
+
+addition
+
+operation
+
+with
+
+l  x(ik)
+
+·
+
+1
+V ar[x(k)]+
+
+for all neurons, the
+
+mentioned zeros outside S are pre-padded. However, it has great potential for memory space and
+
+access
+
+reduction
+
+since
+
+the
+
+ E [x(k) ]  x(ik)
+
+and
+
+V ar[x(k)]  x(ik)
+
+outside
+
+S
+
+are
+
+zeros,
+
+which
+
+can
+
+be
+
+leveraged
+
+in
+
+specialized devices.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Regular Sampling Pattern and Static Sampling Index. To approach the theoretical speedup, we suggest to use more regular sampling pattern such as the continuous samples in BS and intra-FM rectangular shape and inter-FM shared location in FS. A regular sampling pattern can improve the cache usage by avoiding random access. Moreover, the operation in the backward pass corresponding to the sampling operation in the forward pass is "padding" shown in Fig. 1(d). Under a regular sampling pattern, the padding is block-wise that becomes much easier. On the other side, intuitively, a static computation graph can be calculated faster and easier deployed on various platforms for (1) the static computing graphs' pipeline can be optimized once for all before training, (2) popular deep learning frameworks like TensorFlow (Girija, 2016) are developed as a static computation graph. For these reasons, we expect the random sampling is achieved through a static computational graph, which is obtained by updating the sampling indexes only per epoch.
+
+C.2 ESTIMATION ERROR ANALYSIS
+
+Intra-layer Data Correlation. For each layer, the variance of estimated statistics (e.g. mean) is highly related to the correlation between sampled data, which can be described by
+
+V
+
+ar[E[xs(k)]]
+
+=
+
+V
+
+ar[
+
+1 s
+
+s
+
+xj(k)] =
+
+1 s2 (
+
+s
+
+V ar[xi(k)] + 2
+
+s
+
+Cov(xi(k), xj(k))).
+
+j=1
+
+i=1
+
+i=j
+
+(7)
+
+Obviously, less data correlation can reduce the estimation variance, thus bring more accurate estimation, which illustrates why FS produces better accuracy than BS: the selected data come from all samples which are more uncorrelated.
+
+Inter-layer Data Correlation. Bjorck et al. (2018) suggested that BN's effectiveness is probably because it can prevent the input statistics at each layer from scaling up. Under BN sampling, if positively correlated data are selected at each layer (e.g. sharing the same sampling indexes in each layer), the estimated statistics in different layers are also probably correlated. This may lead to correlated estimation error between layers which would further result in exponentially increasing estimation error throughout the network layer by layer. Oppositely, if we select less correlated data at each layer, the effectiveness of original BN can be preserved better.
+
+APPENDIX D INFLUENCE OF DECAY RATE FOR MOVING AVERAGE
+
+During each validation step after certain training iterations, E[x(k)] & V ar[x(k)] are replaced with the recorded moving average, which is governed by
+
+Xma[x(k)]it =
+
+X[x(k)]it, it = 1
+
+X [x(k) ]it
+
++
+
+(1
+
+-
+
+)Xma[x(k)]it-1,
+
+it
+
+
+
+[2,
+
+N B
+
+]
+
+,
+
+(8)
+
+where X stands for "E" or "V ar", Xma[x(k)] denotes the moving average, it is the iteration number, and  is the decay rate. Based on Equation (8), which the variance of Xma[x(k)]it equals to 2V ar[X[x(k)]it] + (1 - )2V ar[Xma[x(k)]it-1], if we assume that (1) each estimated value shares the same variance V ar[X[x(k)]it] and (2) independent with each other while (3) the iteration
+number goes larger, we will get equation 9.
+
+V
+
+ar[Xma[x(k)]it]
+
+
+
+2
+
+ -
+
+V 
+
+ar[X [x(k) ]it ].
+
+(9)
+
+The above equation reveals that an appropriately smaller  might scales down the estimation error, thus produces better validation accuracy. To verify this prediction, the experiments are conducted on ResNet-56 over CIFAR-10 and using BS1/128(0.78%) sampling. As shown in Fig. 10, it's obvious that there exists a best decay rate setting (here is 0.7) whereas the popular decay rate is 0.9. The performance also decays when decay rate is smaller than 0.7, which may because a too small  will lose the capability to record the moving estimation, thus degrade the validation accuracy. This is interesting because the decay rate is usually ignored by researchers, but the default value might be not the best setting for BN sampling.
+14
+
+Figure 10: Influence of decay rate for moving average.
+
+

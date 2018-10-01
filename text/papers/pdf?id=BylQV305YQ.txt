@@ -1,0 +1,1838 @@
+Under review as a conference paper at ICLR 2019
+TOWARD UNDERSTANDING THE IMPACT OF STALENESS IN DISTRIBUTED MACHINE LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Most distributed machine learning (ML) systems store a copy of the model parameters locally on each machine to minimize network communication. In practice, in order to reduce synchronization waiting time, these copies of the model are not necessarily updated in lock-step, and can become stale. Despite much development in large-scale ML, the effect of staleness on the learning efficiency is inconclusive, mainly because it is challenging to control or monitor the staleness in complex distributed environments. In this work, we study the convergence behaviors of a wide array of ML models and algorithms under delayed updates. Our extensive experiments reveal the rich diversity of the effects of staleness on the convergence of ML algorithms and offer insights into seemingly contradictory reports in the literature. The empirical findings also inspire a new convergence analysis of SGD irnatneoonf-cOo(n1v/epx oTp)t.imization under staleness, matching the best-known convergence
+1 INTRODUCTION
+With the advent of big data and complex models, there is a growing body of works on scaling machine learning under synchronous and non-synchronous1 distributed execution (Dean et al., 2012; Goyal et al., 2017; Li et al., 2014a). These works, however, point to seemingly contradictory conclusions on whether non-synchronous execution outperforms synchronous counterparts in terms of absolute convergence, which is measured by the wall clock time to reach the desired model quality. For deep neural networks, Chilimbi et al. (2014); Dean et al. (2012) show that fully asynchronous systems achieve high scalability and model quality, but others argue that synchronous training converges faster (Chen et al., 2016; Cui et al., 2016). The disagreement goes beyond deep learning models: Ho et al. (2013); Zhang & Kwok (2014); Langford et al. (2009); Lian et al. (2015); Recht et al. (2011) empirically and theoretically show that many algorithms scale effectively under non-synchronous settings, but McMahan & Streeter (2014); Mitliagkas et al. (2016); Hadjis et al. (2016) demonstrate significant penalties from asynchrony. The crux of the disagreement lies in the trade-off between two factors contributing to the absolute convergence: statistical efficiency and system throughput. Statistical efficiency measures convergence per algorithmic step (e.g., a mini-batch), while system throughput captures the performance of the underlying implementation and hardware. Non-synchronous execution can improve system throughput due to lower synchronization overheads, which is well understood (Ho et al., 2013; Chen et al., 2016; Cui et al., 2014; Chilimbi et al., 2014). However, by allowing various workers to use stale versions of the model that do not always reflect the latest updates, non-synchronous systems can exhibit lower statistical efficiency (Chen et al., 2016; Cui et al., 2016). How statistical efficiency and system throughput trade off in distributed systems, however, is far from clear. The difficulties in understanding the trade-off arise because statistical efficiency and system throughput are coupled during execution in distributed environments. Non-synchronous executions are in general non-deterministic, which can be difficult to profile. Furthermore, large-scale experiments are sensitive to the underlying hardware and software artifacts, which confounds the comparison between studies. Even when they are controlled, innocuous change in the system configurations such as adding more machines or sharing resources with other workloads can inadvertently alter the underlying staleness levels experienced by ML algorithms, masking the true effects of staleness.
+1We use the term "non-synchronous" to include both fully asynchronous model (Recht et al., 2011) and bounded asynchronous models such as Stale Synchronous Parallel (Ho et al., 2013).
+1
+
+Under review as a conference paper at ICLR 2019
+
+Understanding the impact of staleness on ML convergence independently from the underlying distributed systems is a crucial step towards decoupling statistical efficiency from the system complexity. The gleaned insights can also guide distributed ML system development, potentially using different synchronization for different problems. In particular, we are interested in the following aspects: Do ML algorithms converge under staleness? To what extent does staleness impact the convergence?
+
+By resorting to simulation study, we side step the challenges faced in distributed execution. We study the impact of staleness on a diverse set of models: Convolutional Neural Networks (CNNs), Deep Neural Networks (DNNs), multi-class Logistic Regression (MLR), Matrix Factorization (MF), Latent Dirichlet Allocation (LDA), and Variational Autoencoders (VAEs). They are addressed by 7 algorithms, spanning across optimization, sampling, and blackbox variational inference. Our findings suggest that while some algorithms are more robust to staleness, no ML method is immune to the negative impact of staleness. We find that all investigated algorithms reach the target model quality under moderate levels of staleness, but the convergence can progress very slowly or fail under high staleness levels. The effects of staleness are also problem dependent. For CNNs and DNNs, the staleness slows down deeper models much more than shallower counterparts. For MLR, a convex objective, staleness has minimal effect. Different algorithms respond to staleness very differently. For example, high staleness levels incur drastically more statistical penalty for RMSProp (Hinton, 2012) and Adam (Kingma & Ba, 2014) optimization than stochastic gradient descent (SGD) and Adagrad (Duchi et al., 2011), which are robust to staleness. Separately, Gibbs sampling for LDA is highly resistant to staleness up to a certain level, beyond which it does not converge to a fixed point. Overall, it appears that staleness is a key governing parameter of ML convergence.
+
+To gain deeper insights, for gradient-based methods we further introduce gradient coherence along
+
+the optimization path, and show that gradient coherence is a sensitivity to staleness. In particular, our theoretical result
+
+epsotassbilbisleheesxpthlaenOat(io1n/pfoTr
+
+an algorithm's ) convergence
+
+rate of the asynchronous SGD in nonconvex optimization by exploiting gradient coherence, matching
+
+the rate of best-known results (Lian et al., 2015).
+
+2 RELATED WORK
+Staleness is reported to help absolute convergence for distributed deep learning in Chilimbi et al. (2014); Dean et al. (2012) and has minimal impact on convergence (Mitliagkas et al., 2016; Hadjis et al., 2016; Lian et al., 2015). But Chen et al. (2016); Cui et al. (2016) show significant negative effects of staleness. LDA training is generally insensitive to staleness (Smola & Narayanamurthy, 2010; Yuan et al., 2015; Wei et al., 2015; Ho et al., 2013), and so is MF training (Yun et al., 2013; Low et al., 2012; Cui et al., 2014; Zhang & Kwok, 2014). However, none of their evaluations quantifies the level of staleness in the systems. By explicitly controlling the staleness, we decouple the distributed execution, which is hard to control, from ML convergence outcomes. We focus on algorithms that are commonly used in large-scale optimization (Goyal et al., 2017; Chen et al., 2016; Dean et al., 2012), instead of methods specifically designed to minimize synchronization (Neiswanger et al., 2013; Scott et al., 2016; Jordan et al., 2013). Non-synchronous execution has theoretical underpinning (Li et al., 2014b; Ho et al., 2013; Zhang & Kwok, 2014; Lian et al., 2015; Recht et al., 2011). Here we study algorithms that do not necessarily satisfy assumptions in their analyses.
+
+3 METHODS
+We study six ML models and focus on algorithms that lend itself to data parallelism, which a primary approach for distributed ML. Our algorithms span optimization, sampling, and black box variational inference. Table 1 summarizes the studied models and algorithms. Simulation Model. Each update generated by worker p needs to be propagated to both worker p's model cache and other worker's model cache. We apply a uniformly random delay model to these updates that are in transit. Specifically, let utp be the update generated at iteration t by worker p. For each worker p0 (including p itself), our delay model applies a delay rpt,p0  Categorical(0, 1, .., s 1), where s is the maximum delay and Categorical() is the categorical distribution placing equal weights on each integer2. Under this delay model, update utp shall arrive at worker p0 at the start of iteration
+2We find that geometrically distributed delays have qualitatively similar impacts on convergence. We defer read-my-write consistency to future work.
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+wt +e r1ed+ucrept,tpo0 .thTeheseaqvueernagtiealdseelattyinugn.dSeirntcheismmooddelelcaisch12ess+on1e. aNcohtiwceortkheart
+
+for are
+
+one worker symmetric,
+
+with s = 0 we use the
+
+first worker's model to evaluate the model quality. Finally, we are most interested in measuring
+
+convergence against the logical time, and wall clock time is in general immaterial as the simulation
+
+on a single machine is not optimized for performance.
+
+3.1 MODELS AND ALGORITHMS
+
+Model
+CNN
+DNN/MLR LDA MF VAE
+
+Algorithms SGD Momentum SGD Adam Adagrad RMSProp SGD Adam Gibbs Sampling SGD Blackbox VI (SGD, Adam)
+
+Key Parameters
+ = 0.01  = 0.01, momentum=0.9  = 0.001, 1 = 0.9, 2 = 0.999  = 0.01  = 0.01, decay=0.9, momentum=0  = 0.01  = 0.001, 1 = 0.9, 2 = 0.999  = 0.1, = 0.1  = 0.005, rank=5, = 0.0001 Optimization parameters same as MLR/DNN
+
+Dataset
+CIFAR10
+MNIST 20 NewsGroup MovieLens1M
+MNIST
+
+Table 1: Overview of the models, algorithms (Qian, 1999; Duchi et al., 2011; Kingma & Ba, 2014; Hinton, 2012; Griffiths & Steyvers, 2004), and dataset (Krizhevsky & Hinton, 2009; LeCun, 1998; Harper & Konstan, 2016; Rennie) in our study.  denotes learning rate (empirically chosen), 1, 2 are optimization hyperparameters (using common default values). , in LDA are Dirichlet priors for document topic and word topic random variables, respectively.
+
+Convolutional Neural Networks (CNNs) have been a strong focus of large-scale training, both under synchronous (Goyal et al., 2017; Cui et al., 2016; Coates et al., 2013) and non-synchronous (Chilimbi et al., 2014; Dean et al., 2012; Chen et al., 2016; Hadjis et al., 2016) training. We consider residual networks with 6n + 2 weight layers (He et al., 2016). The networks consist of 3 groups of n residual blocks, with 16, 32, and 64 feature maps in each group, respectively, followed by a global pooling layer and a softmax layer. The residual blocks have the same construction as in (He et al., 2016). We measure the model quality using test accuracy. For simplicity, we omit data augmentation in our experiments.
+
+Deep Neural Networks (DNNs) are neural networks composed of fully connected layers. Our DNNs have 1 to 6 hidden layers, with 256 neurons in each layer, followed by a softmax layer. We use rectified linear units (ReLU) for nonlinearity after each hidden layer (Nair & Hinton, 2010). Multiclass Logistic Regression (MLR) is the special case of DNN with 0 hidden layers. We measure the model quality using test accuracy.
+
+Matrix factorization (MF) is commonly used in recommender systems and have been im-
+
+plemented at scale (Yun et al., 2013; Low et al., 2012; Cui et al., 2014; Zhang & Kwok,
+
+2014; Kim et al., 2016; Ho et al., 2013; Kumar et al., 2014). Let D 2 RMN be a par-
+
+tially filled matrix, MF factorizes D into two factor matrices L 2 RMr and R 2 RNr
+
+(r  minL,R
+
+m1in(MnP, N )
+
+|Dobs |
+
+(i,j
+
+is the
+)2Dobs
+
+user-defined
+
+||Dij
+
+PK
+k=1
+
+rank). The LikRkj ||2 +
+
+`2-penalized optoimization problem is: (||L||2F + ||R||2F ) where || · ||F is the
+
+Frobenius norm and is the regularization parameter. We partition observations D to workers while
+
+treating L, R as shared model parameters. We optimize MF via SGD, and measure model quality by
+
+training loss defined by the objective function above.
+
+Latent Dirichlet Allocation (LDA) is an unsupervised method to uncover hidden semantics ("top-
+
+ics") from a group of documents, each represented as a bag of tokens. In LDA each token wij
+
+(j-th token in the i-th document) is assigned with a latent topic zij from totally K topics. We use
+
+Gibbs sampling to infer the topic assignments zij. The Gibbs sampling step involves three sets of
+
+parameters, known as sufficient statistics: (1) document-topic vector i 2 RK where ik the number
+
+of topic assignments within document i to topic k = 1...K; (2) word-topic vector w 2 RK where
+
+dowckuims etnhtes;n(u3m) b~e2r oRf Ktopwichearsesi~gknm=ePntswWt=o1topwikc
+
+k is
+
+= 1, ..., K the number
+
+for of
+
+word (vocabulary) w across all tokens in the corpus assigned to
+
+topic k. The corpus (wij, zij) is partitioned to workers, while w and ~ are shared model parameters.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+We measure the model quality using log likelihood. LDA has been scaled under non-synchronous execution (Ahmed et al., 2012; Low et al., 2012; Yuan et al., 2015) with great success. Variational Autoencoder (VAE) is commonly optimized by black box variational inference, which can be considered as a hybrid of optimization and sampling methods. The inputs to VAE training include two sources of stochasticity: the data sampling x and samples of random variable . We measure the model quality by test loss. We use DNNs with 13 layers as the encoders and decoders in VAE, in which each layer has 256 units furnished with rectified linear function for non-linearity. The model quality is measured by the training objective value, assuming continuous input x and isotropic Gaussian prior p(z)  N (0, I).
+
+4 EXPERIMENTS
+
+We use batch size 32 for CNNs, DNNs, MLR, and VAEs3. For MF, we use batch size of 25000
+
+samples, which is 2.5% of the MovieLens dataset (1M samples). We study staleness up to s = 50 on
+
+8 workers, which as the batch size,
+
+means where
+
+model caches can D is the number
+
+miss updates up to of documents and
+
+P8.7is5tdhaetanupmasbseesr.oFfowr oLrDkAersw. eWuesest1uD0dPy
+
+staleness up to s = 20, which means model caches can miss updates up to 2 data passes. We measure
+
+time in terms of the amount of work performed, such as the number of batches processed.
+
+Number of Batches to Reach 71% Test Accuracy
+
+(a) CNN (8 workers, SGD)
+40000 30000 20000 10000
+
+(c)
+30000 25000 20000 15000 10000
+5000
+
+CNN (8 workers, Adam)
+ResNet8 ResNet14 ResNet20 ResNet32
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+(e)
+20 15 10
+5
+
+DNN (8 workers, Adam)
+MLR Depth 1 Depth 2 Depth 3 Depth 6
+
+(b)
+
+0
+
+s=0
+
+s=4
+
+s=8
+
+s=16
+
+CNN (8 workers, SGD)
+
+0
+(d)
+
+s=0
+
+s=4
+
+s=8
+
+s=16
+
+CNN (8 workers, Adam)
+
+0
+(f)
+
+s=0
+
+s=16
+
+s=32
+
+DNN (8 workers, SGD)
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+Normalized Number of Batches to Reach 71% Test Accuracy
+
+1.75 1.50 1.25 1.00
+
+6 5 4
+
+1.4 1.2 1.0 0.8
+
+0.75
+
+3
+
+0.6
+
+0.50
+
+2
+
+0.4
+
+0.25 0.00
+s=0
+
+s=4
+
+s=8
+
+s=16
+
+1 0 s=0
+
+s=4
+
+s=8
+
+s=16
+
+0.2 0.0
+s=0
+
+s=16
+
+s=32
+
+Figure 1: (a)(c) The number of batches to reach 71% test accuracy on CIFAR10 for 4 variants of ResNet with varying staleness, using 8 workers and SGD / Adam. The mean and standard deviation are calculated over 3 randomized runs. (b)(d) The same metrics as (a)(c), but each model is normalized by the value under staleness 0 (s = 0), respectively. (e)(f) The number of batches to reach 92% accuracy for MLR and DNN with varying depths, normalized by the value under staleness 0. MLR with SGD did not converge within the experiment horizon (77824 batches) and is thus not shown in (f).
+
+Convergence Slowdown. Perhaps the most prominent effect of staleness on ML algorithms is the slowdown in convergence, evident throughout the experiments. Fig. 1 shows the number of batches needed to reach the desired model quality for CNNs and DNNs/MLR with varying network depths and different staleness (s = 0, ..., 16). Fig. 1(b)(d) show that convergence under higher level of staleness requires more batches to be processed in order to reach the same model quality. This additional work can potentially be quite substantial, such as in Fig. 1(d) where it takes up to 6x more batches compared with settings without staleness (s = 0). It is also worth pointing out that while there can be a substantial slowdown in convergence, the optimization still reaches desirable models under most cases in our experiments. When staleness is geometrically distributed (Fig. 4(c)), we observe similar patterns of convergence slowdown. We are not aware of any prior work reporting slowdown as high as observed here. This finding has important ramifications for distributed ML. Usually, the moderate amount of workload increases due to parallelization errors can be compensated by the additional computation resources and higher
+
+3Non-synchronous execution allows us to use small batch sizes, eschewing the potential generalization problem with large batch SGD (Keskar et al., 2016; Masters & Luschi, 2018).
+
+4
+
+Under review as a conference paper at ICLR 2019
+system throughput in the distributed execution. However, it may be difficult to justify spending large amount of resources for a distributed implementation if the statistical penalty is too high, which should be avoided (e.g., by staleness minimization system designs or synchronous execution). Model Complexity. Fig. 1 also reveals that the impact of staleness can depend on ML parameters, such as the depths of the networks. Overall we observe that staleness impacts deeper networks more than shallower ones. This holds true for SGD, Adam, Momentum, RMSProp, Adagrad (Fig. 2), and other optimization schemes, and generalizes to other numbers of workers (see Appendix). This is perhaps not surprising, given the fact that deeper models pose more optimization challenges even under the sequential settings (Glorot & Bengio, 2010; He et al., 2016), though we point out that existing literature does not explicitly consider model complexity as a factor in distributed ML (Lian et al., 2015; Goyal et al., 2017). Our results suggest that the staleness level acceptable in distributed training can depend strongly on the complexity of the model. For sufficiently complex models it may be more advantageous to eliminate staleness altogether and use synchronous training. Algorithms' Sensitivity to Staleness. Staleness has uneven impacts on different SGD variants. Fig. 2 shows the amount of work (measured in the number of batches) to reach the desired model quality for five SGD variants. Fig. 2(d)(e)(f) reveals that while staleness generally increases the number of batches needed to reach the target test accuracy, the increase can be drastic for certain algorithms, such as Adam, Momentum, and RMSProp. RMSProp, in particular, fails to converge to the desired test accuracy under several settings. On the other hand, SGD and Adagrad appear to be robust to the staleness, with the total workload <2x of non-stale case (s = 0) even under high staleness (s = 16)4. In fact, in some cases, the convergence is accelerated by staleness, such as Adagrad on 1 worker under s = 16. This may be attributed to the implicit momentum created by staleness (Mitliagkas et al., 2016) and the aggressive learning rate shrinking schedule in Adagrad. Our finding is consistent with the fact that, to our knowledge, all existing successful cases applying non-synchronous training to deep neural networks use SGD (Dean et al., 2012; Chilimbi et al., 2014). In contrast, works reporting subpar performance from non-synchronous training all use variants SGD, such as RMSProp with momentum (Chen et al., 2016) and momentum (Cui et al., 2016). Our results suggest that these different outcomes may be primarily driven by the choice of optimization algorithms, leading to the seemingly contradictory reports of whether non-synchronous execution is advantageous over synchronous ones. Effects of More Workers. The impact of staleness is amplified by the number of workers. In the case of MF, Fig. 3(b) shows that the convergence slowdown in terms of the number of batches (normalized by the convergence for s = 0) on 8 workers is more than twice of the slowdown on 4 workers. For example, in Fig. 3(b) the slowdown at s = 15 is 3.4, but the slowdown at the same staleness level on 8 workers is 8.2. Similar observations can be made for CNNs (Fig. 3). This can be explained by the fact that additional workers amplifies the effect of staleness by (1) generating updates that will be subject to delays, and (2) missing updates from other workers that are subject to delays. LDA. Fig. 3(c)(d) show the convergence curves of LDA with different staleness levels for two settings varying on the number of workers and topics. Unlike the convergence curves for SGD-based algorithms (see Appendix), the convergence curves of Gibbs sampling are highly smooth, even under high staleness and a large number of workers. This can be attributed to the structure of log likelihood objective function (Griffiths & Steyvers, 2004). Since in each sampling step we only update the count statistics based on a portion of the corpus, the objective value will generally change smoothly. Staleness levels under a certain threshold (s  10) lead to convergence, following indistinguishable log likelihood trajectories, regardless of the number of topics (K = 10, 100) or the number of workers (2­16 workers, see Appendix). Also, there is very minimal variance in those trajectories. However, for staleness beyond a certain level (s 15), Gibbs sampling does not converge to a fixed point. The convergence trajectories are distinct and are sensitive to the number of topics and the number of workers. There appears to be a "phase transition" at a certain staleness level that creates two distinct phases of convergence behaviors5. We believe this is the first report of a staleness-induced failure case for LDA Gibbs sampling.
+4Note that s = 0 execution treats each worker's update as separate updates instead of one large batch in other synchronous systems.
+5We leave the investigation into this distinct phenomenon as future work.
+5
+
+Under review as a conference paper at ICLR 2019
+
+Number of Batches to Reach 71% Test Accuracy
+
+Normalized Number of Batches to Reach 71% Test Accuracy
+
+VAE In Fig. 3(e)(f), VAEs exhibit a much higher sensitivity to staleness compared with DNNs (Fig. 1(e)(f)). This is the case even considering that VAE with depth 3 has 6 weight layers, which has a comparable number of model parameters and network architecture to DNNs with 6 layers. We hypothesize that this is caused by the additional source of stochasticity from the sampling procedure, in addition to the data sampling process.
+
+(a)
+60000
+
+ResNet8 (1 worker)
+
+50000
+
+40000
+
+30000
+
+20000
+
+10000
+
+(d)
+
+0 s=0
+
+s=4
+
+6 sgd adam
+5 momentum rmsprop
+4 adagrad
+3
+
+s=8 s=16
+
+2
+
+1
+
+0 s=0
+
+s=4
+
+s=8 s=16
+
+(b)
+70000
+
+ResNet8 (8 workers)
+
+60000
+
+50000
+
+40000
+
+30000
+
+20000
+
+10000
+
+0
+
+(e) s=0
+
+s=4
+
+s=8
+
+s=16
+
+4
+
+3
+
+2
+
+1
+
+0 s=0
+
+s=4
+
+s=8
+
+s=16
+
+(c) ResNet8 (16 workers)
+
+100000
+80000
+60000
+40000
+20000
+0
+(f) 8 s=0
+7 6 5 4 3 2 1 0
+s=0
+
+s=4 s=4
+
+s=8 s=16
+
+s=8
+
+s=16
+
+Figure 2: (a)(b)(c) The number of batches to reach 71% test accuracy on 1, 8, 16 workers with staleness s = 0, ..., 16 using ResNet8. We consider 5 variants of SGD: SGD, Adam, Momentum, RMSProp, and Adagrad. (d)(e)(f) show the same metric but each algorithm is normalized by the value under staleness 0 (s = 0), respectively. Under certain settings RMSProp does not converge to the desired model quality within the experiment horizon and is thus omitted.
+
+Normalized Num Batches to Reach Test Loss 130
+
+(a)
+800 700 600 500
+
+MF (4 and 8 workers)
+
+s=0 s=5 s = 10 s = 15
+
+s = 20 s = 30 s = 40 s = 50
+
+(c) LDA (2 workers, 10 topics) 1.15 1e7 1.20 1.25 1.30 1.35
+
+(e)
+2.0 1.5
+
+VAE (1 worker, SGD)
+Depth 1 Depth 2 Depth 3
+
+Log Likelihood
+
+Num Batches to Reach Training Loss 0.5
+
+Normalized Num Batches to Reach Training Loss 0.5
+
+400 300 200 100
+0
+(b)
+16 14 12 10
+8 6 4 2
+
+num workers=4
+
+num workers=8
+
+MF (4 and 8 woerkers)
+
+s=0 s=5 s = 10 s = 15
+
+s = 20 s = 30 s = 40 s = 50
+
+1.40
+
+1.0
+
+1.45
+
+s=0
+
+s = 10
+
+1.50 1.55
+
+s=1 s=2 s=5
+
+s = 15 s = 20
+
+0.5
+
+1.60 0
+
+1
+
+2
+
+3
+
+4
+
+5 1e5
+
+0.0
+
+Number of Documents
+
+(d) LDA (16 workers, 100 topics) (f)
+
+1.2 1e7
+
+60
+
+1.3 50
+1.4
+
+1.5 40
+
+Normalized Num Batches to Reach Test Loss 130
+
+Log Likelihood
+
+1.6 30
+
+1.7 20
+1.8
+1.9 10
+
+s=0
+
+s=2
+
+s=4
+
+s=8
+
+s=16
+
+VAE (1 worker, Adam)
+
+0 num workers=4
+
+num workers=8
+
+2.0 0
+
+1234 Number of Documents
+
+5 1e5
+
+0 s=0
+
+s=2
+
+s=4
+
+s=8
+
+s=16
+
+Figure 3: (a) The number of batches to reach training loss of 0.5 for Matrix Factorization (MF). (b) shows
+
+the same metric in (a) but normalized by the values of staleness 0 of each worker setting, respectively (4 and 8
+
+workers). (c)(d) Convergence of LDA log likelihood using 10 and 100 topics under staleness levels s = 0, ..., 20,
+
+with 2 and 16 workers. The convergence is recorded against the number of documents processed by Gibbs
+
+sampling. The shaded regions are 1 standard deviation around the means (solid lines) based on 5 randomized
+
+runs. (e)(f) The number of batches to reach test loss 130 by Variational Autoencoders (VAEs) on 1 worker,
+
+under staleness s = 0, ..., 16. We consider VAEs with depth 1, 2, and 3 (the number of layers in the encoder
+
+and the decoder networks, separately). The numbers of batches are normalized by s = 0 for each VAE depth,
+
+respectively. Configurations that do not converge to the desired test loss are omitted in the graph, such as Adam
+
+optimization for VAE with depth 3 and s = 16.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+5 GRADIENT COHERENCE AND CONVERGENCE OF ASYNCHRONOUS SGD
+
+We now provide theoretical insight into the effect of staleness on the observed convergence slowdown. We focus on the challenging asynchronous SGD (Async-SGD) case, which characterizes the neural network models, among others. Consider the following nonconvex optimization problem
+
+min
+x2Rd
+
+F (x)
+
+:=
+
+1 n
+
+Xn fi(x),
+i=1
+
+(P)
+
+where fi corresponds to the loss on the i-th data sample, and the objective function is assumed to satisfy the following standard conditions:
+
+Assumption 1. The objective function F in the problem (P) satisfies:
+
+1. Function F is continuously differentiable and bounded below, i.e., infx2Rd F (x) > 1; 2. The gradient of F is L-Lipschitz continuous.
+
+Notice that we allow F to be nonconvex. We apply the Async-SGD to solve the problem (P). Let (k)
+
+be the mini-batch of data indices sampled from {1, . . . , n} uniformly at random by the algorithm
+
+Pat ii2ter(akt)iornfki(,xakn)d.
+
+|(k)| is Then, the
+
+the mini-batch size. Denote mini-batch update rule of Async-SGD can be written
+
+gradient as
+
+as
+
+rf(k) (xk )
+
+:=
+
+xk+1 = xk
+
+k |(k
+
+)|
+
+rf(k
+
+)
+
+(xk
+
+),
+
+(Async-SGD)
+
+where k corresponds to the stepsize, k denotes the delayed clock and the maximum staleness is assumed to be bounded by s. This implies that k s + 1  k  k.
+
+The optimization dynamics of Async-SGD is complex due to the nonconvexity and the uncertainty of the delayed updates. Interestingly, we find that the following notion of gradient coherence provides insights toward understanding the convergence property of Async-SGD.
+
+Definition 1 (Gradient coherence). The gradient coherence at iteration k is defined as
+
+µk := k
+
+min
+s+1tk
+
+hrF (xk krF
+
+),rF (xt (xk )k2
+
+)i
+
+.
+
+Parameter µk captures the minimum coherence between the current gradient rF (xk) and the gradients along the past s iterations. Intuitively, if µk is positive, then the direction of the current gradient is well aligned to those of the past gradients. In this case, the convergence property induced by
+
+using delayed stochastic gradients is close to that induced by using synchronous stochastic gradients. Note that µk is easy to compute empirically during the course of asynchronous optimization6. Empirically we observe that µk > 0 through most of the optimization path, especially when the staleness is minimized in practice by system optimization (Fig. 4). Our theory can be readily adapted
+
+to account for a limited amount of negative µk (see Appendix), but our primary interest is to provide a quantity that is (1) easy to compute empirically during the course of optimization, and (2) informative
+
+for the impact of staleness and can potentially be used to control synchronization levels. We now
+
+characterize the convergence property of Async-SGD.
+
+Theorem 1. Let Assumption 1 hold. Suppose for some µ > 0, the gradient coherence satisfies
+
+µk k
+
+=
+
+µ for all k and the variance of the stochastic gradients is bounded µp . Then, the iterates generated by the Async-SGD satisfy
+sL k
+
+by
+
+2 > 0. Choose stepsize
+
+min
+0kT
+
+EkrF (xk)k2
+
+
+
+sL(F (x0) infx F (x)) µ2
+
++
+
+2 log T s
+
+p1 T
+
+.
+
+(1)
+
+We refer readers to Appendix for the the proof. Theorem 1 characterizes several theoretical aspects of
+
+Aansdynthce-SgGraDd.ieFnirtsct,othheerecnhcoeic. eInotfutihtievesltye,psifizteheksy=stesmLµpekncios uandtaeprtsead
+
+to both the maximum larger staleness, then
+
+staleness a smaller
+
+stepsize should be used to compensate the negative effect. On the other hand, the stepsize can be
+
+accordingly enlarged if the gradient coherence along the iterates turns out to be high. In this case,
+
+the direction of the gradient barely changes along the past several iterations, and a more aggressive
+
+stepsize can be adopted. In summary, the choice of stepsize should trade-off between the effects
+
+caused by both the staleness and the gradient coherence.
+
+6It can be approximated by storing a pre-selected batch of data on a worker. The worker just needs to compute gradient every T minibatches to obtain approximate rF (xk), rF (xt) in Definition 1.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+(a)
+
+Gradient Coherence Over Epochs
+
+(b) Gradient Coherence Over Epochs
+
+(c)
+
+Geometric Distribution with Straggler
+
+ResNet32, SGD, staleness = 4, 8 workers
+
+ResNet32, Adam, staleness = 4, 8 workers
+
+ResNetX, 8 workers, SGD
+
+Normalized Num B atches to Reach 71% Test Accuracy
+
+Cosine Similarity
+
+0.8 0.8
+0.6
+0.6 0.4
+0.2 0.4
+
+1.3
+
+ResNet8 ResNet14
+
+1.2 ResNet20
+
+1.1 ResNet32
+
+1.0
+
+0.9
+
+0.0
+
+m = 1 0.2
+
+m=1
+
+0.8
+
+m=2
+
+m=2
+
+0.7
+
+0.2
+
+m=3 m=4
+
+0.0
+
+m=3 m=4
+
+0.6
+
+0.4 0 10000 20000 30000 40000 50000 60000
+
+0 10000 20000 30000 40000 50000 60000
+
+0.5 s=0
+
+s=4
+
+s=8
+
+s=16
+
+Num B atches
+
+Num B atches
+
+Staleness
+
+Figure 4: (a)(b) Cosine similarity between the gradient at the k-th iteration rF (xk), and the gradient m steps prior rF (xk m), over the course of convergence for ResNet32 on CIFAR10 optimized by SGD (a) and Adam (b) under staleness s = 4 on 8 workers with parameters in Table 1. Shaded region is 1 standard deviation over
+
+3 runs. For computational efficiency, we approximate the full gradient rF (xk) by gradients on a fixed set of
+
+1000 training samples Dfixed and on CIFAR10 for ResNet8-32 using
+
+8usweorrkDefrsixaenddFS(GxDk).un(cd)eTr gheeonmuemtrbicerdoeflabyadtcishterisbtuotiroenac(dhe7ta1i%ls
+
+test accuracy in Appendix).
+
+1.0
+
+ResNet 8
+
+ResNet 14
+
+ResNet 20
+
+Cosine Similarity
+
+Furthermore, Theorem 1 shows that the mini-
+
+mum gradient implying that
+
+nthoermAdseycnacy-sSaGtDthecorantveeOrg(elsopgtToT
+
+), a
+
+0.8 0.6 0.4 0.2
+
+ResNet 32
+
+stationary point provided a positive gradient coherence, which we observe empirically in the sequel. On the other hand, the bound in Eq. (1) captures the trade-off between the maximum
+
+0.0
+Figure
+
+5:
+
+1
+Gradient
+
+2
+coherence
+
+for
+
+3
+ResNet
+
+4
+with
+
+m
+varying
+
+depths optimized by SGD using 8 workers. The x-axis
+
+m is defined in Fig. 4
+
+staleness s and the gradient coherence µ. Specifically, minimizing the rigqht hand side of Eq. (1) with
+
+regard to the maximum staleness s yields the optimal choice s = µ
+
+L(F
+
+log T (x0) infx
+
+F (x))
+
+,
+
+i.e.,
+
+a
+
+larger staleness is allowed if the gradients remain to be highly coherent along the past iterates.
+
+Empirical Observations. Theorem 1 suggests that more coherent gradients along the optimization
+
+paths can be advantageous under non-synchronous execution. Fig. 4 shows the cosine similarity
+
+sim(a, b)
+
+:=
+
+a·b kakkbk
+
+between gradients along the convergence path for CNNs and DNNs7.
+
+We
+
+observe the followings: (1) Cosine similarity improves over the course of convergence (Fig. 4(a)(b)).
+
+Except the highest staleness during the early phase of convergence, cosine similarity remains positive.
+
+In practice the staleness experienced during run time can be limited to small staleness (Dai et al.,
+
+2015), which minimizes the likelihood of negative gradient coherence during the early phase. (2)
+
+Fig. 5 shows that Cosine similarity decreases with increasing model complexity for CNN models.
+
+This is consistent with the convergence difficulty encountered in deeper models (Fig. 1).
+
+6 DISCUSSION AND CONCLUSION
+
+In this work, we study the convergence behaviors under delayed updates for a wide array of models
+
+and algorithms. Our extensive experiments reveal that staleness appears to be a key governing
+
+parameter in learning. Overall staleness slows down the convergence, and under high staleness
+
+levels the convergence can progress very slowly or fail. The effects of staleness are highly problem
+
+dependent, influenced by model complexity, choice of the algorithms, the number of workers, and the
+
+model itself, among others. under asynchrony based on
+
+Our empirical findings inspire gradient coherence, matching
+
+new analyses of the existing rate
+
+onfonO-c(1o/nvpeTx
+
+optimization ).
+
+Our findings have clear implications for distributed ML. To achieve actual speed-up in absolute convergence, any distributed ML system needs to overcome the slowdown from staleness, and carefully trade off between system throughput gains and statistical penalties. Many ML methods indeed demonstrate certain robustness against low staleness, which should offer opportunities for system optimization. Our results support the broader observation that existing successful nonsynchronous systems generally keep staleness low and use algorithms efficient under staleness (Li et al., 2014a; Ho et al., 2013).
+
+7Cosine similarity is closely related to the coherence measure in Definition 1. 8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Amr Ahmed, Mohamed Aly, Joseph Gonzalez, Shravan Narayanamurthy, and Alexander J. Smola. Scalable inference in latent variable models. In WSDM, pp. 123­132, 2012.
+Jianmin Chen, Rajat Monga, Samy Bengio, and Rafal Jozefowicz. Revisiting distributed synchronous SGD. ArXiv: 1604.00981, 2016.
+Trishul Chilimbi, Yutaka Suzue, Johnson Apacible, and Karthik Kalyanaraman. Project adam: Building an efficient and scalable deep learning training system. In Proc. USENIX Symposium on Operating Systems Design and Implementation (OSDI), pp. 571­582, Broomfield, CO, October 2014.
+Adam Coates, Brody Huval, Tao Wang, David Wu, Bryan Catanzaro, and Ng Andrew. Deep learning with cots hpc systems. In Proc. International Conference on Machine Learning (ICML), pp. 1337­1345, 2013.
+Henggang Cui, James Cipar, Qirong Ho, Jin Kyu Kim, Seunghak Lee, Abhimanu Kumar, Jinliang Wei, Wei Dai, Gregory R. Ganger, Phillip B. Gibbons, Garth A. Gibson, and Eric P. Xing. Exploiting bounded staleness to speed up big data analytics. In 2014 USENIX Annual Technical Conference (USENIX ATC 14), pp. 37­48, Philadelphia, PA, June 2014. USENIX Association.
+Henggang Cui, Hao Zhang, Gregory R Ganger, Phillip B Gibbons, and Eric P Xing. Geeps: Scalable deep learning on distributed gpus with a gpu-specialized parameter server. In Proceedings of the Eleventh European Conference on Computer Systems, pp. 4. ACM, 2016.
+Wei Dai, Abhimanu Kumar, Jinliang Wei, Qirong Ho, Garth Gibson, and Eric P. Xing. Analysis of high-performance distributed ml at scale through parameter server consistency models. In Proceedings of the 29th AAAI Conference on Artificial Intelligence, 2015.
+Jeffrey Dean, Greg Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Mark Mao, Andrew Senior, Paul Tucker, Ke Yang, Quoc V Le, et al. Large scale distributed deep networks. In Advances in Neural Information Processing Systems, pp. 1223­1231, 2012.
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and stochastic optimization. The Journal of Machine Learning Research, 12:2121­2159, 2011.
+Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural networks. In Proc. International Conference on Artificial Intelligence and Statistics (AISTATS), pp. 249­256, 2010.
+Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch SGD: training imagenet in 1 hour. ArXiv: 1706.02677, 2017.
+Thomas L. Griffiths and Mark Steyvers. Finding scientific topics. PNAS, 101(suppl. 1):5228­5235, 2004.
+Stefan Hadjis, Ce Zhang, Ioannis Mitliagkas, Dan Iter, and Christopher Ré. Omnivore: An optimizer for multi-device deep learning on cpus and gpus. arXiv preprint arXiv:1606.04487, 2016.
+F Maxwell Harper and Joseph A Konstan. The movielens datasets: History and context. ACM Transactions on Interactive Intelligent Systems (TiiS), 2016.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proc. IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 770­778, 2016.
+Geoffrey Hinton. Neural networks for machine learning. http://www.cs.toronto.edu/ ~tijmen/csc321/slides/lecture_slides_lec6.pdf, 2012.
+Qirong Ho, James Cipar, Henggang Cui, Seunghak Lee, Jin Kyu Kim, Phillip B. Gibbons, Garth A. Gibson, Greg Ganger, and Eric Xing. More effective distributed ml via a stale synchronous parallel parameter server. In Advances in Neural Information Processing Systems (NIPS) 26, pp. 1223­1231. 2013.
+9
+
+Under review as a conference paper at ICLR 2019
+Michael I Jordan et al. On statistics, computation and scalability. Bernoulli, 19(4):1378­1390, 2013. Nitish Shirish Keskar, Dheevatsa Mudigere, Jorge Nocedal, Mikhail Smelyanskiy, and Ping Tak Peter
+Tang. On large-batch training for deep learning: Generalization gap and sharp minima. ArXiv: 1609.04836, 2016. Jin Kyu Kim, Qirong Ho, Seunghak Lee, Xun Zheng, Wei Dai, Garth A Gibson, and Eric P Xing. Strads: a distributed framework for scheduled model parallel machine learning. In Proceedings of the Eleventh European Conference on Computer Systems, pp. 5. ACM, 2016. Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014. Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. 2009. Abhimanu Kumar, Alex Beutel, Qirong Ho, and Eric P Xing. Fugue: Slow-worker-agnostic distributed learning for big models on big data. In Proceedings of the Seventeenth International Conference on Artificial Intelligence and Statistics, pp. 531­539, 2014. John Langford, Alexander J Smola, and Martin Zinkevich. Slow learners are fast. In Advances in Neural Information Processing Systems, pp. 2331­2339, 2009. Yann LeCun. The mnist database of handwritten digits. http://yann. lecun. com/exdb/mnist/, 1998. Mu Li, David G Andersen, Jun Woo Park, Alexander J Smola, Amr Ahmed, Vanja Josifovski, James Long, Eugene J Shekita, and Bor-Yiing Su. Scaling distributed machine learning with the parameter server. In OSDI, volume 14, pp. 583­598, 2014a. Mu Li, David G Andersen, Alex J Smola, and Kai Yu. Communication efficient distributed machine learning with the parameter server. In Proc. Advances in Neural Information Processing Systems (NIPS), pp. 19­27, 2014b. Xiangru Lian, Yijun Huang, Yuncheng Li, and Ji Liu. Asynchronous parallel stochastic gradient for nonconvex optimization. In Advances in Neural Information Processing Systems, pp. 2737­2745, 2015. Yucheng Low, Joseph Gonzalez, Aapo Kyrola, Danny Bickson, Carlos Guestrin, and Joseph M. Hellerstein. Distributed graphlab: A framework for machine learning and data mining in the cloud. PVLDB, 2012. Dominic Masters and Carlo Luschi. Revisiting small batch training for deep neural networks. ArXiv: 1804.07612, 2018. Brendan McMahan and Matthew Streeter. Delay-tolerant algorithms for asynchronous distributed online learning. In Advances in Neural Information Processing Systems, pp. 2915­2923, 2014. Ioannis Mitliagkas, Ce Zhang, Stefan Hadjis, and Christopher Ré. Asynchrony begets momentum, with an application to deep learning. In Communication, Control, and Computing (Allerton), 2016 54th Annual Allerton Conference on, pp. 997­1004. IEEE, 2016. Vinod Nair and Geoffrey E Hinton. Rectified linear units improve restricted boltzmann machines. In Proceedings of the 27th International Conference on International Conference on Machine Learning, pp. 807­814, 2010. Willie Neiswanger, Chong Wang, and Eric Xing. Asymptotically exact, embarrassingly parallel mcmc. arXiv preprint arXiv:1311.4780, 2013. Ning Qian. On the momentum term in gradient descent learning algorithms. Neural Networks, 12(1): 145­151, 1999. Benjamin Recht, Christopher Re, Stephen J. Wright, and Feng Niu. Hogwild: A lock-free approach to parallelizing stochastic gradient descent. In NIPS, pp. 693­701, 2011. Jason Rennie. 20 newsgroups. http://qwone.com/ jason/20Newsgroups/.
+10
+
+Under review as a conference paper at ICLR 2019 Steven L Scott, Alexander W Blocker, Fernando V Bonassi, Hugh A Chipman, Edward I George, and
+Robert E McCulloch. Bayes and big data: The consensus monte carlo algorithm. International Journal of Management Science and Engineering Management, 11(2):78­88, 2016. Alexander Smola and Shravan Narayanamurthy. An architecture for parallel topic models. Proc. VLDB Endow., 3(1-2):703­710, September 2010. ISSN 2150-8097. Jinliang Wei, Wei Dai, Aurick Qiao, Qirong Ho, Henggang Cui, Gregory R Ganger, Phillip B Gibbons, Garth A Gibson, and Eric P Xing. Managed communication and consistency for fast data-parallel iterative analytics. In Proceedings of the Sixth ACM Symposium on Cloud Computing, pp. 381­394. ACM, 2015. Jinhui Yuan, Fei Gao, Qirong Ho, Wei Dai, Jinliang Wei, Xun Zheng, Eric Po Xing, Tie-Yan Liu, and Wei-Ying Ma. Lightlda: Big topic models on modest computer clusters. In Proceedings of the 24th International Conference on World Wide Web, pp. 1351­1361. ACM, 2015. Hyokun Yun, Hsiang-Fu Yu, Cho-Jui Hsieh, SVN Vishwanathan, and Inderjit Dhillon. NOMAD: Non-locking, stochastic multi-machine algorithm for asynchronous and decentralized matrix completion. ArXiv: 1312.0193, 2013. Ruiliang Zhang and James T. Kwok. Asynchronous distributed admm for consensus optimization. In ICML, 2014.
+11
+
+Under review as a conference paper at ICLR 2019
+
+APPENDIX: TOWARD UNDERSTANDING THE IMPACT OF STALENESS IN DISTRIBUTED MACHINE LEARNING
+Anonymous authors Paper under double-blind review
+
+1 PROOF OF THEOREM 1
+
+Theorem 1. Let Assumption 1 hold. Suppose the gradient coherence µk is lower bounded by some
+
+µ > 0 for all k and the variance of the stochastic gradients is upper bounded by some 2 > 0.
+
+Choose
+
+stepsize
+
+k
+
+=
+
+µp .
+sL k
+
+Then,
+
+the
+
+iterates
+
+generated
+
+by
+
+the
+
+Async-SGD
+
+satisfy
+
+min
+0kT
+
+EkrF (xk)k2
+
+
+
+sL(F (x0) infx F (x)) µ2
+
++
+
+2 log T s
+
+p1 .
+T
+
+(1)
+
+Proof. By the L-Lipschitz property of rF , we obtain that for all k
+
+F (xk+1)  F (xk) + hxk+1
+
+xk, rF (xk)i
+
++
+
+L 2
+
+kxk+1
+
+xk k2
+
+(2)
+
+= F (xk)
+
+khrf(k)(xk ), rF (xk)i
+
++
+
+Lk2 2
+
+krf(k)(xk )k2.
+
+(3)
+
+Taking expectation on both sides of the above inequality and note that the variance of the stochastic
+
+gradient is bounded by 2, we further obtain that
+
+E[F (xk+1)]  E[F (xk)]
+
+kE[hrF (xk ),
+
+rF (xk)i]
+
++
+
+Lk2 2
+
+E[krF (xk )k2
+
++
+
+2]
+
+ E[F (xk)]
+
+k µk EkrF
+
+(xk )k2
+
++
+
+Lk2 2
+
+EkrF (xk )k2
+
++
+
+2Lk2 2
+
+ E[F (xk)]
+
+kµEkrF (xk)k2
+
++
+
+Lk2 2
+
+Xk
+
+EkrF (xt)k2 +
+
+2
+
+Lk2 2
+
+.
+
+t=k s+1
+
+Telescoping the above inequality over k from 0 to T yields that
+
+(4) (5) (6)
+
+E[F (xk+1)] E[F (x0)]
+
+
+
+XT
+
+kµEkrF (xk)k2
+
++
+
+L 2
+
+XT
+
+Xk
+
+k2EkrF (xt)k2 +
+
+2L 2
+
+XT
+
+k2
+
+k=0
+
+k=0 t=k s+1
+
+k=0
+
+(7)
+
+
+
+XT
+
+kµEkrF (xk)k2
+
++
+
+L 2
+
+XT
+
+Xk
+
+t2EkrF (xt)k2 +
+
+2L 2
+
+XT
+
+k2
+
+k=0
+
+k=0 t=k s+1
+
+k=0
+
+(8)
+
+
+
+XT
+
+kµEkrF (xk)k2
+
++
+
+Ls 2
+
+XT
+
+k2EkrF (xk)k2
+
++
+
+2L 2
+
+XT
+
+k2
+
+k=0
+
+k=0
+
+k=0
+
+(9)
+
+XT =
+
+Lsk2 2
+
+k=0
+
+kµ EkrF (xk)k2 +
+
+2L 2
+
+XT
+
+k2.
+
+k=0
+
+Rearranging the above inequality and note that F (xk+1) > infx F (x) > that
+
+(10) 1, we further obtain
+
+XT k µ
+k=0
+
+Lsk2 2
+
+EkrF (xk)k2 
+
+F (x0)
+
+inf F (x) +
+x
+
+2L 2
+
+XT
+
+k2.
+
+k=0
+
+(11)
+
+1
+
+Under review as a conference paper at ICLR 2019
+
+Note that the choice of stepsize guarantees that kµ
+
+Lsk2 2
+
+>
+
+0 for all k.
+
+Thus, we conclude that
+
+min
+0kT
+
+EkrF (xk)k2
+
+ 
+
+F (x0) 2 F (x0
+
+)PinTki=nfxf0PxFFTk(kx=(µx)0)+k+µLs222k2L2LPPkT=kT=0 0k2k2
+
+,
+
+(12) (13)
+
+where the last inequality uses the fact that into the above inequality and simplifying,
+
+k µ
+
+Lsk2 2
+
+>
+
+k µ 2
+
+.
+
+Substituting
+
+we finally obtain that
+
+the
+
+stepsize
+
+k
+
+=
+
+µp sL k
+
+min
+0kT
+
+EkrF (xk)k2
+
+
+
+ sL
+
+F (x0) infx F (x) µ2
+
++
+
+2
+
+log s
+
+T
+
+
+
+p1 T
+
+.
+
+(14)
+
+2 HANDLING NEGATIVE GRADIENT COHERENCE IN THEOREM 1
+Our assumption of positive gradient coherence (GC) is motivated by strong empirical evidence that GC is positive (Fig. 4(a)(b) in the main text). Contrary to conventional wisdom, GC generally improves when reaching convergence for both SGD and Adam. Furthermore, in practice, the effective staleness for any given iteration generally concentrates in low staleness for the non-stragglers (Dai et al., 2015). TWtehrhmisesnisisnoalmPsoekcµokknµasriksettenonetgthawetiivrtiheghaetmt shpoaimnridecasiltiedorebatsaienordnvsay,tiiieonlndesqat.hh1ai1gt hhineigrshuuepprppsleetramlbeeonnuetnsasdryl(oiw.wee.e,crssalnoGwmCeoravnceodtnhsveleonrwgesegnacctoievn)e-. vergence.
+3 EXPONENTIAL DELAY DISTRIBUTION.
+We consider delays drawn from geometric distribution (GD), which is the discrete version of exponential distribution. For each iterate we randomly select a worker to be the straggler with large mean delay (p = 0.1), while all other non-straggler workers have small delays. The non-straggler delay is drawn from GD with p chosen to achieve the same mean delay as in the uniform case (after factoring in straggler) in the main text. The delay is drawn per worker for each iteration, and thus a straggler's outgoing updates to all workers suffer the same delay. Fig. 4(c) in the main text shows the convergence speed under the corresponding staleness s with the same mean delay (though s is not a parameter in GD). It exhibits trends analogous to Fig. 1(b) in main text: staleness slows convergence substantially and overall impacts deeper networks more.
+4 ADDITIONAL RESULTS FOR DNNS
+We present additional results for DNNs. Fig. 1 shows number of batches to reach convergence using 1 hidden layer and 1 worker under varying staleness level. Overall, the effect of batch size is relatively small except in high staleness regime (s = 32). Fig. 2 shows the number of batches to reach convergence, normalized by s = 0 case, for 5 variants of SGD using 1 worker. The results are in line with the analyses in the main text. In particular, RMSProp exhibit high variance in batches to convergence (not shown) and thus does not exhibit consistent trend. Fig. 3 shows the number of batches to convergence under Adam and SGD on 1, 8, 16 simulated workers, respectively normalized by staleness 0's values. The results are consistent with the observations and analyses in the main text.
+2
+
+Under review as a conference paper at ICLR 2019
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+(a) SGD with Momentum
+
+3.0
+
+batch 32 batch 64
+
+2.5 batch 128
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0 s=0 s=2 s=4 s=8 s=16 s=32
+(c) Adam
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+(b)
+1.0 0.8 0.6 0.4 0.2 0.0
+s=0
+(d)
+
+SGD
+s=2 s=4 s=8 s=16 s=32
+RMSProp
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+4
+3
+2
+1
+0 s=0 s=2 s=4 s=8 s=16 s=32
+(e) Adagrad
+1.0 0.8 0.6 0.4 0.2 0.0
+s=0 s=2 s=4 s=8 s=16 s=32
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+12 10
+8 6 4 2 0
+s=0 s=2 s=4 s=8 s=16 s=32
+(f) FTRL
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0 s=0 s=2 s=4 s=8 s=16 s=32
+
+Normalized Num Batches to Reach 95% Test Accuracy
+
+Figure 1: The number of batches to reach 95% test accuracy using 1 hidden layer and 1 worker, respectively normalized by s = 0.
+
+5 ADDITIONAL RESULTS FOR LDA
+We present additional results of LDA under different number of workers and topics in Fig. 4 and Fig. 5. These panels extends Fig. 4(c)(d) in the main manuscript. See the main text for experimental setup and analyses.
+6 ADDITIONAL RESULTS FOR MF
+We show the convergence curves for MF under different number of workers and staleness in Fig. 6. It is evident that higher staleness leads to a higher variance in convergence. Furthermore, the number of workers also affects variance, given the same staleness level. For example, MF with 4 workers incurs very low standard deviation up to staleness 20. In contrast, MF with 8 workers already exhibits a large variance at staleness 15. The amplification of staleness from increasing number of workers is consistent with the discussion in the main text. See the main text for experimental setup and analyses.
+3
+
+Under review as a conference paper at ICLR 2019
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+(a)
+35 30 25 20 15 10
+5 0
+(c)
+
+SGD with Momentum
+Depth 0 Depth 1 Depth 2 Depth 3 Depth 6
+
+s=0
+
+s=16
+
+s=32
+
+Adam
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+(b)
+1.4 1.2 1.0 0.8 0.6 0.4 0.2 0.0
+(d)
+
+SGD
+s=0 s=16
+RMSProp
+
+s=32
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+10 8 6 4 2 0
+(e)
+2.5
+
+s=0
+
+s=16
+Adagrad
+
+s=32
+
+4 3 2 1 0
+s=0
+
+s=16
+
+s=32
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0 s=0
+
+s=16
+
+s=32
+
+Figure 2: The number of batches to reach 92% test accuracy using DNNs with varying numbers of hidden layers under 1 worker. We consider several variants of SGD algorithms (a)-(e). Note that with depth 0 the model reduces to MLR, which is convex. The numbers are averaged over 5 randomized runs. We omit the result whenever convergence is not achieved within the experiment horizon (77824 batches), such as SGD with momentum at depth 6 and s = 32.
+
+7 ADDITIONAL RESULTS FOR VAES
+Fig. 7 shows the number of batches to reach test loss 130 by Variational Autoencoders (VAEs) on 1 worker, under staleness 0 to 16 and 4 SGD variants. We consider VAEs with depth 1, 2, and 3 (the number of layers in the encoder and decoder networks). The number of batches are normalized by s = 0 for each VAE depth, respectively. See the main text for analyses.
+REFERENCES
+Wei Dai, Abhimanu Kumar, Jinliang Wei, Qirong Ho, Garth Gibson, and Eric P. Xing. Analysis of high-performance distributed ml at scale through parameter server consistency models. In Proceedings of the 29th AAAI Conference on Artificial Intelligence, 2015.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+(a)
+10 8 6 4 2 0
+(c)
+
+Adam (1 worker)
+Depth 0 Depth 1 Depth 2 Depth 3 Depth 6
+
+s=0
+
+s=16
+
+s=32
+
+Adam (8 workers)
+
+20
+15
+10
+5
+0
+(e)
+20.0 17.5 15.0 12.5 10.0
+7.5 5.0 2.5 0.0
+
+s=0
+
+s=16
+
+s=32
+
+Adam (16 workers)
+
+s=0
+
+s=16
+
+s=32
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+(b) SGD (1 worker)
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+1.2 1.0 0.8 0.6 0.4 0.2 0.0
+(d)
+1.4 1.2 1.0 0.8 0.6 0.4 0.2 0.0
+(f)
+1.6 1.4 1.2 1.0 0.8 0.6 0.4 0.2 0.0
+
+s=0
+
+s=16
+
+s=32
+
+SGD (8 workers)
+
+s=0
+
+s=16
+
+s=32
+
+SGD (16 workers)
+
+s=0
+
+s=16
+
+s=32
+
+Normalized Num Batches to Reach 92% Test Accuracy
+
+Figure 3: The number of batches to reach 92% test accuracy with Adam and SGD on 1, 8, 16 workers with varying staleness. Each model depth is normalized by the staleness 0's values, respectively. The numbers are average over 5 randomized runs. Depth 0 under SGD with 8 and 16 workers did not converge to target test accuracy within the experiment horizon (77824 batches) for all staleness values, and is thus not shown.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Log Likelihood
+
+(a) LDA (10 topics, 2 workers) (b) LDA (10 topics, 4 workers)
+
+1.15 1e7
+
+1.15 1e7
+
+1.20
+
+1.20
+
+1.25
+
+1.25
+
+1.30
+
+1.30
+
+1.35
+
+1.35
+
+1.40
+
+1.40
+
+1.45 1.50 1.55 1.60 0
+
+s=0 s=1 s=2 s=5
+1234 Number of Documents
+
+s = 10 s = 15 s = 20
+
+1.45 1.50 1.55
+
+5 1e5 1.60 0
+
+s=0 s=1 s=2 s=5
+1234 Number of Documents
+
+s = 10 s = 15 s = 20
+5
+
+(c) LDA (10 topics, 8 workers) (d) LDA (10 topics, 16 workers)
+
+1.15 1e7
+
+1.15 1e7
+
+1.20
+
+1.20
+
+1.25
+
+1.25
+
+1.30
+
+1.30
+
+1.35
+
+1.35
+
+1.40
+
+1.40
+
+1.45 1.50 1.55 1.60 0
+
+s=0 s=1 s=2 s=5
+1234 Number of Documents
+
+s = 10 s = 15 s = 20
+5
+
+1.45 1.50 1.55 1.60 0
+
+s=0 s=1 s=2 s=5
+1234 Number of Documents
+
+s = 10 s = 15 s = 20
+5
+
+Log Likelihood
+
+Figure 4: Convergence of LDA log likelihood using 10 topics with respect to the number of documents processed by Gibbs sampling, with varying staleness and number of workers. The shaded regions are 1 standard deviation around the means (solid lines) based on 5 randomized runs.
+
+(a) LDA (100 topics, 2 workers) (b) LDA (100 topics, 4 workers)
+
+1.2 1e7
+
+1.2 1e7
+
+1.3 1.3
+
+1.4 1.4
+
+Log Likelihood
+
+1.5 1.5
+
+1.6 1.6
+
+1.7 1.8 1.9 2.0 0
+
+s=0 s=1 s=2 s=5
+1234 Number of Documents
+
+s = 10 s = 15 s = 20
+5 1e5
+
+1.7 1.8 1.9 2.0 0
+
+1234 Number of Documents
+
+5
+
+(c) LDA (100 topics, 8 workers) (d) LDA (100 topics, 16 workers)
+
+1.2 1e7
+
+1.2 1e7
+
+1.3 1.3
+
+Log Likelihood
+
+1.4 1.4 1.5 1.5
+
+1.6 1.6 1.7 1.7
+
+1.8 1.9 2.0 0
+
+1234 Number of Documents
+
+5
+
+1.8 1.9 2.0 0
+
+1234 Number of Documents
+
+5
+
+Figure 5: Convergence of LDA log likelihood using 100 topics with respect to the number of documents processed by Gibbs sampling, with varying staleness and the number of workers. The shaded regions are 1 standard deviation around the means (solid lines) based on 5 randomized runs.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+(a)
+2.5
+2.0
+
+MF(4 workers)
+
+s=0 s=5 s = 10 s = 15
+
+(b)
+2.5
+2.0
+
+MF (4 workers)
+
+s = 20 s = 30 s = 40 s = 50
+
+Training Loss
+
+Training Loss
+
+1.5 1.5
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0
+(c)
+2.5
+2.0
+
+100 200 300 400 500 600 700 800 Num Batches
+
+0.0 0
+
+MF (8 workers)
+
+s=0 s=5 s = 10 s = 15
+
+(d)
+2.5
+2.0
+
+100 200 300 400 500 600 700 800 Num Batches
+MF (8 workers)
+s = 20 s = 30 s = 40 s = 50
+
+1.5 1.5
+
+Training Loss
+
+Training Loss
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0
+
+100 200 300 400 500 600 700 800 Num Batches
+
+0.0 0
+
+100 200 300 400 500 600 700 800 Num Batches
+
+Figure 6: Convergence of Matrix Factorization (MF) using 4 and 8 workers, with staleness ranging from 0 to 50. The x-axis shows the number of batches processed across all workers. Shaded area represents 1 standard deviation around the means (solid curves) computed on 5 randomized runs.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Normalized Num Batches to Reach Test Loss 130
+
+(a)
+2.0 1.5 1.0 0.5
+
+SGD
+Depth 1 Depth 2 Depth 3
+
+Normalized Num Batches to Reach Test Loss 130
+
+(b)
+60 50 40 30 20 10
+
+0.0
+(c)
+7
+
+s=0
+
+s=2
+
+s=4
+
+s=8
+
+s=16
+
+SGD with Momentum
+
+0
+(d)
+1.2
+
+s=0
+
+Normalized Num Batches to Reach Test Loss 130
+
+Normalized Num Batches to Reach Test Loss 130
+
+6 1.0
+5 0.8 4
+0.6 3
+0.4 2
+1 0.2
+
+0
+
+s=0
+
+s=2
+
+s=4
+
+s=8
+
+s=16
+
+0.0 s=0
+
+Adam
+
+s=2
+
+s=4
+
+s=8
+
+Adagrad
+
+s=16
+
+s=2
+
+s=4
+
+s=8
+
+s=16
+
+Figure 7: The number of batches to reach test loss 130 by Variational Autoencoders (VAEs) on 1 worker, under staleness 0 to 16. We consider VAEs with depth 1, 2, and 3 (the number of layers in the encoder and the decoder networks). The numbers of batches are normalized by s = 0 for each VAE depth, respectively. Configurations that do not converge to the desired test loss are omitted, such as Adam optimization for VAE with depth 3 and s = 16.
+
+8
+
+

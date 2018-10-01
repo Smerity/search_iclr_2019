@@ -1,0 +1,480 @@
+Under review as a conference paper at ICLR 2019
+DEEP GRAPH INFOMAX
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We present Deep Graph Infomax (DGI), a general approach for learning node representations within graph-structured data in an unsupervised manner. DGI relies on maximizing mutual information between patch representations and corresponding high-level summaries of graphs--both derived using established graph convolutional network architectures. The learnt patch representations summarize subgraphs centered around nodes of interest, and can thus be reused for downstream node-wise learning tasks. In contrast to most prior approaches to graph representation learning, DGI does not rely on random walks, and is readily applicable to both transductive and inductive learning setups. We demonstrate competitive performance on a variety of node classification benchmarks, which at times even exceeds the performance of supervised learning.
+1 INTRODUCTION
+Generalizing neural networks to graph-structured inputs is one of the current major challenges of machine learning (Bronstein et al., 2017; Hamilton et al., 2017b; Battaglia et al., 2018). While significant strides have recently been made, notably with graph convolutional networks (Kipf & Welling, 2016a; Gilmer et al., 2017; Velickovic´ et al., 2018), most successful methods use supervised learning, which is often not possible as most graph data in the wild is unlabeled. In addition, it is often desirable to discover novel or interesting structure from large-scale graphs, and as such, unsupervised graph learning is essential for many important tasks. Currently, the dominant algorithms for unsupervised representation learning with graph-structured data rely on random walk-based objectives (Grover & Leskovec, 2016; Perozzi et al., 2014; Tang et al., 2015; Hamilton et al., 2017a), sometimes further simplified to reconstruct adjacency information (Kipf & Welling, 2016b; Duran & Niepert, 2017). The underlying intuition is to train an encoder network so that nodes that are "close" in the input graph are also "close" in the representation space. While powerful--and related to traditional metrics such as the personalized PageRank score (Jeh & Widom, 2003)--random walk methods suffer from known limitations. Most prominently, the random-walk objective is known to over-emphasize proximity information at the expense of structural information (Ribeiro et al., 2017), and performance is highly dependent on hyperparameter choice (Grover & Leskovec, 2016; Perozzi et al., 2014). Moreover, with the introduction of stronger encoder models based on graph convolutions (Gilmer et al., 2017), it is unclear whether randomwalk objectives actually provide any useful signal, as these encoders already enforce an inductive bias that neighboring nodes have similar representations. In this work, we propose an alternative objective for unsupervised graph learning that is based upon mutual information, rather than random walks. Recently, scalable estimation of mutual information was made both possible and practical through Mutual Information Neural Estimation (MINE, Belghazi et al., 2018), which relies on training a statistics network as a classifier of samples coming from the joint distribution of two random variables and their product of marginals. Following on MINE, Hjelm et al. (2018) introduced Deep InfoMax (DIM) for learning representations of highdimensional data. DIM trains an encoder model to maximize the mutual information between a high-level "global" representation and "local" parts of the input (such as patches of an image). This encourages the encoder to carry the type of information that is present in all locations (and thus are globally relevant), such as would be the case of a class label. DIM relies heavily on convolutional neural network structure in the context of image data, and to our knowledge, no work has applied mutual information maximization to graph-structured inputs. Here,
+1
+
+Under review as a conference paper at ICLR 2019
+we adapt ideas from DIM to the graph domain, which can be thought of as having a more general type of structure than the ones captured by convolutional neural networks. In the following sections, we introduce our method called Deep Graph Infomax (DGI). We demonstrate that the representation learned by DGI is consistently competitive on both transductive and inductive classification tasks, often outperforming both supervised and unsupervised strong baselines in our experiments.
+2 RELATED WORK
+Contrastive methods. An important approach for unsupervised learning of representations is to train an encoder to be contrastive between representations that capture statistical dependencies of interest and those that do not. For example, a contrastive approach may employ a scoring function, training the encoder to increase the score on "real" input (a.k.a, positive examples) and decrease the score on "fake" input (a.k.a., negative samples). Contrastive methods are central to many popular word-embedding methods (Collobert & Weston, 2008; Mnih & Kavukcuoglu, 2013; Mikolov et al., 2013), but they are found in many unsupervised algorithms for learning representations of graphstructured input as well. There are many ways to score a representation, but in the graph literature the most common techniques use classification (Perozzi et al., 2014; Grover & Leskovec, 2016; Kipf & Welling, 2016b; Hamilton et al., 2017b), though other scoring functions are used (Duran & Niepert, 2017; Bojchevski & Gu¨nnemann, 2018). DGI is also contrastive in this respect, as our objective is based on classifying local-global pairs and negative-sampled counterparts. Sampling strategies. A key implementation detail to contrastive methods is how to draw positive and negative samples. The prior work above on unsupervised graph representation learning relies on a local contrastive loss (enforcing proximal nodes to have similar embeddings). Positive samples typically correspond to pairs of nodes that appear together within short random walks in the graph--from a language modelling perspective, effectively treating nodes as words and random walks as sentences. Recent work by Bojchevski & Gu¨nnemann (2018) uses node-anchored sampling as an alternative. The negative sampling for these methods is primarily based on sampling of random pairs, with recent work adapting this approach to use a curriculum-based negative sampling scheme (with progressively "closer" negative examples; Ying et al., 2018) or introducing an adversary to select the negative examples (Bose et al., 2018). Predictive coding. Contrastive predictive coding (CPC, Oord et al., 2018) is another method for learning deep representations based on mutual information maximization. Like the models above, CPC is also contrastive, in this case using an estimate of the conditional density (in the form of noise contrastive estimation, Gutmann & Hyva¨rinen, 2010) as the scoring function. However, unlike our approach, CPC and the graph methods above are all predictive: the contrastive objective effectively trains a predictor between structurally-specified parts of the input (e.g., between neighboring node pairs or between a node and its neighborhood). Our approach differs in that we contrast global / local parts of a graph simultaneously, where the global variable is computed from all local variables. To the best of our knowledge, the sole prior works that instead focuses on contrasting "global" and "local" representations on graphs do so via (auto-)encoding objectives on the adjacency matrix (Wang et al., 2016) and incorporation of community-level constraints into node embeddings (Wang et al., 2017). Both methods rely on matrix factorization-style losses and are thus not scalable to larger graphs.
+3 DGI METHODOLOGY
+In this section, we will present the Deep Graph Infomax method in a top-down fashion: starting with an abstract overview of our specific unsupervised learning setup, followed by an exposition of the objective function optimized by our method, and concluding by enumerating all the steps of our procedure in a single-graph setting. 3.1 GRAPH-BASED UNSUPERVISED LEARNING We assume a generic graph-based unsupervised machine learning setup: we are provided with a set of node features, X = {x1, x2, . . . , xN }, where N is the number of nodes in the graph and xi  RF represents the features of node i. We are also provided with relational information between these
+2
+
+Under review as a conference paper at ICLR 2019
+
+nodes in the form of an adjacency matrix, A  RN×N . While A may consist of arbitrary real numbers (or even arbitrary edge features), in all our experiments we will assume the graphs to be unweighted, i.e. Aij = 1 if there exists an edge i  j in the graph and Aij = 0 otherwise.
+Our objective is to learn an encoder, E : RN×F × RN×N  RN×F , such that E(X, A) = H = {h1, h2, . . . , hN } represents high-level representations hi  RF for each node i. These representations may then be retrieved and used for downstream tasks, such as node classification.
+Here we will focus on graph convolutional encoders--a flexible class of node embedding architectures, which generate node representations by repeated aggregation over local node neighborhoods (Gilmer et al., 2017). A key consequence is that the produced node embeddings, hi, summarize a patch of the graph centered around node i rather than just the node itself. In what follows, we will often refer to hi as patch representations to emphasize this point.
+
+3.2 LOCAL-GLOBAL MUTUAL INFORMATION MAXIMIZATION
+
+Our approach to learning the encoder relies on maximizing local mutual information--that is, we seek to obtain node (i.e., local) representations that capture the global information content of the entire graph, represented by a summary vector, s.
+
+As all of the derived patch representations are driven to preserve mutual information with the global graph summary, this allows for discovering and preserving similarities on the patch-level--for example, distant nodes with similar structural roles (which are known to be a strong predictor for many node classification tasks; Donnat et al., 2018). Note that this is a "reversed" version of the argument given by Hjelm et al. (2018): for node classification, our aim is for the patches to establish links to similar patches across the graph, rather than enforcing the summary to contain all of these similarities (however, both of these effects should in principle occur simultaneously).
+
+In order to obtain the graph-level summary vectors, s, we leverage a readout function, R : RN×F  RF , and use it to summarize the obtained patch representations into a graph-level representation; i.e., s = R(E(X, A)).
+
+As a proxy for maximizing the local mutual information, we employ a discriminator, D : RF × RF  R, such that D(hi, s) represents the probability scores assigned to this patch-summary pair (should be higher for patches contained within the summary).
+
+Negative samples for D are provided by pairing the summary s from (X, A) with patch represen-
+
+tations hj of an alternative graph, (X, A). In a multi-graph setting, such graphs may be obtained as other elements of a training set. However, for a single graph, an explicit (stochastic) corruption function, C : RN×F × RN×N  RM×F × RM×M is required to obtain a negative example from the original graph, i.e. (X, A) = C(X, A). The choice of the negative sampling procedure will govern the specific kinds of structural information that is desirable to be captured as a byproduct of this maximization.
+
+For the objective, we use the standard binary cross-entropy loss between positive and negative ex-
+
+amples. While this does not exactly correspond to the standard KL-divergence based definition of
+
+mutual information, the argument made in Hjelm et al. (2018) is that the standard mutual informa-
+
+tion, which is found in Belghazi et al. (2018), is unstable and unnecessary for doing Deep InfoMax
+
+(DIM). Rather, they take the view that any divergence between the joint and the product of marginals
+
+should be sufficient for estimating and maximizing mutual information. The Jensen-Shannon diver-
+
+gence corresponds to simple binary classification between samples from the joint and the product
+
+of marginals, and this objective is well-understood in the context of neural network optimization.
+
+Following their work, we use the following objective1:
+
+
+
+L
+
+=
+
+N
+
+1 +
+
+M
+
+
+
+N
+
+E(X,A)
+
+log D
+
+hi, s
+
+i=1
+
+M
++ E(X,A) log 1 - D hj , s
+j=1
+
+ (1)
+
+This approach effectively maximizes mutual information between hi and s, based on the JensenShannon divergence between the joint and the product of marginals.
+
+1Note that Hjelm et al. (2018) use a softplus version of the binary cross-entropy.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+(X, A)
+
+(H, A)
+
+xi C
+
+E
+
+hi D + R
+s
+
+xj E hj
+
+D-
+
+(X, A)
+
+(H, A)
+
+Figure 1: A high-level overview of Deep Graph Infomax. Refer to Section 3.3 for more details.
+
+3.3 OVERVIEW OF DGI Assuming the single-graph setup (i.e., (X, A) provided as input), we will now summarize the steps of the Deep Graph Infomax procedure:
+1. Sample a negative example by using the corruption function: (X, A)  C(X, A). 2. Obtain patch representations, hi for the input graph by passing it through the encoder:
+H = E(X, A) = {h1, h2, . . . , hN }. 3. Obtain patch representations, hj for the negative example by passing it through the encoder:
+H = E(X, A) = {h1, h2, . . . , hM }. 4. Summarize the input graph by passing its patch representations through the readout func-
+tion: s = R(H). 5. Update parameters of E, R and D by applying gradient descent to maximize Equation 1. This algorithm is fully summarized by Figure 1.
+4 CLASSIFICATION PERFORMANCE
+We have assessed the benefits of the representation learnt by the DGI encoder on a variety of node classification tasks (transductive as well as inductive), obtaining competitive results. In each case, DGI was used to learn patch representations in a fully unsupervised manner, followed by evaluating the node-level classification utility of these representations. This was performed by directly using these representations to train and test a simple linear (logistic regression) classifier.
+4.1 DATASETS We follow the experimental setup described in Kipf & Welling (2016a) and Hamilton et al. (2017a) on the following benchmark tasks: (1) classifying research papers into topics on the Cora, Citeseer and Pubmed citation networks (Sen et al., 2008); (2) predicting the community structure of a social network modeled with Reddit posts; and (3) classifying protein roles within protein-protein interaction (PPI) networks (Zitnik & Leskovec, 2017), requiring generalisation to unseen networks. Further information on the datasets may be found in Table 1 and Appendix A.
+4.2 EXPERIMENTAL SETUP For each of three experimental settings (transductive learning, inductive learning on large graphs, and multiple graphs), we employed distinct encoders and corruption functions appropriate to that setting (described below).
+4
+
+Under review as a conference paper at ICLR 2019
+
+Table 1: Summary of the datasets used in our experiments.
+
+Dataset Cora
+Citeseer Pubmed Reddit
+PPI
+
+Task Transductive Transductive Transductive
+Inductive Inductive
+
+Nodes 2,708 3,327 19,717 231,443 56,944 (24 graphs)
+
+Edges 5,429 4,732 44,338 11,606,919 818,716
+
+Features 1,433 3,703 500 602 50
+
+Classes 7 6 3 41 121
+(multilbl.)
+
+Train/Val/Test Nodes 140/500/1,000 120/500/1,000 60/500/1,000
+151,708/23,699/55,334 44,906/6,514/5,524 (20/2/2 graphs)
+
+Transductive learning. For the transductive learning tasks (Cora, Citeseer and Pubmed), our encoder is a one-layer Graph Convolutional Network (GCN) model (Kipf & Welling, 2016a), with the following propagation rule:
+
+E(X, A) = 
+
+D^ -
+
+1 2
+
+A^ D^ -
+
+1 2
+
+X
+
+(2)
+
+where A^ = A + IN is the adjacency matrix with inserted self-loops and D^ is its corresponding degree matrix; i.e. D^ii = j A^ij. For the nonlinearity, , we have applied the parametric ReLU (PReLU) function (He et al., 2015), and   RF ×F is a learnable linear transformation applied to every node, with F = 512 features being computed (specially, F = 256 on Pubmed due to memory limitations).
+
+The corruption function used in this setting is designed to encourage the representations to properly encode structural similarities of different nodes in the graph; for this purpose, C preserves the original adjacency matrix (A = A), whereas the corrupted features, X, are obtained by row-wise shuffling of X. That is, the corrupted graph consists of exactly the same nodes as the original graph, but they are located in different places in the graph, and will therefore receive different patch representations. We demonstrate DGI is stable to other choices of corruption functions in Appendix C, but we find those that preserve the graph structure result in the strongest features.
+
+Inductive learning on large graphs. For inductive learning, we may no longer use the GCN update rule in our encoder (as the learned filters rely on a fixed and known adjacency matrix); instead, we apply the mean-pooling propagation rule, as used by GraphSAGE-GCN (Hamilton et al., 2017a):
+
+MP(X, A) = D^ -1A^ X
+
+(3)
+
+with parameters defined as in Equation 2. Note that multiplying by D^ -1 actually performs a normalized sum (hence the mean-pooling). While Equation 3 explicitly specifies the adjacency and degree matrices, they are not needed: identical inductive behaviour may be observed by a constant attention mechanism across the node's neighbors, as used by the Const-GAT model (Velickovic´ et al., 2018).
+
+For Reddit, our encoder is a three-layer mean-pooling model with skip connections (He et al., 2016):
+
+MP(X, A) =  (X MP(X, A)) E(X, A) = MP3(MP2(MP1(X, A), A), A) (4) where is featurewise concatenation (i.e. the central node and its neighborhood are handled separately). We compute F = 512 features in each MP layer, with the PReLU activation for .
+Given the large scale of the dataset, it will not fit into GPU memory entirely. Therefore, we use the subsampling approach of Hamilton et al. (2017a), where a minibatch of nodes is first selected, and then a subgraph centered around each of them is obtained by sampling node neighborhoods with replacement. Specifically, we sample 10, 10 and 25 neighbors at the first, second and third level, respectively--thus, each subsampled patch has 1 + 10 + 100 + 2500 = 2611 nodes. Only the computations necessary for deriving the central node i's patch representation, hi, are performed. These representations are then used to derive the summary vector, s, for the minibatch (Figure 2). We used minibatches of 256 nodes throughout training.
+To define our corruption function in this setting, we use a similar approach as in the transductive tasks, but treat each subsampled patch as a separate graph to be corrupted (i.e., we row-wise shuffle the feature matrices within a subsampled patch). Note that this may very likely cause the central
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+h1 h2 h3
+
+s
+Figure 2: The DGI setup on large graphs (such as Reddit). Summary vectors, s, are obtained by combining several subsampled patch representations, hi (here obtained by sampling three and two neighbors in the first and second level, respectively).
+
+node's features to be swapped out for a sampled neighbor's features, further encouraging diversity in the negative samples. The patch representation obtained in the central node is then submitted to the discriminator.
+
+Inductive learning on multiple graphs. For the PPI dataset, inspired by previous successful supervised architectures (Velickovic´ et al., 2018), our encoder is a three-layer mean-pooling model with dense skip connections (He et al., 2016; Huang et al., 2017):
+
+H1 =  (MP1(X, A))
+
+(5)
+
+H2 =  (MP2(H1 + XWskip, A))
+
+(6)
+
+E(X, A) =  (MP3(H2 + H1 + XWskip, A))
+
+(7)
+
+where Wskip is a learnable projection matrix, and MP is as defined in Equation 3. We compute F = 512 features in each MP layer, using the PReLU activation for .
+
+In this multiple-graph setting, we opted to use randomly sampled training graphs as negative examples (i.e., our corruption function simply samples a different graph from the training set). We found this method to be the most stable, considering that over 40% of the nodes have all-zero features in this dataset. To further expand the pool of negative examples, we also apply dropout (Srivastava et al., 2014) to the input features of the sampled graph. We found it beneficial to standardize the learnt embeddings across the training set prior to providing them to the logistic regression model.
+
+Readout, discriminator, and additional training details. Across all three experimental settings, we employed identical readout functions and discriminator architectures.
+
+For the readout function, we use a simple averaging of all the nodes' features:
+
+R(H) =  where  is the logistic sigmoid nonlinearity.
+
+1 N
+
+N
+
+hi
+
+i=1
+
+(8)
+
+The discriminator scores summary-patch representation pairs by applying a simple bilinear scoring function (similar to the scoring used by Oord et al. (2018)):
+
+D(hi, s) =  hiT Ws
+
+(9)
+
+Here, W is a learnable scoring matrix and  is the logistic sigmoid nonlinearity, used to convert scores into probabilities of (hi, s) being a positive example.
+
+All models are initialized using Glorot initialization (Glorot & Bengio, 2010) and trained to maximize the mutual information provided in Equation 1 on the available nodes (all nodes for the transductive, and training nodes only in the inductive setup) using the Adam SGD optimizer (Kingma
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+& Ba, 2014) with an initial learning rate of 0.001 (specially, 10-5 on Reddit). On the transductive datasets, we use an early stopping strategy on the observed training loss, with a patience of 20 epochs. On the inductive datasets we train for a fixed number of epochs (150 on Reddit, 20 on PPI). Table 2: Summary of results in terms of classification accuracies (on transductive tasks) or microaveraged F1 scores (on inductive tasks). In the first column, we highlight the kind of data available to each method during training (X: features, A: adjacency matrix, Y: labels). "GCN" corresponds to a two-layer DGI encoder trained in a supervised manner.
+
+Available data
+X A, Y A X, A
+X, A X, A
+X, A, Y X, A, Y
+
+Method
+
+Transductive Cora
+
+Raw features LP (Zhu et al., 2003) DeepWalk (Perozzi et al., 2014) DeepWalk + features
+
+47.9 ± 0.4% 68.0% 67.2% 70.7 ± 0.6%
+
+Random-Init (ours) DGI (ours)
+
+69.3 ± 1.4% 82.3 ± 0.6%
+
+GCN (Kipf & Welling, 2016a) Planetoid (Yang et al., 2016)
+
+81.5% 75.7%
+
+Citeseer 49.3 ± 0.2% 45.3% 43.2% 51.4 ± 0.5% 61.9 ± 1.6% 71.8 ± 0.7% 70.3% 64.7%
+
+Pubmed 69.1 ± 0.3% 63.0% 65.3% 74.3 ± 0.9% 69.6 ± 1.9% 76.8 ± 0.6% 79.0% 77.2%
+
+Available data
+X A X, A
+X, A X, A X, A X, A
+X, A X, A
+X, A, Y X, A, Y
+
+Method
+
+Inductive
+
+Raw features DeepWalk (Perozzi et al., 2014) DeepWalk + features
+
+GraphSAGE-GCN (Hamilton et al., 2017a) GraphSAGE-mean (Hamilton et al., 2017a) GraphSAGE-LSTM (Hamilton et al., 2017a) GraphSAGE-pool (Hamilton et al., 2017a)
+
+Random-Init (ours) DGI (ours)
+
+FastGCN (Chen et al., 2018) Avg. pooling (Zhang et al., 2018)
+
+Reddit 0.585 0.324 0.691 0.908 0.897 0.907 0.892 0.933 ± 0.001 0.940 ± 0.001 0.937 0.958 ± 0.001
+
+PPI 0.422 -- -- 0.465 0.486 0.482 0.502 0.626 ± 0.002 0.638 ± 0.002 -- 0.969 ± 0.002
+
+4.3 RESULTS The results of our comparative evaluation experiments are summarized in Table 2. For the transductive tasks, we report the mean classification accuracy (with standard deviation) on the test nodes of our method after 50 runs of training (followed by logistic regression), and reuse the metrics already reported in Kipf & Welling (2016a) for the performance of DeepWalk and GCN, as well as Label Propagation (LP) (Zhu et al., 2003) and Planetoid (Yang et al., 2016)--a representative fully supervised random walk method. Specially, we provide results for training the logistic regression on raw input features, as well as DeepWalk with the input features concatenated. For the inductive tasks, we report the micro-averaged F1 score on the (unseen) test nodes, averaged after 50 runs of training, and reuse the metrics already reported in Hamilton et al. (2017a) for the other techniques. Specifically, as our setup is unsupervised, we compare against the unsupervised GraphSAGE approaches. We also provide supervised results for two related architectures-- FastGCN (Chen et al., 2018) and Avg. pooling (Zhang et al., 2018). Our results demonstrate strong performance being achieved across all five datasets. We particularly note that the DGI approach is competitive with the results reported for the GCN model in the fully supervised setting, even exceeding its performance on the Cora and Citeseer datasets. We assume that these benefits stem from the fact that, indirectly, the DGI approach allows for every node to have access to structural properties of the entire graph, whereas the supervised GCN is limited to only two-layer neighborhoods (by the extreme sparsity of the training signal and the corresponding threat
+7
+
+Under review as a conference paper at ICLR 2019
+Figure 3: t-SNE embeddings of the nodes in the Cora dataset from the raw features (left), features from a randomly initialized DGI model (middle), and a learned DGI model (right). The clusters of the learned DGI model's embeddings are clearly defined, with a Silhouette score of 0.234. of overfitting). We further observe that the DGI method successfully outperformed all the competing unsupervised GraphSAGE approaches on the Reddit and PPI datasets--thus verifying the potential of methods based on local mutual information maximization in the inductive node classification domain. Our Reddit results are competitive with the supervised state of the art, whereas on PPI the gap is still large--we believe this can be attributed to the extreme sparsity of available node features (over 40% of the nodes having all-zero features), that our encoder heavily relies on. We note that a randomly initialized graph convolutional network may already extract highly useful features and represents a strong baseline--a well-known fact, considering its links to the WeisfeilerLehman graph isomorphism test (Weisfeiler & Lehman, 1968), that have already been highlighted and analyzed by Kipf & Welling (2016a) and Hamilton et al. (2017a). As such, we also provide, as Random-Init, the logistic regression performance on embeddings obtained from a randomly initialized encoder. Besides demonstrating that DGI is able to further improve on this strong baseline, it particularly reveals that, on the inductive datasets, previous random walk-based negative sampling methods may have been ineffective for learning appropriate features for the classification task.
+5 QUALITATIVE ANALYSIS
+We performed a diverse set of analyses on the embeddings learnt by the DGI algorithm in order to better understand the properties of DGI. We focus our analysis exclusively on the Cora dataset (as it has the smallest number of nodes, significantly aiding clarity). A standard set of "evolving" t-SNE plots (Maaten & Hinton, 2008) of the embeddings is given in Figure 3. As expected given the quantitative results, the learnt embeddings' 2D projections exhibit discernible clustering in the 2D projected space (especially compared to the raw features and Random-Init), which respects the seven topic classes of Cora. The projection obtains a Silhouette score (Rousseeuw, 1987) of 0.234, which compares favorably with the previous reported score of 0.158 for Embedding Propagation (Duran & Niepert, 2017). We ran further analyses, revealing insights into DGI's mechanism of learning, isolating biased embedding dimensions for pushing the negative example scores down and using the remainder to encode useful information about positive examples. We leverage these insights to retain competitive performance to the supervised GCN even after half the dimensions are removed from the patch representations provided by the encoder. These--and several other--qualitative and ablation studies can be found in Appendix B.
+6 CONCLUSIONS
+We have presented Deep Graph Infomax (DGI), a new approach for learning unsupervised representations on graph-structured data. By leveraging local mutual information maximization across the graph's patch representations--obtained by powerful graph convolutional architectures--we are able to obtain node embeddings that are mindful of the global structural properties of the graph. This enables competitive performance across a variety of both transductive and inductive classification tasks, at times even outperforming relevant supervised architectures.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Peter W Battaglia, Jessica B Hamrick, Victor Bapst, Alvaro Sanchez-Gonzalez, Vinicius Zambaldi, Mateusz Malinowski, Andrea Tacchetti, David Raposo, Adam Santoro, Ryan Faulkner, et al. Relational inductive biases, deep learning, and graph networks. arXiv preprint arXiv:1806.01261, 2018.
+Ishmael Belghazi, Aristide Baratin, Sai Rajeswar, Sherjil Ozair, Yoshua Bengio, Aaron Courville, and R Devon Hjelm. Mine: mutual information neural estimation. arXiv preprint arXiv:1801.04062, ICML'2018, 2018.
+Aleksandar Bojchevski and Stephan Gu¨nnemann. Deep gaussian embedding of graphs: Unsupervised inductive learning via ranking. In International Conference on Learning Representations, 2018. URL https://openreview.net/forum?id=r1ZdKJ-0W.
+Avishek Bose, Huan Ling, and Yanshuai Cao. Adversarial contrastive estimation. In ACL, 2018. Michael M Bronstein, Joan Bruna, Yann LeCun, Arthur Szlam, and Pierre Vandergheynst. Geomet-
+ric deep learning: going beyond euclidean data. IEEE Signal Processing Magazine, 34(4):18­42, 2017. Jie Chen, Tengfei Ma, and Cao Xiao. Fastgcn: fast learning with graph convolutional networks via importance sampling. arXiv preprint arXiv:1801.10247, 2018. Ronan Collobert and Jason Weston. A unified architecture for natural language processing: Deep neural networks with multitask learning. In Proceedings of the 25th international conference on Machine learning, pp. 160­167. ACM, 2008. Claire Donnat, Marinka Zitnik, David Hallac, and Jure Leskovec. Learning structural node embeddings via diffusion wavelets. In International ACM Conference on Knowledge Discovery and Data Mining (KDD), volume 24, 2018. Alberto Garcia Duran and Mathias Niepert. Learning graph representations with embedding propagation. In Advances in Neural Information Processing Systems, pp. 5119­5130, 2017. Justin Gilmer, Samuel S Schoenholz, Patrick F Riley, Oriol Vinyals, and George E Dahl. Neural message passing for quantum chemistry. arXiv preprint arXiv:1704.01212, 2017. Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural networks. In Proceedings of the Thirteenth International Conference on Artificial Intelligence and Statistics, pp. 249­256, 2010. Aditya Grover and Jure Leskovec. node2vec: Scalable feature learning for networks. In Proceedings of the 22nd ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 855­864. ACM, 2016. Michael Gutmann and Aapo Hyva¨rinen. Noise-contrastive estimation: A new estimation principle for unnormalized statistical models. In Proceedings of the Thirteenth International Conference on Artificial Intelligence and Statistics, pp. 297­304, 2010. Will Hamilton, Zhitao Ying, and Jure Leskovec. Inductive representation learning on large graphs. In Advances in Neural Information Processing Systems, pp. 1024­1034, 2017a. William L Hamilton, Rex Ying, and Jure Leskovec. Representation learning on graphs: Methods and applications. arXiv preprint arXiv:1709.05584, 2017b. Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. In Proceedings of the IEEE international conference on computer vision, pp. 1026­1034, 2015. Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016.
+9
+
+Under review as a conference paper at ICLR 2019
+R Devon Hjelm, Alex Fedorov, Samuel Lavoie-Marchildon, Karan Grewal, Adam Trischler, and Yoshua Bengio. Learning deep representations by mutual information estimation and maximization. arXiv preprint arXiv:1808.06670, 2018.
+Gao Huang, Zhuang Liu, Laurens Van Der Maaten, and Kilian Q Weinberger. Densely connected convolutional networks. In CVPR, volume 1, pp. 3, 2017.
+Glen Jeh and Jennifer Widom. Scaling personalized web search. In Proceedings of the 12th International Conference on the World Wide Web, pp. 271­279. Acm, 2003.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Thomas N Kipf and Max Welling. Semi-supervised classification with graph convolutional networks. arXiv preprint arXiv:1609.02907, 2016a.
+Thomas N Kipf and Max Welling. Variational graph auto-encoders. arXiv preprint arXiv:1611.07308, 2016b.
+Laurens van der Maaten and Geoffrey Hinton. Visualizing data using t-sne. Journal of Machine Learning Research, 9(Nov):2579­2605, 2008.
+Tomas Mikolov, Ilya Sutskever, Kai Chen, Greg S Corrado, and Jeff Dean. Distributed representations of words and phrases and their compositionality. In Advances in neural information processing systems, pp. 3111­3119, 2013.
+Andriy Mnih and Koray Kavukcuoglu. Learning word embeddings efficiently with noise-contrastive estimation. In Advances in neural information processing systems, pp. 2265­2273, 2013.
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. Representation learning with contrastive predictive coding. arXiv preprint arXiv:1807.03748, 2018.
+Jeffrey Pennington, Richard Socher, and Christopher Manning. Glove: Global vectors for word representation. In Proceedings of the 2014 conference on empirical methods in natural language processing (EMNLP), pp. 1532­1543, 2014.
+Bryan Perozzi, Rami Al-Rfou, and Steven Skiena. Deepwalk: Online learning of social representations. In Proceedings of the 20th ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 701­710. ACM, 2014.
+Leonardo FR Ribeiro, Pedro HP Saverese, and Daniel R Figueiredo. struc2vec: Learning node representations from structural identity. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 385­394. ACM, 2017.
+Peter J Rousseeuw. Silhouettes: a graphical aid to the interpretation and validation of cluster analysis. Journal of computational and applied mathematics, 20:53­65, 1987.
+Prithviraj Sen, Galileo Namata, Mustafa Bilgic, Lise Getoor, Brian Galligher, and Tina Eliassi-Rad. Collective classification in network data. AI magazine, 29(3):93, 2008.
+Nitish Srivastava, Geoffrey E Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: a simple way to prevent neural networks from overfitting. Journal of machine learning research, 15(1):1929­1958, 2014.
+Aravind Subramanian, Pablo Tamayo, Vamsi K Mootha, Sayan Mukherjee, Benjamin L Ebert, Michael A Gillette, Amanda Paulovich, Scott L Pomeroy, Todd R Golub, Eric S Lander, et al. Gene set enrichment analysis: a knowledge-based approach for interpreting genome-wide expression profiles. Proceedings of the National Academy of Sciences, 102(43):15545­15550, 2005.
+Jian Tang, Meng Qu, Mingzhe Wang, Ming Zhang, Jun Yan, and Qiaozhu Mei. Line: Largescale information network embedding. In Proceedings of the 24th International Conference on World Wide Web, pp. 1067­1077. International World Wide Web Conferences Steering Committee, 2015.
+10
+
+Under review as a conference paper at ICLR 2019 Petar Velickovic´, Guillem Cucurull, Arantxa Casanova, Adriana Romero, Pietro Lio`, and Yoshua
+Bengio. Graph Attention Networks. International Conference on Learning Representations, 2018. URL https://openreview.net/forum?id=rJXMpikCZ. Daixin Wang, Peng Cui, and Wenwu Zhu. Structural deep network embedding. In Proceedings of the 22nd ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 1225­1234. ACM, 2016. Xiao Wang, Peng Cui, Jing Wang, Jian Pei, Wenwu Zhu, and Shiqiang Yang. Community preserving network embedding. In AAAI, pp. 203­209, 2017. Boris Weisfeiler and AA Lehman. A reduction of a graph to a canonical form and an algebra arising during this reduction. Nauchno-Technicheskaya Informatsia, 2(9):12­16, 1968. Zhilin Yang, William W Cohen, and Ruslan Salakhutdinov. Revisiting semi-supervised learning with graph embeddings. arXiv preprint arXiv:1603.08861, 2016. Rex Ying, Ruining He, Kaifeng Chen, Pong Eksombatchai, William L Hamilton, and Jure Leskovec. Graph convolutional neural networks for web-scale recommender systems. arXiv preprint arXiv:1806.01973, 2018. Jiani Zhang, Xingjian Shi, Junyuan Xie, Hao Ma, Irwin King, and Dit-Yan Yeung. Gaan: Gated attention networks for learning on large and spatiotemporal graphs. arXiv preprint arXiv:1803.07294, 2018. Xiaojin Zhu, Zoubin Ghahramani, and John D Lafferty. Semi-supervised learning using gaussian fields and harmonic functions. In Proceedings of the 20th International conference on Machine learning (ICML-03), pp. 912­919, 2003. Marinka Zitnik and Jure Leskovec. Predicting multicellular function through multi-layer tissue networks. Bioinformatics, 33(14):i190­i198, 2017.
+11
+
+Under review as a conference paper at ICLR 2019
+Figure 4: Discriminator scores, D hi, s , attributed to each node in the Cora dataset shown over a t-SNE of the DGI algorithm. Shown for both the original graph (left) and a negative sample (right).
+A FURTHER DATASET DETAILS
+Transductive learning. We utilize three standard citation network benchmark datasets--Cora, Citeseer and Pubmed (Sen et al., 2008)--and closely follow the transductive experimental setup of Yang et al. (2016). In all of these datasets, nodes correspond to documents and edges to (undirected) citations. Node features correspond to elements of a bag-of-words representation of a document. Each node has a class label. We allow for only 20 nodes per class to be used for training--however, honouring the transductive setup, the unsupervised learning algorithm has access to all of the nodes' feature vectors. The predictive power of the learned representations is evaluated on 1000 test nodes. Inductive learning on large graphs. We use a large graph dataset (231,443 nodes and 11,606,919 edges) of Reddit posts created during September 2014 (derived and preprocessed as in Hamilton et al. (2017a)). The objective is to predict the posts' community ("subreddit"), based on the GloVe embeddings of their content and comments (Pennington et al., 2014), as well as metrics such as score or number of comments. Posts are linked together in the graph if the same user has commented on both. Reusing the inductive setup of Hamilton et al. (2017a), posts made in the first 20 days of the month are used for training, while the remaining posts are used for validation or testing and are invisible to the training algorithm. Inductive learning on multiple graphs. We make use of a protein-protein interaction (PPI) dataset that consists of graphs corresponding to different human tissues (Zitnik & Leskovec, 2017). The dataset contains 20 graphs for training, 2 for validation and 2 for testing. Critically, testing graphs remain completely unobserved during training. To construct the graphs, we used the preprocessed data provided by Hamilton et al. (2017a). Each node has 50 features that are composed of positional gene sets, motif gene sets and immunological signatures. There are 121 labels for each node set from gene ontology, collected from the Molecular Signatures Database (Subramanian et al., 2005), and a node can possess several labels simultaneously.
+B FURTHER QUALITATIVE ANALYSIS
+Visualizing discriminator scores. After obtaining the t-SNE visualizations, we turned our attention to the discriminator--and visualized the scores it attached to various nodes, for both the positive and a (randomly sampled) negative example (Figure 4). From here we can make an interesting observation--within the "clusters" of the learnt embeddings on the positive Cora graph, only a handful of "hot" nodes are selected to receive high discriminator scores. This suggests that there may be a clear distinction between embedding dimensions used for discrimination and classification, which we more thoroughly investigate in the next paragraph. In addition, we may observe that, as expected, the model is unable to find any strong structure within a negative example. Lastly, a few negative examples achieve high discriminator scores--a phenomenon caused by the existence of
+12
+
+Under review as a conference paper at ICLR 2019
+
+Visualizing top positive/negative samples 500
+
+·10-2 0.04
+
+400 0.02
+
+Node
+
+300 0.00
+
+200
+100
+0 0
+
+100 200 300 400 500 Dimension
+
+0.02 0.04
+
+Figure 5: The learnt embeddings of the highest-scored positive examples (upper half ), and the lowest-scored negative examples (lower half ).
+
+Test accuracy Examples misclassified by D
+
+DGI classification: robustness to removing dimensions 85
+
+80
+
+DGI (p )
+
+75
+
+DGI (p ) GCN
+
+Random-Init
+
+70
+
+DGI discriminator: robustness to removing dimensions
+
+2,500
+
++ (p )
+
+2,000
+
+- (p ) + (p )
+
+1,500
+
+- (p )
+
+1,000
+
+500
+
+65 0
+
+100 200 300 400 500 Dimensions removed
+
+0 0
+
+100 200 300 400 Dimensions removed
+
+500
+
+Figure 6: Classification performance (in terms of test accuracy of logistic regression; left) and discriminator performance (in terms of number of poorly discriminated positive/negative examples; right) on the learnt DGI embeddings, after removing a certain number of dimensions from the embedding--either starting with most distinguishing (p ) or least distinguishing (p ).
+
+low-degree nodes in Cora (making the probability of a node ending up in an identical context it had in the positive graph non-negligible). Impact and role of embedding dimensions. Guided by the previous result, we have visualized the embeddings for the top-scoring positive and negative examples (Figure 5). The analysis revealed existence of distinct dimensions in which both the positive and negative examples are strongly biased. We hypothesize that, given the random shuffling, the average expected activation of a negative example is zero, and therefore strong biases are required to "push" the example down in the discriminator. The positive examples may then use the remaining dimensions to both counteract this bias and encode patch similarity. To substantiate this claim, we order the 512 dimensions based on how distinguishable the positive and negative examples are in them (using p-values obtained from a t-test as a proxy). We then remove these dimensions from the embedding, respecting this order--either starting from the most distinguishable (p ) or least distinguishable dimensions (p )--monitoring
+13
+
+Under review as a conference paper at ICLR 2019
+
+how this affects both classification and discriminator performance (Figure 6). The observed trends largely support our hypothesis: if we start by removing the biased dimensions first (p ), the classification performance holds up for much longer (allowing us to remove over half of the embedding dimensions while remaining competitive to the supervised GCN), and the positive examples mostly remain correctly discriminated until well over half the dimensions are removed.
+
+C ROBUSTNESS TO CHOICE OF CORRUPTION FUNCTION
+
+Here, we consider alternatives to our corruption function, C, used to produce negative graphs. We generally find that, for the node classification task, DGI is stable and robust to different strategies. However, for learning graph features towards other kinds of tasks, the design of appropriate corruption strategies remains an area of open research.
+
+Our corruption function described in Section 4.2 preserves the original adjacency matrix (A = A) but corrupts the features, X, via row-wise shuffling of X. In this case, the negative graph is constrained to be isomorphic to the positive graph, which should not have to be mandatory. We can instead produce a negative graph by directly corrupting the adjacency matrix.
+Therefore, we first consider an alternative corruption function C which preserves the features (X = X) but instead adds or removes edges from the adjacency matrix (A = A). This is done by sampling, i.i.d., a switch parameter ij, which determines whether to corrupt the adjacency matrix at position (i, j). Assuming a given corruption rate, , we may define C as performing the following operations:
+
+ij  Bernoulli() A=A
+
+(10) (11)
+
+where  is the XOR (exclusive OR) operation. This alternative strategy produces a negative graph with the same features, but different connectivity. Here, the corruption rate of  = 0 corresponds to an unchanged adjacency matrix (i.e. the positive and negative graphs are identical in this case). In this regime, learning is impossible for the discriminator, and the performance of DGI is in line with a randomly initialized DGI model. At higher rates of noise, however, DGI produces competitive embeddings.
+
+We also consider simultaneous feature shuffling (X = X) and adjacency matrix perturbation (A = A), both as described before. We find that DGI still learns useful features under this compound corruption strategy--as expected, given that feature shuffling is already equivalent to an (isomorphic) adjacency matrix perturbation.
+From both studies, we may observe that a certain lower bound on the positive graph perturbation rate is required to obtain competitive node embeddings for the classification task on Cora. Furthermore, the features learned for downstream node classification tasks are most powerful when the negative graph has similar levels of connectivity to the positive graph.
+The classification performance peaks when the graph is perturbed to a reasonably high level, but remains sparse; i.e. the mixing between the separate 1-step patches is not substantial, and therefore the pool of negative examples is still diverse enough. Classification performance is impacted only marginally at higher rates of corruption--corresponding to dense negative graphs, and thus a less rich negative example pool--but still considerably outperforming the unsupervised baselines we have considered. This could be seen as further motivation for relying solely on feature shuffling, without adjacency perturbations--given that feature shuffling is a trivial way to guarantee a diverse set of negative examples, without incurring significant computational costs per epoch.
+The results of this study are visualized in Figures 7 and 8.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Classification accuracy for A corruption 80
+
+Test accuracy
+
+75
+
+X=X GCN
+
+Random-Init
+
+70
+
+10-6 10-5 10-4 10-3 10-2 10-1 100 Corruption rate, 
+Figure 7: DGI also works under a corruption function that modifies only the adjacency matrix (A = A) on the Cora dataset. The left range (  0) corresponds to no modifications of the adjacency matrix--therein, performance approaches that of the randomly initialized DGI model. As  increases, DGI produces more useful features, but ultimately fails to outperform the featureshuffling corruption function. N.B. log scale used for .
+Classification accuracy for (X, A) corruption
+X=X GCN 82
+
+Test accuracy
+
+81
+
+80
+
+10-6 10-5 10-4 10-3 10-2 10-1 100 Corruption Rate, 
+
+Figure 8: DGI is stable and robust under a corruption function that modifies both the feature matrix
+
+(X = X) and the adjacency matrix (A = A) on the Cora dataset. Corruption functions that preserve
+
+sparsity (  (where edges
+
+aNr1e)apdedrefdoromr
+
+the best. removed
+
+However, DGI still performs well even with large disruptions with probabilities approaching 1). N.B. log scale used for .
+
+15
+
+

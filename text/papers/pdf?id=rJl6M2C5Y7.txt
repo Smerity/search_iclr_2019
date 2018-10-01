@@ -1,0 +1,1767 @@
+Under review as a conference paper at ICLR 2019
+ONLINE HYPERPARAMETER ADAPTATION VIA AMORTIZED PROXIMAL OPTIMIZATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Effective performance of neural networks depends criticially on effective tuning of optimization hyperparameters, especially learning rates (and schedules thereof). We present Amortized Proximal Optimization, which takes the perspective that each optimization step should approximately minimize a proximal objective (similar to the ones used to motivate natural gradient and trust region policy optimization). Optimization hyperparameters are adapted to best minimize the proximal objective after one weight update. We show that an idealized version of APO (where an oracle minimizes the proximal objective exactly) achieves secondorder convergence rates for neural networks. APO incurs minimal computational overhead. We experiment with using APO to adapt a variety of optimization hyperparameters online during training, including (possibly layer-specific) learning rates, damping coefficients, and gradient variance exponents. For a variety of network architectures and optimization algorithms (including SGD, RMSprop, and K-FAC), we show that with minimal tuning, APO performs competitively with carefully tuned optimizers.
+1 INTRODUCTION
+Tuning optimization hyperparameters can be crucial for effective performance of a deep learning system. Most famously, carefully selected learning rate schedules have been instrumental in achieving state-of-the-art performance on challenging datasets such as ImageNet (Goyal et al., 2017) and WMT (Vaswani et al., 2017). Even algorithms such as RMSprop (Tieleman & Hinton, 2012) and Adam (Kingma & Ba, 2015), which are often interpreted in terms of coordinatewise adaptive learning rates, still have a global learning rate parameter which is important to tune. A wide variety of learning rate schedules have been proposed (Schraudolph, 1999; Li & Malik, 2016; Baydin et al., 2017). Seemingly unrelated phenomena have been explained in terms of effective learning rate schedules (van Laarhoven, 2017). Besides learning rates, other hyperparameters have been identified as important, such as the momentum decay factor (Sutskever et al., 2013), the batch size (Smith et al., 2017), and the damping coefficient in second-order methods (Martens & Grosse, 2015; Martens, 2010).
+There have been many attempts to adapt optimization hyperparameters to minimize the training error after a small number of updates (Schraudolph, 1999; Andrychowicz et al., 2016; Baydin et al., 2017). This approach faces two fundamental obstacles: first, learning rates and batch sizes have been shown to affect generalization performance because stochastic updates have a regularizing effect (Dinh et al., 2017; Li et al., 2017; Mandt et al., 2017; Smith & Le, 2018; van Laarhoven, 2017). Second, minimizing the short-horizon expected loss encourages taking very small steps to reduce fluctuations at the expense of long-term progress (Wu et al., 2018). While these effects are specific to learning rates, they present fundamental obstacles to tuning any optimization hyperparameter, since basically any optimization hyperparameter somehow influences the size of the updates.
+In this paper, we take the perspective that the optimizer's job in each iteration is to approximately minimize a proximal objective which trades off the loss on the current batch with the average change in the predictions. Specifically, we consider proximal objectives of the form J() = h(f (g(, ))) + D(f (), f (g(, ))), where f is a model with parameters , h is an approximation to the objective function, g is the base optimizer update with hyperparameters , and D is a distance metric. Indeed, approximately solving such a proximal objective motivated the natural
+1
+
+Under review as a conference paper at ICLR 2019
+
+gradient algorithm (Amari, 1998), as well as proximal reinforcement learning algorithms (Schulman et al., 2017; 2015). We introduce Amortized Proximal Optimization (APO), an approach which adapts optimization hyperparameters to minimize the proximal objective in each iteration. We use APO to tune hyperparameters of SGD, RMSprop, and K-FAC; the hyperparameters we consider include (possibly layer-specific) learning rates, damping coefficients, and the power applied to the gradient covariances.
+Notice that APO has a hyperparameter  which controls the aggressiveness of the updates. We believe such a hyperparameter is necessary until the aforementioned issues surrounding stochastic regularization and short-horizon bias are better understood. However, in practice we find that there are default settings and schedules for  which perform well out-of-the-box. Furthermore, APO can automatically adapt tens of optimization hyperparameters with only a single hand-tuned hyperparameter.
+We provide theoretical justification for APO by proving strong convergence results for an oracle which solves the proximal objective exactly in each iteration. In particular, we show global linear convergence and locally quadratic convergence under mild assumptions. These results motivate the proximal objective as a useful target for meta-optimization.
+We evaluate APO on real-world tasks including image classification on MNIST, CIFAR-10, and SVHN. We show that adapting learning rates online via APO yields faster training convergence than the best fixed learning rates for each task, and is competitive with manual learning rate decay schedules. Although we focus on fast optimization of the training objective, we also find that the solutions found by APO generalize at least as well as those found by fixed hyperparameters or fixed schedules.
+
+2 AMORTIZED PROXIMAL OPTIMIZATION
+
+We view a neural network as a parameterized function z = f (x, ), where x is the input,  are the
+weights and biases of the network, and z can be interpreted as the output of a regression model or the un-normalized log-probabilities of a classification model. Let the training dataset be {(xi, ti)}iN=1, where input xi is associated with target ti. Our goal is to minimize the loss function:
+
+NN
+L(Z, T) = (zi, ti) = (f (xi, ), ti),
+i=1 i=1
+
+(1)
+
+where Z is the matrix of network outputs on all training examples x1, . . . , xN , and T is the vector of labels. We design an iterative optimization algorithm to minimize Eq. 1 under the following framework: in the kth iteration, one aims to update  to minimize the following proximal objective:
+
+hprox() = h(f (x, )) +  Ex~P [D(f (x~, ), f (x~, k))],
+
+(2)
+
+where x is the data used in the current iteration, P is the distribution of data, k is the parameters of the neural network at the current iteration, h(·) is some approximation of the loss function, and D(·, ·) represents the distance between network outputs under some metric (for notational conve-
+nience, we use mini-batch size of 1 to describe the algorithm). We first provide the motivation for
+this proximal objective in Section 2.1; then in Section 2.2, we propose an algorithm to optimize it in
+an online manner.
+
+2.1 MOTIVATION FOR THE PROXIMAL OBJECTIVE
+
+In this section, we show that by approximately minimizing simple instances of Eq. 2 in each iteration (similar to Schulman et al. (2015)), one can recover the classic Gauss-Newton algorithm and Natural Gradient Descent (Amari, 1998). In general, updating  so as to minimize the proximal objective is impractical due to the complicated nonlinear relationship between  and z. However, one can find an approximate solution by linearizing the network function:
+
+f (x,  + )  f (x, ) + J,
+
+(3)
+
+where J = f (x, ) is the Jacobian matrix. We consider the following instance of Eq. 2:
+
+hprox() = z z (f (x, k), t) +  Ex~P [D(f (x~, ), f (x~, k))],
+
+(4)
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+where z f (x, ) - f (x, k) is the change of network output, t is the label of current data x. Here h(·) is defined as the first-order Taylor approximation of the loss function. Using the linear
+approximation (Eq. 3), and a local second-order approximation of D, this proximal objective can be
+
+written as:
+
+hprox()    (f (x, k), t) +  Ex~P J~ 2D~J~ ,
+
+(5)
+
+where J~ = f (x~, k) is the Jacobian matrix on data x~, 2D~ z2~D(z~, f (x~, k)) is the Hessian matrix of the dissimilarity measured at z~ = f (x~, k).
+
+Solving Eq. 5 yields:
+
+
+
+=
+
+-
+
+1 
+
+G-1
+
+(f (x, ), t),
+
+(6)
+
+where G Ex~P J~ 2D~J~ is the pre-conditioning matrix. Different settings for the dissimilarity
+
+term D yield different algorithms. When
+
+D(z~, z~k) =
+
+z~ - z~k
+
+2 2
+
+(7)
+
+is defined as the squared Euclidean distance, Eq. 6 recovers the classic Gauss-Newton algorithm.
+
+When
+
+D(z~, z~k) = (z~) - (z~k) -  (z~k), z~ - z~k
+
+(8)
+
+is defined as the Bregman divergence, Eq. 6 yields the Generalized Gauss-Newton (GGN) method.
+
+When the output of neural network parameterizes an exponential-family distribution, the dissimilar-
+
+ity term can be defined as Kullback-Leibler divergence:
+
+p (y|z~) D(z~, z~k) = y p (y|z~) log p (y|z~k) ,
+
+(9)
+
+in which case Eq. 6 yields Natural Gradient Descent (Amari, 1998). Since different versions of our
+
+proximal objective lead to various efficient optimization algorithms, we believe it is a useful target
+
+for meta-optimization.
+
+2.2 AMORTIZED OPTIMIZATION
+
+Although optimizers including the Gauss-Newton algorithm and Natural Gradient Descent can be seen as ways to approximately solve Eq. 2, they rely on a local linearization of the neural network and usually require more memory and more careful tuning in practice. We propose to instead directly minimize Eq. 2 in an online manner.
+
+Finding good hyperparameters (e.g., the learning rate for SGD) is a challenging problem in practice. We propose to adapt these hyperparameters online in order to best optimize the proximal objective. Consider any optimization algorithm (base-optimizer) of the following form:
+
+  g(x, t, , , ).
+
+(10)
+
+Here,  is the set of hyperparameters we want to tune, x is the data used in this iteration, t is the corresponding label,  is a vector of statistics computed online during optimization, and  is a vector of optimization hyperparameters to be tuned. For example,  contains the exponential moving averages of the squared gradients of the parameters in RMSprop.  usually contains the learning rate (global or layer-specific), and possibly other hyperparameters dependent on the algorithm.
+
+For each step, we formulate the meta-objective from Eq. 2 as follows (for notational convenience we omit variables other than  and  of g):
+
+J () = h (f (x, g(, ))) +  Ex~P [D (f (x~, g(, )) , f (x~, ))] .
+
+(11)
+
+Here, x~ is a random mini-batch sampled from the data distribution P. We compute the approximation to the loss, h, using the same mini-batch as the gradient of the base optimizer, to avoid the short horizon bias problem (Wu et al., 2018); we measure D on a different mini-batch to avoid instability
+
+that would result if we took a large step in a direction that is unimportant for the current batch, but
+
+important for other batches. The hyperparameters  are optimized using a stochastic gradient-based algorithm (the meta-optimizer) using the gradient J() (similar in spirit to (Schraudolph, 1999; Maclaurin et al., 2015)). We refer to our framework as Amortized Proximal Optimization (APO).
+The simplest version of APO, which uses SGD as the meta-optimizer, is shown in Algorithm 1. One
+
+can choose any meta-optimizer; we found that RMSprop was the most stable and best-performing
+
+meta-optimizer in practice, and we used it for all our experiments.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 1: Amortized Proximal Optimization (SGD as meta-optimizer)
+Input : , 0, 0, M , T Output:    0   0 for i  1, . . . , M do
+sample data (x, t) for t  1, . . . , T do
+sample x~  P J () = h (f (x, g(x, t, , , ))) + D (f (x~, g(x, t, , , )) , f (x~, ))    - J() end    + g(x, t, , , )
+end
+return 
+
+3 ANALYSIS OF AN IDEALIZED VERSION
+
+When considering optimization meta-objectives, it is useful to analyze idealized versions where the meta-objective is optimized exactly (even when doing so is prohibitively expensive in practice). For instance, Wu et al. (2018) analyzed an idealized SMD algorithm, showing that even the idealized version suffered from short-horizon bias. In this section, we analyze two idealized versions of APO where an oracle is assumed to minimize the proximal objective exactly in each iteration. In both cases, we obtain strong convergence results, suggesting that our proximal objective is a useful target for meta-optimization.
+
+We view the problem in output space (i.e., explicitly designing an update schedule for zi). Consider the space of outputs on all training examples; when we train a neural network, we are optimizing
+over a manifold in this space:
+
+M = {(f (x1, ), f (x2, ), . . . , f (xN , )) |   RD}
+
+(12)
+
+We assume that f is continuous, so that M is a continuous manifold. Given an oracle that for each iteration exactly minimizes the expectation of proximal objective Eq. 2 over the dataset, we can write one iteration of APO in output space as:
+
+N
+Z  arg min [h(zi) + D(zi, zk,i)] ,
+ZM i=1
+
+(13)
+
+where zi is ith column of Z, corresponding to the network output on data xi after update, zk,i is the current network output on data xi.
+
+3.1 PROJECTED GRADIENT DESCENT
+
+We first define the proximal objective as Eq. 4, using the Euclidean distance as the dissimilarity measure, which corresponds to Gauss-Newton algorithm under the linearization of network. With an oracle, this proximal objective leads to projected gradient descent:
+
+Zk+1  arg min Z -
+ZM
+
+Zk
+
+-
+
+1 2
+
+ZL(Zk
+
+,
+
+T)
+
+2
+.
+F
+
+(14)
+
+Consider a loss function on one data point
+
+(z)
+
+:
+
+d
+R
+
+
+
+R,
+
+where
+
+d
+
+is
+
+the
+
+dimension
+
+of
+
+neural
+
+network's output. 1 We say the loss is µ-strongly convex if:
+
+(z) - (z)  µ z - z 2 , 2
+
+(A1)
+
+1For convenience of notation, we omit the dependence of loss on the fixed label.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+where z is the unique minimizer and µ is some positive real number. We say the gradient is L-
+
+Lipschitz if:
+
+z (z1) - z (z2)  L z1 - z2 .
+
+(A2)
+
+When the manifold M is dense in the space, we have the following theorem stating the global linear convergence of Eq. 14:
+
+Theorem 1. Assume the loss satisfies A1 and A2. When the manifold M is -dense2 in the sense
+
+that
+
+for
+
+each
+
+Z
+
+
+
+N
+R
+
+×d,
+
+there
+
+is
+
+some
+
+possible
+
+output
+
+Z~
+
+
+
+M
+
+such
+
+that
+
+Z - Z~  ,
+F
+
+iteration
+
+(14)
+
+with
+
+
+
+
+
+1 4
+
+(L
+
++
+
+µ)
+
+converges
+
+linearly
+
+to
+
+a
+
+ball
+
+centered
+
+at
+
+minimum:
+
+Zk - Z
+
+2 F
+
+
+
+1 - Lµ 2(L + µ)
+
+k
+
+Z0 - Z
+
+2 F
+
++
+
+4 2 .
+µ
+
+It is worth noting that this convergence result differs from usual neural network convergence results, because here the Lipschitz constants are defined for the output space, so they are known and generally nice. For instance, when we use a quadratic loss, we have L = µ = 1. In contrast, the gradient is in general not Lipschitz continuous in weight space for deep networks.
+
+3.2 PROXIMAL NEWTON METHOD
+
+We further replace the dissimilarity term with:
+
+D(zi, zk,i) = (zi - zk,i) 2 (zk,i)(zi - zk,i),
+
+(15)
+
+which is the second-order approximation of Eq. 8. With a proximal oracle, this variant of APO turns
+
+out
+
+to
+
+be
+
+Proximal
+
+Newton
+
+Method
+
+in
+
+the
+
+output
+
+space,
+
+if
+
+we
+
+set
+
+
+
+=
+
+1 2
+
+:
+
+Zk+1  arg min
+ZM
+
+Z L(Zk), Z - Zk
+
+1 +
+2
+
+Z - Zk
+
+2 H
+
+,
+
+(16)
+
+where
+
+Z - Zk
+
+2 H
+
+is the norm with local Hessian as metric.
+
+In general, Newton's method can't
+
+be applied directly to neural nets in weight space, because it is nonconvex (Dauphin et al., 2014).
+
+However, Proximal Newton Method in output space can be efficient given a strongly convex loss
+
+function.
+
+Consider a loss
+
+(z)
+
+with
+
+LH -smooth
+
+Hessian:
+
+for
+
+any
+
+vector
+
+v
+
+
+
+d
+R
+
+such
+
+that
+
+v
+
+= 1, there is:
+
+2z (z1)v - 2z (z2)v  LH z1 - z2 .
+
+(A3)
+
+The following theorem suggests the locally fast convergence rate of iteration Eq. 16:
+Theorem 2. Under assumptions A1 and A3, if the unique minimum Z  M, then whenever iteration (16) converges to Z, it converges locally quadratically3:
+
+lim
+k
+
+Zk+1 - Z Zk - Z 2
+
+ LH . µ
+
+Hence, the proximal oracle achieves second-order convergence for neural network training under fairly reasonable assumptions. Of course, we don't expect practical implementations of APO (or any other practical optimization method for neural nets) to achieve the second-order convergence rates, but we believe the second-order convergence result still motivates our proximal objective as a useful target for meta-optimization.
+2This assumption is motivated by Zhang et al. (2016), where deep neural networks are shown to easily fit random labels on the training set and achieve near 0 training error.
+3It is worth noting that here we don't need assumptions of manifold M being even differentiable. Therefore, the result holds for neural networks where non-smooth activation functions like ReLU are used.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+4 RELATED WORK
+Finding good optimization hyperparameters is a longstanding problem (Bengio, 2012). Classic methods for hyperparameter optimization, such as grid search, random search, and Bayesian optimization (Snoek et al., 2012; 2015; Swersky et al., 2014), are expensive, as they require performing many complete training runs, and can only find fixed hyperparameter values (e.g., a constant learning rate). Hyperband (Li et al., 2016) can reduce the cost by terminating poorly-performing runs early, but is still limited to finding fixed hyperparameters. Population Based Training (PBT) (Jaderberg et al., 2017) trains a population of networks simultaneously, and throughout training it terminates poorly-performing networks, replaces their weights by a copy of the weights of a better-performing network, perturbs the hyperparameters, and continues training from that point. PBT can find a coarse-grained learning rate schedule, but because it relies on random search, it is far less efficient than gradient-based meta-optimization.
+There have been a number of approaches to gradient-based adaptation of learning rates. Gradientbased optimization algorithms can be unrolled as computation graphs, allowing the gradients of hyperparameters such as learning rates to be computed via automatic differentiation. Maclaurin et al. (2015) propagate gradients through the full unrolled training procedure to find optimal learning rate schedules offline. Stochastic meta-descent (SMD) (Schraudolph, 1999) adapts hyperparameters online. Hypergradient descent (HD) (Baydin et al., 2017) takes the gradient of the learning rate with respect to the optimizer update in each iteration, to minimize the expected loss in the next iteration. In particular, HD suffers from short horizon bias (Wu et al., 2018), while in Appendix E we show that APO does not.
+Some authors have proposed learning entire optimization algorithms (Li & Malik, 2016; 2017; Andrychowicz et al., 2016). Li & Malik (2016) view this problem from a reinforcement learning perspective, where the state consists of the objective function L and the sequence of prior iterates {t} and gradients { L(t)}, and the action is the step . In this setting, the update rule  is a policy, which can be found via policy gradient methods (Sutton et al., 2000). Approaches that learn optimizers must be trained on a set of objective functions {f1, . . . , fn} drawn from a distribution F ; this setup can be restrictive if we only have one instance of an objective function. In addition, the initial phase of training the optimizer on a distribution of functions can be expensive. APO requires only the objective function of interest and finds learning rate schedules in a single training run.
+In principle, APO could be used to learn a full optimization algorithm; however, learning such an algorithm would be just as hard as the original optimization problem, so one would not expect an out-of-the-box meta-optimizer (such as RMSprop with learning rate 0.001) to work as well as it does for adapting few hyperparameters.
+
+5 EXPERIMENTS
+
+In this section, we evaluate APO empirically on a variety of learning tasks; Table 1 gives an overview of the datasets, model architectures, and base optimizers we consider.
+
+In our proximal objective, J () = h (f (x, g(, ))) +  Ex~P [D (f (x~, g(, )) , f (x~, ))], h can be any approximation to the loss function (e.g., a linearization); in our experiments, we directly used the loss value h = , as we found this to work well in many settings. As the dissimilarity term D,
+we used the squared Euclidean norm.
+
+We used APO to tune the optimization hyperparameters of four base-optimizers: SGD, SGD with Nesterov momentum (denoted SGDm), RMSprop, and K-FAC. For SGD, the only hyperparameter is the learning rate; we consider both a single, global learning rate, as well as per-layer learning rates. For SGDm, the update rule is given by:
+
+vt  µvt-1 + gt t  t-1 - (gt + µvt)
+
+(17) (18)
+
+where g =  . Since adapting µ requires considering long-term performance (Sutskever et al., 2013), it is not appropriate to adapt it with a one-step objective like APO. Instead, we just adapt the learning rate with APO as if there's no momentum, but then apply momentum with µ = 0.9 on top of the updates.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Dataset
+Rosenbrock & 2-Layer Linear MNIST
+FashionMNIST CIFAR-10 SVHN
+
+Architecture
+MLP 2-Layer CNN VGG-11 ResNet-18
+
+Optimizer
+RMSprop SGD, RMSprop RMSprop, K-FAC SGD, RMSprop
+RMSprop
+
+Batch Size
+100 100 64 64
+
+Table 1: Summary of the datasets, model architectures, and optimizers we investigate.
+
+Training Loss Learning Rate
+Loss Learning Rate
+
+102 100 10 2 10 4 10 6 10 8 10 10
+0
+
+RMSprop lr=0.003 RMSprop lr=0.001 RMSprop lr=0.0003 RMSprop-APO
+
+10 3 10 4
+
+10 5
+
+10 6
+
+10000 Ite2r0a0t0io0n 30000 40000
+
+0
+
+(a)
+
+RMSprop lr=0.003 RMSprop lr=0.001 RMSprop lr=0.0003 RMSprop-APO
+10000 Ite2r0a0t0io0n 30000 40000
+
+102 100 10 2 10 4 10 6 10 8 10 10 10 12 0
+
+(b)
+
+RMSprop lr=0.001 RMSprop-APO
+10000 Ite2r0a0t0io0n 30000 40000
+
+10 2 10 3 10 4 10 5 10 6 10 7 0
+
+(c)
+
+RMSprop lr=0.001 RMSprop-APO
+10000 Ite2r0a0t0io0n 30000 40000
+(d)
+
+Figure 1: Experiments on toy examples. (a) Rosenbrock objective values during training; (b) Learning rates for RMSprop compared to the adaptive learning rate of RMSprop-APO on Rosenbrock; (c) Loss on the badlyconditioned regression problem; (d) Learning rate adaptation on the badly-conditioned regression problem.
+
+For RMSprop, recall that the optimizer step is given by:
+
+st  st-1 + (1 - )gt2
+
+t
+
+
+
+t-1
+
+-
+
+ st +
+
+gt
+
+(19) (20)
+
+We note that, in addition to the learning rate , we can also consider adapting and the power to
+
+which s is raised in the denominator of Eq. 20--we denote this parameter , where in standard
+
+RMSprop
+
+we
+
+have
+
+
+
+=
+
+1 2
+
+.
+
+Both
+
+and  can be interpreted as having a damping effect on the update.
+
+K-FAC is an approximate natural gradient method (Amari, 1998) based on preconditioning the gradient by an approximation to the Fisher matrix,    - F -1 . For K-FAC, we tune the global learning rate and the damping factor.
+
+5.1 TOY OPTIMIZATION PROBLEMS
+Rosenbrock. We first validated APO on the two-dimensional Rosenbrock function, f (x, y) = (1 - x)2 + 100(y - x2)2, with initialization (x, y) = (1, -1.5). We used APO to tune the learning rate of RMSprop, and compared to RMSprop with several fixed learning rates. Because this problem is deterministic, we set  = 0 for APO. Figure 1(a) shows that RMSprop-APO was able to achieve a substantially lower objective value than RMSprop. The learning rates for each method are shown in Figure 1(b); we found that APO first increases the learning rate to make rapid progress at the start of optimization, and then gradually decreases it as it approaches the local optimum. In Appendix D we provide additional experiments on Rosenbrock, and show that APO converges quickly from many different locations on the Rosenbrock surface.
+Badly-Conditioned Regression. Next, we evaluated APO on a badly-conditioned regression problem (Recht & Rahimi, 2017), which is intended to be a difficult test problem for optimization algorithms. In this problem, we consider a dataset of input/output pairs {(x, y)}, where the outputs are given by y = Ax, where A is an ill-conditioned matrix with (A) = 1010. The task is to fit a two-layer linear model f (x) = W2W1x to this data; the loss to be minimized is L = ExN (0,I) ||Ax - W2W1x||22 . Figure 1(c) compares the performance of RMSprop with a hand-tuned fixed learning rate to the performance of RMSprop-APO, with learning rates shown in Figure 1(d). Again, the adaptive learning rate enabled RMSprop-APO to achieve a loss value orders of magnitude smaller than that achieved by RMSprop with a fixed learning rate.
+7
+
+Under review as a conference paper at ICLR 2019
+
+Training Loss
+
+Test Accuracy
+
+102 101
+
+SGD lr=0.1 SGD lr=0.01
+
+100 10 1
+
+SGDm lr=0.01 SGD-APO =0.001 SGDm-APO =0.01
+
+10 2
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+20 40Epoch60 80 100
+
+0.988
+
+0.986
+
+0.984
+
+0.982
+
+0.980
+
+0.978
+
+SGD lr=0.1 SGD lr=0.01
+
+0.976 SGDm lr=0.01
+
+0.974
+
+SGD-APO =0.001 SGDm-APO =0.01
+
+0.972 20 40Epoch60 80 100
+
+SGD lr=0.1
+
+SGD/SGDm lr=0.01
+
+100
+
+SGD-APO =0.001 SGDm-APO =0.01
+
+10 1
+
+10 2
+0 10000 20000Ite3r0a0t0i0on40000 50000 60000
+(a)
+
+Learning Rate
+
+Test Accuracy
+
+Training Loss
+
+100 RMSprop lr=0.001
+
+10 1
+
+RMSprop lr=0.0001 RMSprop-APO =0.0001
+
+10 2
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+
+10 7 0 20 40 Epoch 60 80 100
+
+0.986 0.984 0.982 0.980 0.978 0.976 0.974
+RMSprop lr=0.001 0.972 RMSprop lr=0.0001
+RMSprop-APO =0.0001
+0.970 0 20 40 Epoch 60 80 100
+
+10 3
+
+10 4 RMSprop lr=0.001 RMSprop lr=0.0001 RMSprop-APO =0.0001
+10 5
+
+10 6 0
+
+10000 20000 Ite3r0a0t0io0n 40000 50000 60000
+
+(b)
+
+Learning Rate
+
+Test Accuracy
+
+Training Loss
+
+SGD lr=0.1
+
+100
+
+SGD lr=0.01 SGDm lr=0.1
+
+SGDm lr=0.01
+
+SGD-APO =0.01
+
+10 1 SGDm-APO =0.1
+
+10 2
+20 40Epoch60 80 100
+
+0.900
+
+0.875
+
+0.850
+
+0.825
+
+0.800 0.775
+
+SGD lr=0.1 SGD lr=0.01 SGDm lr=0.1
+
+0.750 0.725
+
+SGDm lr=0.01 SGD-APO =0.01 SGDm-APO =0.1
+
+0.700 20 40Epoch60 80 100
+
+SGD/SGDm lr=0.1
+
+100
+
+SGD/SGDm lr=0.01 SGD-APO =0.01
+
+SGDm-APO =0.1
+
+10 1
+
+10 2 10000
+
+300I0te0 ratio5n0000
+(c)
+
+70000
+
+Learning Rate
+
+Test Accuracy
+
+Training Loss
+
+100
+
+RMSprop lr=1e-3 RMSprop lr=1e-4
+
+RMSprop lr=1e-5
+
+RMSprop-APO =1e-3
+
+10 1
+
+10 20 20 40Epoch60 80 100
+
+0.900
+
+0.875
+
+0.850
+
+0.825
+
+0.800
+
+0.775 RMSprop lr=1e-3
+
+0.750 0.725
+
+RMSprop lr=1e-4 RMSprop lr=1e-5 RMSprop-APO =1e-3
+
+0.7000 20 40Epoch60 80 100
+
+10 2
+
+RMSprop lr=1e-3 RMSprop lr=1e-4
+
+RMSprop lr=1e-5
+
+10 3 RMSprop-APO =1e-3
+
+10 4
+
+10 5 10000
+
+300It0e0ratio5n0000
+(d)
+
+70000
+
+Learning Rate
+
+Figure 2: Experiments on MNIST and CIFAR-10. Upper row: mean loss over the training set. Middle row: accuracy on the test set. Bottom row: learning rate per iteration. (a) Comparison of SGD/SGDm with and without APO on MNIST; (b) Comparison of RMSprop with and without APO on MNIST; (c) Comparison of SGD/SGDm with and without APO on CIFAR-10; (d) Comparison of RMSprop with and without APO on CIFAR-10.
+
+5.2 REAL-WORLD DATASETS
+For each of the real-world datasets we consider--MNIST, CIFAR-10, SVHN, and FashionMNIST-- we chose the learning rates for the baseline optimizers via grid searches: for SGD, we performed a grid search over learning rates {0.1, 0.01, 0.001}, while for RMSprop, we performed a grid search over learning rates {0.01, 0.001, 0.0001}. For APO, we used the same default setting for each experiment: in all cases, we used RMSprop as the meta-optimizer, with learning rate 0.001; for SGD-APO and SGDm-APO, we set the initial learning rate to 0.01, while for RMSprop, we set the initial learning rate to 0.0001. The only parameter we consider for APO is the value of : for SGD-APO and SGDm-APO, we select the best  from a grid search over {0.1, 0.01, 0.001, 0}; for RMSprop, we choose  from a grid search over {0.1, 0.01, 0.001, 0.0001}.
+5.2.1 MULTI-LAYER PERCEPTRON ON MNIST
+First, we compare SGD and RMSprop with their APO-tuned variants, and show that APO outperforms fixed learning rates. As the classification network for MNIST, we used a two-layer MLP with 1000 hidden units per layer and ReLU nonlinearities. We trained on mini-batches of size 100 for 100 epochs.
+SGD with APO. First, we used APO to tune the global learning rate of SGD and SGD with Nesterov momentum (denoted SGDm) on MNIST, where the momentum is fixed to 0.9. For baseline SGDm, we used learning rate 0.01, while for baseline SGD, we used both learning rates 0.1 and 0.01. The training curve of SGD with learning rate 0.1 almost coincides with that of SGDm with learning rate 0.01. For SGD-APO, we used  = 0.001, while for SGDm-APO, we used  = 0.01. The comparison of the algorithms is shown in Figure 2(a). APO substantially improved the training loss for both SGD and SGDm.
+RMSprop with APO. Next, we used APO to tune the global learning rate of RMSprop. For baseline RMSprop, the best-performing learning rate was 0.0001, while for RMSprop-APO, the best  was 0.0001. Figure 2(b) compares RMSprop and its APO-tuned variant on MNIST.
+5.2.2 CONVOLUTIONAL NEURAL NETWORK ON CIFAR-10
+We trained a VGG-11 convolutional neural network (Simonyan & Zisserman, 2014) on CIFAR10 (Krizhevsky & Hinton, 2009), using mini-batches of size 64, for 100 epochs.
+8
+
+Under review as a conference paper at ICLR 2019
+
+Training Loss Test Accuracy Learning Rate
+
+100 RMSprop lr=1e-4
+
+10 1
+
+RMSprop lr=1e-3 RMSprop APO lr=1e-4 =0.1
+
+10 2
+
+10 3
+
+10 4
+
+10 50 10 20 Ep3o0ch 40 50 60
+
+0.950 0.945 0.940 0.935 0.930
+RMSprop lr=1e-4 0.925 RMSprop lr=1e-3
+RMSprop APO lr=1e-4 =0.1
+0.9200 10 20 Ep3o0ch 40 50 60
+
+10 3
+
+10 4
+
+10 5 0
+
+RMSprop lr=1e-4 RMSprop lr=1e-3 RMSprop APO lr=1e-4 =0.1
+10000 20000Ite3r0a0t0i0on40000 50000 60000
+
+Figure 3: Comparison of RMSprop and RMSprop-APO used to optimize a ResNet on SVHN.
+
+Training Loss
+
+Test Accuracy
+
+100 10 1
+
+RMSprop lr=1e-4 APO =1e-4 {lr}
+
+10 2
+
+APO =1e-4 {lr, rho} APO =1e-4 {lr, rho, eps}
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+
+10 70 20 40Epoch60 80 100
+
+0.986
+
+0.984
+
+0.982
+
+0.980
+
+0.978
+
+0.976 RMSprop lr=1e-4
+
+0.974 APO =1e-4 {lr}
+
+0.972
+
+APO =1e-4 {lr, rho} APO =1e-4 {lr, rho, eps}
+
+0.9700 20 40Epoch60 80 100
+
+10 4
+
+RMSprop lr=1e-4
+
+APO =1e-4 {lr}
+
+10 5
+
+APO =1e-4 {lr, rho} APO =1e-4 {lr, rho, eps}
+
+10 6
+0 10000 20000Ite3r0a0t0i0on40000 50000 60000
+(a)
+
+Learning Rate
+
+Test Accuracy
+
+Training Loss
+
+100 SGD lr=0.1
+
+10 1
+
+SGD-APO =0.001 SGD-APO per-layer =0
+
+10 2
+
+10 3
+
+10 4
+
+10 5
+
+20 40Epoch60 80 100
+
+0.990
+
+0.985
+
+0.980
+
+0.975
+
+0.970 SGD lr=0.1
+0.965 SGD-APO =0.001 SGD-APO per-layer =0
+0.960 20 40Epoch60 80 100
+
+100
+10 1 SGD-APO =0.001 SGD-APO per-layer, layer0 SGD-APO per-layer, layer1
+10 2 SGD-APO per-layer, layer2
+0 10000 20000Ite3r0a0t0i0on40000 50000 60000
+(b)
+
+Learning Rate
+
+Test Accuracy
+
+Training Loss
+
+100 10 1
+
+RMSprop lr=1e-4 APO =1e-4
+
+10 2 APO =1e-4 per-layer
+
+10 3
+
+10 4
+
+10 5
+
+10 6
+
+10 70 20 40Epoch60 80 100
+
+0.986
+
+0.984
+
+0.982
+
+0.980
+
+0.978
+
+0.976
+
+0.974 RMSprop lr=1e-4
+
+0.972
+
+APO =1e-4 APO =1e-4 per-layer
+
+0.9700 20 40Epoch60 80 100
+
+RMSprop lr=1e-4
+
+10 4
+
+APO =1e-4 APO =1e-4 per-layer, layer0
+
+APO =1e-4 per-layer, layer1
+
+10 5 APO =1e-4 per-layer, layer2
+
+10 6
+
+10 7 0
+
+10000 20000Ite3r0a0t0i0on40000 50000 60000
+
+(c)
+
+Learning Rate/Damping
+
+Test Accuracy
+
+Training Loss
+
+100 RMSprop lr=0.001 RMSprop-APO =1e-3 KFAC lr=0.001
+10 1 KFAC-APO =0.1 {lr, damping}
+
+10 2
+
+10 30
+0.920 0.915 0.910 0.905 0.900 0.895 0.890 0.885 0.8800
+10 2
+
+20 40Epoch60 80 100
+RMSprop lr=0.001 RMSprop-APO =1e-3 KFAC lr=0.001 KFAC-APO =0.1 {lr, damping}
+20 40Epoch60 80 100
+
+RMSprop
+
+10 3
+
+RMSprop-APO KFAC
+
+KFAC-APO lr
+
+KFAC-APO damping
+
+10 4
+0 10000 20000Ite3r0a0t0i0on40000 50000 60000
+(d)
+
+Learning Rate
+
+Figure 4: (a) Tuning multiple RMSprop parameters from {, , } on MNIST. (b) Tuning per-layer learning rates for SGD on MNIST. (c) Tuning per-layer learning rates for RMSprop on MNIST. (d) K-FAC.
+
+SGD with APO. For each of SGD and SGDm, we used both learning rates 0.1 and 0.01. For the APO variants, we found that  = 0.01 was best for SGD, while  = 0.1 was best for SGDm. As shown in Figure 2(c), APO not only accelerates the training, but also achieves higher accuracy on the test set at the end of training.
+RMSprop with APO. For RMSprop, the fixed learning rate 0.0001 achieved the smallest training loss as well as the best test accuracy. For RMSprop-APO, we used  = 0.001. The training curves, test accuracies, and learning rates for RMSprop and RMSprop-APO on CIFAR-10 are shown in Figure 2(d). Again we found that APO not only achieved lower training loss than the baselines with fixed learning rates, but improved generalization.
+5.2.3 RESNET ON SVHN
+We also used APO to train an 18-layer residual network (ResNet18) (He et al., 2016) with batch normalization, on the SVHN dataset (Netzer et al., 2011). We show the training loss, test accuracy, and learning rates for each method in Figure 3. Here, APO converged more quickly to a substantially lower loss value, and generalized better than by using a fixed learning rate. In particular, the fixed learning rate that performed best with respect to training loss, 10-5, generalized far worse than the larger fixed learning rates.
+5.3 MULTIPLE OPTIMIZATION HYPERPARAMETERS & PER-LAYER TUNING
+Here we highlight the ability of APO to tune several optimization hyperparameters simultaneously. We used APO to adapt all of the RMSprop hyperparameters {, , }. As shown in Figure 5(a), tuning  and in addition to the learning rate  can stabilize training. The adaptation of  and during training is shown in Appendix C. We also used APO to adapt per-layer learning rates. Figure 5(b)
+9
+
+Under review as a conference paper at ICLR 2019
+
+Training Loss Test Accuracy Learning Rate
+
+100
+
+SGD lr=0.1 SGD wd lr=0.01
+
+SGD wd schedule
+
+SGD APO =0.01
+
+10 1 SGD APO schedule
+
+10 2
+20 40Epoch60 80 100
+
+0.92
+
+0.90
+
+0.88
+
+0.86
+
+0.84
+
+SGD lr=0.1 SGD wd lr=0.01
+
+SGD wd schedule
+
+0.82 SGD APO =0.01
+
+SGD APO schedule
+
+0.80 20 40Epoch60 80 100
+
+101 SGD lr=0.1 SGD wd lr=0.01 SGD APO =0.01
+100 SGD APO schedule
+
+10 1
+
+10 2 10000
+
+300I0te0 ratio5n0000
+
+70000
+
+Figure 5: SGD with weight decay compared to SGD-APO without weight decay, on CIFAR-10.
+
+shows the per-layer learning rates tuned by APO, when using SGD on MNIST. Figure 5(c) uses APO to tune per-layer learning rate of RMSprop on MNIST.
+K-FAC. We also used APO to train a convolutional network on the FashionMNIST dataset (Xiao et al., 2017). The network we use consists of two convolutional layers with 16 and 32 filters respectively, both with kernel size 5, followed by a fully-connected layer. We used APO to tune the learning rate and damping coefficient of K-FAC. We used learning rate 0.001 for K-FAC; for KFACAPO, we used initial learning rate 0.001 and  = 0.1. The results are shown in Figure 5(d), where we also compare K-FAC to hand-tuned RMSprop and RMSprop-APO on the same problem. We find that K-FAC with a fixed learning rate outperforms RMSprop-APO, while K-FAC-APO substantially outperforms K-FAC. We also show the adaptation of both the learning rate and damping coefficient for K-FAC-APO in Figure 5(d); we found that APO simultaneously increased the learning rate and decreased the damping at the start of training to make rapid progress, and then gradually decreased the learning rate and increased the damping.
+5.4 BATCH NORMALIZATION AND WEIGHT DECAY
+Batch normalization (BN) (Ioffe & Szegedy, 2015) is a widely used technique to speed up neural net training. Networks with BN are commonly trained with L2 weight regularization (i.e., weight decay). It was shown by van Laarhoven (2017) and Hoffer et al. (2018) that the effectiveness of weight decay for networks with BN is not due to the regularization, but due to the fact that weight decay affects the scale of the network weights, which changes the effective learning rate. Instead, weight decay decreases the scale of the weights, which increases the effective learning rate; if one uses BN without regularizing the norm of the weights, then the weights can grow without bound, pushing the effective learning rate to 0. Here, we show that using APO to tune learning rates allows for effective training of BN networks without using weight decay. Since weight decay is most effective when a learning rate schedule is used,4 we further compared SGD with a learning rate schedule to its APO variant with a schedule for . We show that by using a schedule for  analogous to the learning rate schedule, APO behaves better than the baselines, without the need for weight decay. For the baseline learning rate schedule for SGD, we started from learning rate 0.1 and decreased it by a factor of 10 every 20 epochs. We considered a similar schedule for  in SGD-APO: we started from  = 0.0001 and increased it by a factor of 10 every 20 epochs. Figure 5 compares SGD with weight decay and SGD-APO without weight decay.
+6 CONCLUSIONS
+We introduced amortized proximal optimization (APO), a method for online adaptation of optimization hyperparameters, including global and per-layer learning rates, and damping parameters for approximate second-order methods. We evaluated our approach on real-world neural network optimization tasks--training MLP and CNN models--and showed that it converges faster and generalizes better than optimal fixed learning rates. Empirically, we showed that our method overcomes short horizon bias and performs well with sensible default values for the initial learning rate of the base optimizer and the meta-learning rate.
+4When using a fixed learning rate, the decrease in the effective learning rate is not necessarily detrimental when there is no weight decay.
+10
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Shun-Ichi Amari. Natural gradient works efficiently in learning. Neural Computation, 10(2):251­ 276, 1998.
+Marcin Andrychowicz, Misha Denil, Sergio Gomez, Matthew W Hoffman, David Pfau, Tom Schaul, Brendan Shillingford, and Nando De Freitas. Learning to learn by gradient descent by gradient descent. In Advances in Neural Information Processing Systems (NIPS), pp. 3981­3989, 2016.
+Atilim G Baydin, Robert Cornish, David Martinez Rubio, Mark Schmidt, and Frank Wood. Online learning rate adaptation with hypergradient descent. arXiv preprint arXiv:1703.04782, 2017.
+Yoshua Bengio. Practical recommendations for gradient-based training of deep architectures. In Neural Networks: Tricks of the Trade, pp. 437­478. Springer, 2012.
+Yann N Dauphin, Razvan Pascanu, Caglar Gulcehre, Kyunghyun Cho, Surya Ganguli, and Yoshua Bengio. Identifying and attacking the saddle point problem in high-dimensional non-convex optimization. In Advances in Neural Information Processing Systems (NIPS), pp. 2933­2941, 2014.
+Laurent Dinh, Razvan Pascanu, Samy Bengio, and Yoshua Bengio. Sharp minima can generalize for deep nets. arXiv preprint arXiv:1703.04933, 2017.
+Priya Goyal, Piotr Dolla´r, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch SGD: Training Imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Conference on Computer Vision and Pattern Recognition (CVPR), pp. 770­778, 2016.
+Elad Hoffer, Ron Banner, Itay Golan, and Daniel Soudry. Norm matters: Efficient and accurate normalization schemes in deep networks. arXiv preprint arXiv:1803.01814, 2018.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+Max Jaderberg, Valentin Dalibard, Simon Osindero, Wojciech M Czarnecki, Jeff Donahue, Ali Razavi, Oriol Vinyals, Tim Green, Iain Dunning, Karen Simonyan, et al. Population-based training of neural networks. arXiv preprint arXiv:1711.09846, 2017.
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International Conference on Learning Representations (ICLR), 2015.
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. Technical report, University of Toronto, 2009.
+Hao Li, Zheng Xu, Gavin Taylor, and Tom Goldstein. Visualizing the loss landscape of neural nets. arXiv preprint arXiv:1712.09913, 2017.
+Ke Li and Jitendra Malik. Learning to optimize. arXiv preprint arXiv:1606.01885, 2016.
+Ke Li and Jitendra Malik. Learning to optimize neural nets. arXiv preprint arXiv:1703.00441, 2017.
+Lisha Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, and Ameet Talwalkar. Hyperband: Bandit-based configuration evaluation for hyperparameter optimization. arXiv preprint arXiv:1603.06560, 2016.
+Dougal Maclaurin, David Duvenaud, and Ryan Adams. Gradient-based hyperparameter optimization through reversible learning. In International Conference on Machine Learning (ICML), pp. 2113­2122, 2015.
+Stephan Mandt, Matthew D Hoffman, and David M Blei. Stochastic gradient descent as approximate Bayesian inference. The Journal of Machine Learning Research, 18(1):4873­4907, 2017.
+James Martens. Deep learning via Hessian-free optimization. In International Conference on Machine Learning (ICML), 2010.
+11
+
+Under review as a conference paper at ICLR 2019
+James Martens and Roger Grosse. Optimizing neural networks with Kronecker-factored approximate curvature. In International Conference on Machine Learning (ICML), pp. 2408­2417, 2015.
+Yurii Nesterov. Introductory lectures on convex optimization: A basic course, volume 87. Springer Science & Business Media, 2013.
+Yuval Netzer, Tao Wang, Adam Coates, Alessandro Bissacco, Bo Wu, and Andrew Y Ng. Reading digits in natural images with unsupervised feature learning. In NIPS Workshop on Deep Learning and Unsupervised Feature Learning, 2011.
+Benjamin Recht and Ali Rahimi. Reflections on random kitchen sinks. 2017. URL http://www. argmin.net/2017/12/05/kitchen-sinks/.
+Tom Schaul, Sixin Zhang, and Yann LeCun. No more pesky learning rates. In International Conference on Machine Learning (ICML), pp. 343­351, 2013.
+Nicol N Schraudolph. Local gain adaptation in stochastic gradient descent. In Ninth International Conference on Artificial Neural Networks (ICANN), volume 2, pp. 569­574, 1999.
+John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. Trust region policy optimization. In International Conference on Machine Learning (ICML), pp. 1889­1897, 2015.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. arXiv preprint arXiv:1409.1556, 2014.
+Samuel L Smith and Quoc V Le. Understanding generalization and stochastic gradient descent. International Conference on Learning Representations (ICLR), 2018.
+Samuel L Smith, Pieter-Jan Kindermans, and Quoc V Le. Don't decay the learning rate, increase the batch size. In International Conference on Learning Representations (ICLR), 2017.
+Jasper Snoek, Hugo Larochelle, and Ryan P Adams. Practical Bayesian optimization of machine learning algorithms. In Advances in Neural Information Processing Systems (NIPS), pp. 2951­ 2959, 2012.
+Jasper Snoek, Oren Rippel, Kevin Swersky, Ryan Kiros, Nadathur Satish, Narayanan Sundaram, Mostofa Patwary, Prabhat Prabhat, and Ryan Adams. Scalable Bayesian optimization using deep neural networks. In International Conference on Machine Learning (ICML), pp. 2171­2180, 2015.
+Ilya Sutskever, James Martens, George Dahl, and Geoffrey Hinton. On the importance of initialization and momentum in deep learning. In International Conference on Machine Learning (ICML), pp. 1139­1147, 2013.
+Richard S Sutton, David A McAllester, Satinder P Singh, and Yishay Mansour. Policy gradient methods for reinforcement learning with function approximation. In Advances in Neural Information Processing Systems (NIPS), pp. 1057­1063, 2000.
+Kevin Swersky, Jasper Snoek, and Ryan P Adams. Freeze-thaw Bayesian optimization. arXiv preprint arXiv:1406.3896, 2014.
+Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5--RmsProp: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural Networks for Machine Learning, 2012.
+Twan van Laarhoven. L2 regularization versus batch and weight normalization. arXiv preprint arXiv:1706.05350, 2017.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems (NIPS), pp. 5998­6008, 2017.
+12
+
+Under review as a conference paper at ICLR 2019
+
+Yuhuai Wu, Mengye Ren, Renjie Liao, and Roger Grosse. Understanding short-horizon bias in stochastic meta-optimization. In International Conference on Learning Representations (ICLR), 2018.
+Han Xiao, Kashif Rasul, and Roland Vollgraf. Fashion-mnist: a novel image dataset for benchmarking machine learning algorithms, 2017.
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding deep learning requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+
+A PROOF OF THEOREM 1
+
+Proof. All the matrix norms in this proof represent the Frobenius norm.
+
+Recall the definition of loss function on entire dataset:
+N
+L(Z) = (zi).
+i=1
+
+Obviously, the minimal output Z is the matrix composed of zi . By the strong convexity of single loss function, we have the strong convexity of entire loss:
+
+N
+L(Z) - L(Z) =
+
+(zi) -
+
+(zi )
+
+
+
+µ 2
+
+N
+
+zi - zi
+
+2=
+
+µ 2
+
+Z - Z 2 .
+
+i=1 i=1
+
+Let 1
+= 2
+be the step size of projected gradient descent. Define the projection operator:
+
+P (Z)  arg min
+
+Z~ - Z
+
+2
+.
+
+Z~ M
+
+For one iteration, we have the following result:
+
+Zk+1 - Z 2 = P (Zk -  L (Zk)) - Z 2  Zk -  L (Zk) - Z 2 + 2 Zk -  L (Zk) - Z  + 2
+
+ (1 + ) Zk -  L (Zk) - Z 2 +
+
+1 1+
+
+
+2
+
+= (1 + )
+
+Zk - Z 2 - 2 Zk - Z,  L (Zk) + 2  L (Zk) 2
+
++
+
+1 1+
+
+
+2
+
+N
+= (1 + )
+i=1
+
+zk,i - zi 2 - 2 zk,i - zi,  (zk,i) + 2  (zk,i) 2 +
+
+1 1+
+
+
+2
+
+N
+ (1 + )
+i=1
+
+zk,i - zi 2 - 2
+
+Lµ L+µ
+
+zk,i - zi
+
+2+ 1 L+µ
+
+ (zk,i) 2
+
++ 2
+
+ (zk,i) 2
+
++
+
+1 1+
+
+
+2
+
+= (1 + )
+
+1 - 2 Lµ L+µ
+
+Zk - Z 2 -
+
+1 2
+
+- 2
+
+L+µ
+
+ L (Zk) 2 +
+
+1 1+
+
+
+2.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Here  is any positive real number to be determined later. The first inequality is due to the definition of projection and assumption of -density, the second inequality is due to Young's inequality, and the third inequality is due to Theorem 2.1.11 in Nesterov (2013).
+By the assumption of the theorem, there is:
+
+which is equivalent to:
+
+  1 (L + µ) , 4
+
+As a result, there is:
+
+
+
+2 .
+
+L+µ
+
+Zk+1 - Z 2  (1 + )
+
+1 - 2 Lµ L+µ
+
+Zk - Z 2 +
+
+1 1+
+
+
+2.
+
+Now we set  such that:
+
+there is
+
+(1 + ) 1 - 2 Lµ = 1 -  Lµ ,
+
+L+µ
+
+L+µ
+
+1+
+
+1
+
+
+
+L+µ .
+
+ Lµ
+
+So for one iteration we have:
+
+Zk+1 - Z 2 
+
+1 -  Lµ L+µ
+
+Zk - Z
+
+2 + L + µ2. Lµ
+
+Unrolling the iterations for k steps, we have:
+
+Zk - Z 2   =
+
+1 -  Lµ L+µ
+
+k
+
+Z0 - Z 2 +
+
+L+µ
+
+2
+2
+
+Lµ
+
+1 -  Lµ L+µ
+
+k
+
+Z0 - Z
+
+2
+
++
+
+4 2µ2
+
+2
+
+1 - Lµ 2 (L + µ)
+
+k
+
+Z0 - Z
+
+2
+
++
+
+16 µ2
+
+2
+
+2.
+
+B PROOF OF THEOREM 2
+Proof. For notational convenience, we think of Z as a vector rather than a matrix in this proof. The Hessian 2 L(Z) is therefore a block diagonal matrix, where each block is the Hessian of loss on a single data. First, we notice the following equation:
+14
+
+Under review as a conference paper at ICLR 2019
+
+arg min
+ZM
+
+Z L(Zk), Z - Zk
+
+1 +
+2
+
+Z - Zk
+
+2 H
+
+= arg min
+ZM
+
+Z L(Zk), Z - Zk
+
++
+
+1 (Z
+2
+
+-
+
+Zk )T
+
+2
+
+L(Zk)(Z
+
+-
+
+Zk )
+
+1 = arg min
+ZM 2
+
+Z - Zk - 2 L(Zk)-1 L(Zk)
+
+2 2
+
+L(Zk )
+
+-
+
+ L(Zk)
+
+2 [2 L(Zk)]-1
+
+= arg min Z - Zk - 2 L(Zk)-1 L(Zk)
+ZM
+
+2 2
+
+L(Zk )
+
+.
+
+Here
+
+v
+
+2 A
+
+vT Av
+
+is the norm of vector v defined by the positive definite matrix A. positive definite matrix 2 L(Zk), therefore also positive definite.
+
+2 L(Zk) -1 is the inverse of
+
+As a result of the above equivalence, one step of Proximal Newton Method can be written as:
+
+Zk+1 = arg min Z - Zk - 2 L(Zk)-1 L(Zk)
+ZM
+
+2 2
+
+L(Zk )
+
+.
+
+Since Z  M by assumption, there is:
+
+Zk+1 - Zk - 2 L(Zk)-1 L(Zk) 2 L(Zk)  Z - Zk - 2 L(Zk)-1 L(Zk) 2 L(Zk) .
+
+Now we have the following inequality for one iteration:
+
+Zk+1 - Z 2 L(Zk)  Zk+1 - Zk - 2 L(Zk)-1 L(Zk)
+
+2 L(Zk) + Z - Zk - 2 L(Zk)-1 L(Zk)
+
+2 L(Zk)
+
+ 2 Z - Zk - 2 L(Zk)-1 L(Zk) 2 L(Zk)
+
+= 2 Z - Zk + 2 L(Zk)-1( L(Zk) -  L(Z) 2 L(Zk)
+
+
+
+2 
+
+µ
+
+2 L(Zk)(Zk - Z) -  L(Zk) +  L(Z)
+
+.
+
+Here the first inequality is because of triangle inequality, the second inequality is due to the previous result, the equality is because  L(Z) = 0, the last inequality is because of the strong convexity. By the Lipschitz continuity of the Hessian, we have:
+
+2 L(Zk)(Zk - Z) -  L(Zk) +  L(Z)
+
+N
+ 2 (zk,i)(zk,i - zi) -  L(zk,i) +  L(zi )
+i=1
+
+ LH N 2
+
+zk,i - zi 2
+
+i=1
+
+= LH 2
+
+Zk - Z 2 .
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Therefore, we have:
+
+Zk+1 - Z
+
+
+
+1 
+
+µ
+
+Zk+1 - Z
+
+2 L(Zk) 
+
+LH µ
+
+Zk - Z 2 .
+
+C TUNING RMSPROP HYPERPARAMETERS
+
+Figure 6 shows the adaptation of the additional  and hyperparameters of RMSprop, for training an MLP on MNIST.
+
+Rho Epsilon
+
+7×10 1 APO =1e-4 {lr, rho} APO =1e-4 {lr, rho, eps}
+6 × 10 1 5 × 10 1 4 × 10 1
+0 10000 20000Ite3r0a0t0i0on40000 50000 60000
+(a) RMSprop-APO tuning .
+
+10 5
+
+10 6
+
+10 7
+
+10 8 0
+
+APO =1e-4 {lr, rho, eps}
+10000 20000Ite3r0a0t0i0on40000 50000 60000
+
+(b) RMSprop-APO tuning .
+
+Figure 6: Adaptation of  and using RMSprop-APO on MNIST.
+
+D ADDITIONAL EXPERIMENTS ON ROSENBROCK
+
+In this section, we present additional experiments on the Rosenbrock problem. We show that APO converges quickly from different starting points on the Rosenbrock surface.
+
+Training Loss Learning Rate
+
+102 100 10 2 10 4 10 6 10 8 10 10 10 12
+0
+
+Initial (x, y) = (-1, 1.5) Initial (x, y) = (-2, 2) Initial (x, y) = (0, 0) Initial (x, y) = (0.5, 0.5) Initial (x, y) = (1, -1) 5000 10000 1500I0te2r0a0t0io0n25000 30000 35000 40000
+
+(a) RMSprop-APO training convergence from different initial (x,y) positions on the Rosenbrock surface.
+
+10 2
+
+Initial (x, y) = (-1, 1.5) Initial (x, y) = (-2, 2)
+
+Initial (x, y) = (0, 0)
+
+10 3 Initial (x, y) = (0.5, 0.5)
+
+Initial (x, y) = (1, -1)
+
+10 4
+
+10 5
+
+10 6
+
+10 7
+0 5000 10000 1500I0te2r0a0t0io0n25000 30000 35000 40000
+
+(b) RMSprop-APO learning rate adaptation from different initial (x,y) positions on the Rosenbrock surface.
+
+Figure 7: RMSprop-APO convergence from different initializations on the Rosenbrock surface. We find that RMSprop-APO achieves very low training loss starting from any of the points (x, y)  {(-1, 1.5), (-2, 2), (0, 0), (0.5, 0.5), (1, -1)}.
+
+E THE NOISY QUADRATIC PROBLEM
+In this section we apply APO to the noisy quadratic problem investigated in (Wu et al., 2018; Schaul et al., 2013), and demonstrate that APO overcomes the short horizon bias problem. We optimize a quadratic function
+f (x) = xT Hx,
+16
+
+Under review as a conference paper at ICLR 2019
+
+where x  R1000, H is a diagonal matrix H = diag{h1, h2, · · · , h1000}, with eigenvalues hi evenly distributed in interval [0.01, 1]. Initially, we set x with each dimension being 100. For each iteration,
+we can access the noisy version of the function, i.e., the gradient and function value of function
+
+f~(x) = (x - c)T H(x - c).
+
+Here c is the vector of noise: each dimension of c is independently randomly sampled from a normal
+
+distribution
+
+at
+
+each
+
+iteration,
+
+and
+
+the
+
+variance
+
+of
+
+dimension
+
+i
+
+is
+
+set
+
+to
+
+be
+
+1 hi
+
+.
+
+For
+
+SGD,
+
+we
+
+consider
+
+the following four learning rate schedules: optimal schedule, exponential schedule, linear schedule
+
+and a fixed learning rate. For SGD with APO, we directly use function f~as the loss approximation h,
+
+use Euclidean distance norm square as the dissimilarity term D, and consider the following schedules
+
+for : optimal schedule(with   0), exponential schedule, linear schedule and a fixed . We
+
+calculate the optimal parameter for each schedule of both algorithms so as to achieve a minimal
+
+function value at the end of 300 iterations. We optimize the schedules with 10000 steps of Adam
+
+and learning rate 0.001 after unrolling the entire 300 iterations.
+
+Optimal Exponential Linear Fix
+
+SGD
+
+3.3 4.6 12.5 81.9
+
+SGD + APO 4.69
+
+6.73 15.6 80.8
+
+Table 2: Loss at the end of 300 iterations with optimized schedules.
+
+The function values at the end of 300 iterations with each schedule are shown in Table 2.
+
+(a) Loss of different optimal schedules.
+
+(b) Learning rate of different optimal schedules.
+
+Figure 8: Loss and learning rate for SGD.
+
+(a) Loss of different optimal schedules.
+
+(b) Learning rate of different optimal schedules.
+
+Figure 9: Loss and learning rate for APO.
+
+Figure 8 plots the training loss and learning rate of SGD during the 300 iterations under optimal schedule, figure 9 plots the training loss and  under optimal schedule for SGD with APO. It can be seen that SGD with APO achieves almost the same training loss as optimal SGD for noisy quadratics task. This indicates that APO doesn't suffer from the short-horizon bias mentioned in (Wu et al., 2018).
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+F CIFAR-100 EXPERIMENTS
+
+In this section, we evaluate APO on the CIFAR-100 dataset. We used an 16-layer VGG convolutional neural network with batch-normalization and data augmentation for CIFAR-100 image classification. We trained on mini-batches of size 64.
+We compared SGD and its APO variant. For SGD, we chose both a learning rate of 0.1 and 0.01. For SGD-APO variants, we used initial learning 0.01 and meta learning rate 0.001, and tried  of 0.01 and 0.001. Figure 10 shows the training loss, test accuracy, and the tuned learning rate. It can be seen that APO generally achieves smaller training loss and higher test accuracy.
+
+SGD lr=0.1
+
+SGD lr=0.01
+
+100
+
+SGD-APO =0.01 SGD-APO =0.001
+
+10 1
+
+10 2
+20 40Epoch60 80 100
+(a) Mean CIFAR-100 training loss over the training set.
+
+0.70 0.65 0.60 0.55 0.50 SGD lr=0.1
+SGD lr=0.01 0.45 SGD-APO =0.01
+SGD-APO =0.001
+0.40 20 40Epoch60 80 100
+(b) Accuracy on the test set.
+
+100
+
+10 1
+
+10 2 10 3 10000
+
+SGD lr=0.1 SGD lr=0.01 SGD-APO =0.01 SGD-APO =0.001
+300I0te0ratio5n0000 70000
+
+(c) Learning rate per iteration.
+
+Figure 10: Comparison of SGD and SGD-APO on CIFAR-100
+
+Training Loss Test Accuracy Learning Rate
+
+18
+
+

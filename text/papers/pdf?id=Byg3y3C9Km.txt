@@ -1,0 +1,1734 @@
+Under review as a conference paper at ICLR 2019
+
+LEARNING PROTEIN STRUCTURE WITH A
+DIFFERENTIABLE SIMULATOR
+Anonymous authors Paper under double-blind review
+ABSTRACT
+The Boltzmann distribution is a natural model for many systems, from brains to materials and biomolecules, but is often of limited utility for fitting data because Monte Carlo algorithms are unable simulate it in available time. This gap between the expressive capabilities and sampling practicalities of energy-based models is exemplified by the protein folding problem, since energy landscapes underlie contemporary knowledge of protein biophysics but computer simulations are still unable to fold all but the smallest proteins from first-principles. In this work we bridge the gap between the expressive capacity of energy functions and the practical capabilities of their simulators by using an unrolled Monte Carlo simulation as a model for data. We compose a neural energy function with a novel and efficient simulator based on Langevin dynamics to build an end-to-end-differentiable model of atomic protein structure given amino acid sequence information. We introduce techniques for stabilizing backpropagation under long roll-outs and demonstrate the model's capacity to make multimodal predictions and to generalize to unobserved protein fold types when trained on a large corpus of protein structures.
+
+1 INTRODUCTION
+
+Many natural systems, such as ants in a colony, cells in an tissue, or atoms in a protein, organize into complex structures from simple underlying interactions. Explaining how macroscopic structures such as these arise from simple interactions is a major goal of science and, as data on these systems becomes increasingly available and prediction methods more powerful, machine learning.
+
+The Boltzmann distribution is a foundational model for relating simple interactions to system behavior but can be challenging to fit to data. Given an energy function U[x], the probability of a system configuration x scales exponentially with energy as
+
+p(x)
+
+=
+
+1 Z
+
+exp (
+
+U[x]) .
+
+(1)
+
+Importantly, simple energy functions U[x] consisting of weak interactions can collectively encode complex system behavior, such as the structures of materials, macromolecules, tissues, or when
+
+endowed with latent variables, images, sound, and text. Unfortunately, generating samples x  p(x)
+
+and learning model parameters ^ with the Boltzmann distribution can require Monte Carlo simulations
+
+that frequently are unable to produce a useful result in available time. These difficulties have driven
+
+a shift towards generative models that are easier to learn and sample from, such as directed latent
+
+variable models (VAEs) and autoregressive models.
+
+The protein folding problem provides a prime example of both the power of energy-based models at describing complex relationships in data as well as the challenge of generating samples from them. Decades of research in biochemistry and biophysics support an energy landscape theory of protein folding(Dill & MacCallum, 2012), in which the folds that natural protein sequences adopt are the minima of a free energy surface. Without the availability of external information to constrain the energy function and accelerate optimization, contemporary simulations are typically unable to generate globally favorable low-energy structures in available time. If it were possible to learn a generative model of protein structure given sequence that could be sampled in a practical amount of time, it would be tremendously useful for basic biology, drug discovery, and protein design.
+
+1
+
+Under review as a conference paper at ICLR 2019
+
+Sequence s
+Initialize
+
+Langevin dynamics
+... ...
+
+Impute
+
+Structure X
+
+Figure 1: An unrolled simulator as a model for protein structure. NEMO combines a neural energy function for coarse protein structure, a stochastic simulator based on Langevin dynamics, and an atomic imputation network to build atomic coordinate output from sequence information. It is trained end-to-end by backpropagating through the unrolled folding simulation.
+How can we get both the representational benefits of energy-based models and the sampling efficiency of directed models? Here we explore the solution of directly training an unrolled simulator of an energy function as a model for data. By directly training the sampling process, we eschew the question `when has the simulator converged' and instead demand that it produce a useful answer in a fixed amount of time. Leveraging this idea, we construct an end-to-end differentiable model of protein structure that is trained by backpropagtion through folding (Figure 1). NEMO (Neural energy modelling and optimization) can learn at scale to generate 3D protein structures consisting of hundreds of points driectly from sequence information. Our main contributions are:
+· Neural energy simulator model for protein structure that composes a deep energy function, unrolled Langevin dynamics, and an atomic imputation network for an end-to-end differentiable model of protein structure given sequence information
+· Efficient sampling algorithm that is based on a transform integrator for efficient sampling in transformed coordinate systems
+· Stabilization techniques for long roll-outs of simulators that can exhibit chaotic dynamics and, in turn, exploding gradients during backpropagation
+· Systematic analysis of combinatorial generalization with a new dataset of protein sequence and structure
+1.1 RELATED WORK Protein modeling Our model is a natural continuation of efforts to build effective coarse-grained models of protein structure (Kmiecik et al., 2016), and especially those that have focused modeling one-point-per-amino acid (Kolinski et al., 1998). Recently, multiple groups have demostrated how to learn full force fields using likelihood-based approaches (Jumper et al., 2017; Krupa et al., 2017), similar to our maximum likelihood loss (but without backpropagtion through folding for fast sampling). While this work was in progress, two groups reported neural models of protein structure (AlQuraishi, 2018; Anand & Huang, 2018), where the former focused on predicting structure via angles and the latter via distances. We show how an energy function provides a natural framework to integrate both kinds of constraints, which in turn is important to sample-efficient structural generalization . Learning to infer or sample Structured prediction includes a long history of casting predictions in terms of energy minimization. Recently, (Wang et al., 2016; Amos & Kolter, 2017; Belanger & McCallum, 2016) have built hybrid neural networks that use differentiable optimization as a building block in neural architectures. Structured Prediction Energy Networks (SPENs) with unrolled optimzation (Belanger et al., 2017) are a highly similar approach to ours, differing in terms of the use of optimization rather than sampling. Additional methodologically related work includes approaches to learn energy functions and samplers simultaneously (Wang & Liu, 2016; Chen et al., 2018a;
+2
+
+Under review as a conference paper at ICLR 2019
+
+A
+Sequence network
+weights
+1D 2D
+features Structure network
+Invariant features
+
+Energy
+
+B
+
+C Distances Orientations
+
+Figure 2: A neural energy function models coarse grained structure and is sampled by internal coordinate dynamics. (A) The energy function is formulated as a Markov Random Field with structural features and sequence-derived weights both computed by neural networks built from a combination of 1D, 2D, and graph convolutions (Appendix A). (B) The simulator leverages internal coordinate Langevin dynamics to generate rapid and coherent rearrangements of the fold. (C) To guarantee rotational and translational invariance, the base features of the structure network are sliced internal coordinates (not shown), pairwise distances, and pairwise orientations.
+
+Song et al., 2017), to learn efficient MCMC operators (Song et al., 2017; Levy et al., 2017), to build expressive approximating distributions with unrolled Monte Carlo simulations (Salimans et al., 2015; Titsias, 2017), and to learn the parameters of simulators with implicitly defined likelihoods1 (Mohamed & Lakshminarayanan, 2016; Dai et al., 2017; Tran et al., 2017).
+2 MODEL
+2.1 REPRESENTATION Proteins Proteins are linear polymers composed of amino acids. There are 20 types of amino acids, each with a common monomer structure [-(N-H)-(C-R)-(C=O)-] and with variable side-chain R groups that differ in properties such as hydrophobicity, charge, and ability to form hydrogen bonds. When placed in solvent (such as water or a lipid membrane), interactions between the side-chains, backbone, and solvent drive proteins into particular 3D configurations (`folds'). Since the 3D structure of a protein is the basis of understanding its biochemical activity, ligand binding, and interactions with small-molecule drugs, determining how protein sequence encodes structure is major and ongoing challenge for basic biochemistry, protein design, and biomedical research. In this work we focus on predicting protein structure X in terms of 5 positions per amino acid: the four heavy atoms of the backbone (N, C, and Carbonyl C=O) and the center of mass of the side chain R group. It is well-established that the locations of the C carbons are sufficient to reconstruct a full atomic structure (Kmiecik et al., 2016). We also include backbone heavy atoms and side chain center of mass to call backbone hydrogen bonding (secondary structure) as well as coarse side-chain placement.
+Sequence conditioning We consider and evaluate two modes for conditioning our model on sequence information:
+· 1-seq s is an L  20 matrix containing a one-hot encoding of the amino acid sequence · Profile s is an L  40 matrix encoding both the amino acid sequence and an evolutionary
+profile of related sequences (Appendix B) 1We leverage a traditional estimator of the likelihood gradient (Boltzmann learning) rather than ratio-based estimators
+3
+
+Under review as a conference paper at ICLR 2019
+
+Coarse prediction and imputation We decompose the prediction of 5-position atomic structure X from sequence information s into two steps: first, a differentiable simulator generates a coarsegrained model x with one position per amino acid and second, an imputation network places the 5 atomic positions given the coarse grained model. Both components operate in a rotationally and translationally invariant manner and are trained end-to-end by backpropagation through the complete model.
+
+Internal coordinates Cartesian coordinates x define the absolute position of each point xi in 3-space, whereas internal coordinates encode the relative positions of points. We adopt a common convention for internal coordinates(Parsons et al., 2005) where each point xi is placed in a spherical coordinate system defined by the preceding three points {xi 1, xi 2, xi 3} in terms of a radius (bond length) bi 2 (0, 1), polar angle (bond angle) ai 2 [0, ), and an azimuthal angle (dihedral angle) di 2 [0, 2) (Figure 2B). For differentiability, we define zi = {~bi, a~i, di}, where ~bi are a~i are unconstrained parameterizations (Appendix A).
+
+To define the (invertible) transformation x = F(z) from internal coordinates to Cartesian, it is
+
+helpful to first define the spherical coordinate systems in terms of normal unit vectors along each
+
+`bond'2 u^i coordinates
+
+= x
+
+xi
+th||axti
+
+xi 1
+saxtiisf1y||
+
+and normal to each internal coordinates z
+
+bwoenpdlapcleanoenen^cio=ordi||nuu^^aiite11xiuu^^iia|t|
+
+. a
+
+To build Cartesian time given the prior
+
+three {xi 1, xi 2, xi 3}. The transformation F (z) is then be defined by the recurrence
+
+" cos( ai) #
+
+xi = xi 1 + bi [u^i 1 n^ i 1  u^i 1 n^ i 1] sin( ai) cos(di) .
+
+sin( ai) sin(di)
+
+The inverse transformation z = F 1(x) is simpler to compute, as only involves local (and fully parallelizable) calculations
+
+bi = ||xi xi 1||, ai = arccos ( u^i · u^i 1) , di = sign (u^i 2 · n^ i) arccos (n^ i 1 · n^ i) .
+
+2.2 NEURAL ENERGY FUNCTION
+
+Deep Markov Random Field We model the distribution of a structure x conditioned on a sequence s with the Boltzmann distribution,
+
+p (x|s)
+
+=
+
+1 Z
+
+exp (
+
+U[x; s]) ,
+
+(2)
+
+where U [x; s] is a sequence-conditioned energy function parameterized by a deep neural network.
+
+While our approach is compatible with any differentiable energy function U [x; s], we choose to
+
+impose additional structure on the energy function by formulating it as a Markov Random Field
+
+(Figure
+
+2A).
+
+Our
+
+energy
+
+U [x;
+
+s]
+
+takes
+
+the
+
+form X
+
+U[x; s] = li(s; )fi(x; ),
+
+(3)
+
+i
+
+where the coefficients {li(s; )}Mi=1 are a set of sequence features computed by a sequence network
+
+satnrductthuerednaetatwfournkc.tTiohniasldse{cfoim(xpo; si)ti}oiMn=1ofatrhee
+
+a set of structural features (functions) computed by a energy function provides the advantages of (i) increased
+
+interpretability, as the sequence and structure features can be interpreted separately but also directly
+
+correspond to one another, and (ii) increased computational efficiency, as the sequence features can
+
+be computed once and reused throughout a simulation.
+
+Sequence network We parameterize the sequence network as a hybrid of a convolutional and a graph neural network that takes as input one-dimensional sequence information s and outputs: (1) Energetic coefficients, a set of 1- and 2-dimensional sequence features {li(s; )}Mi=1, (2) Simulator initial state z(0), (3) Simulator hyperparameters preconditioning matrix C, and (4) Predicted secondary structure. The detailed architecture is explained in the Appendix A. Briefly, (1) the sequence is processed into initial 1D and 2D features by a convolutional neural network, (2) which are then processed by 3 iterations of a message-passing neural network, and (3) finally these are transformed in the above outputs via convolutional neural networks.
+2Since our representation x is coarse grained at point per position, these are virtual bonds.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Structure network The structure network takes in a coarse grained model of protein structure x
+
+and outputs a convolutional
+
+set of 1networks
+
+a,nadnd2-tDhesdtreutacitluerdalarfcehatiutercetsur{efiis(xex; pl)a}iiMn=e1d.
+
+It in
+
+is made purely Appendix A.
+
+of
+
+1D
+
+and
+
+2D
+
+SE(3) invariant features We design the energy function to be invariant to rigid body motions (rotations and translations in SE(3)) by leveraging a set of invariant base features (Figure 2C) which are:
+
+1.
+
+Internal coordinates z4: (sliced) the remaining bond-lengths and
+
+By discarding angles of the
+
+the internal coordinates of structure are invariant3.
+
+the first 3 points, The remaining
+
+bond-lengths and angles of the structure are invariant.
+
+2. Distances Dij = kxi xjk between all pairs of points. We further process the raw Euclidean distances by 4 radial basis functions with Gaussian kernel.
+
+3. Orientation vectors v^ij, which are unit vectors encoding the relative position of point xj in
+
+a local coordinate thereof.
+
+system
+
+of
+
+xi
+
+with
+
+base
+
+vectors
+
+u^ i+1 ku^ i+1
+
+u^ i+1 u^ i+1 k
+
+,
+
+n^ i+1,
+
+and
+
+the
+
+cross
+
+product
+
+2.3 EFFICIENT SIMULATOR
+
+Langevin dynamics The Langevin dynamics are defined by a continuous-time stochastic differential equation and have the important property of asymptotically sampling from the Boltzmann distribution (Equation 2). We simulate them in discrete time with the first order discretization
+
+x(t+)
+
+x(t)
+
+ 2
+
+rxU
+
+(t)
+
++
+
+p p,
+
+p  N (0, I).
+
+(4)
+
+Transformed dynamics The efficiency with which Langevin dynamics explore conformational space is highly dependent on the geometry of the energy landscape U (x). Whereas Cartesian dynamics are efficient at local rearrangements of the structure, internal coordinate dynamics (Figure 2B) much more efficiently sample global, coherent changes to the topology of the fold. We interleave the Cartesian Langevin dynamics with preconditioned Internal Coordinate dynamics,
+
+z(t+)
+
+z(t)
+
+C 2
+
+rz U
+
+(t)
+
++
+
+p Cp,
+
+p  N (0, I),
+
+(5)
+
+where C is a preconditioning matrix that sets the relative scaling of changes different degrees of freedom. For all simulations we unroll T = 250 time steps that implicitly take both Cartesian Equation 9 and internal coordinate steps Equation 10 (Appendix A).
+
+Transform integrator Simulating internal coordinate dynamics is often computationally intensive as it requires rebuilding Cartesian geometry x from internal coordinates z with F(z) (Parsons et al., 2005) because it is intrinsically sequential. Here we show how it is possible to bypass the need for recomputing coordinate transformations at every step by instead computing on-the-fly transformation integration (Figure 3,Appendix A). The idea is to directly apply coordinate updates in one coordinate system to another by numerically integrating the Jacobian. This can be favorable when the Jacobian has a simple structure, which in our case only involves distributed cross products (Appendix A).
+
+2.4 ATOMIC IMPUTATION Finally, an atomic model is reconstructed from the final coarse coordinates x(T ). Each atomic coordinate Xi,j of atom type j at position i is placed in a local reference frame as
+Xi,j = xi + ei,j (z; ) [u^i n^ i+1 n^ i+1  u^i] ri,j (z; ), where ei,j(z; ) and ri,j(z; ) are computed by a 1D convolutional neural network (Appendix).
+3Specifically, the six-degrees of freedom parameterizing the rigid body placement of the structure are the `virtual' {b1, a1, a2, d1, d2, d3}.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 1: Direct integrator
+
+Input :State z(0), energy U (x), step , time T , scale C
+Output :Trajectory x(0), . . . , x(T )
+
+Initialize x(0) F (z(0));
+
+while t < T do
+
+Compute forces fz =
+
+@x @z
+
+T
+
+rx
+
+U
+
+;
+
+Sample
+
+zN
+
+1 2
+
+Cfz
+
+,
+
+C
+
+;
+
+ z(t+) z(t) + z;
+
+ x(t+) t t + ; end
+
+F (z(t+));
+
+Algorithm 2: Transform integrator
+
+Input :State z(0), energy U (x), step , time T , scale C
+
+Output :Trajectory x(0), . . . , x(T )
+
+Initialize x(0) F (z(0)); while t < T do
+
+Compute forces fz =
+
+@x @z
+
+T
+
+rxU
+
+;
+
+Sample
+
+zN
+
+1 2
+
+Cfz
+
+,
+
+C
+
+;
+
+ x~
+
+x(t)
+
++
+
+@x (t) @z
+
+z(t);
+
+
+
+ x(t+)
+
+x(t)
+
++
+
+1 2
+
+@x (t) @z
+
++
+
+@x~ @z
+
+t t + ;
+
+end
+
+z(t);
+
+Figure 3: A transform integrator simulates Langevin dynamics in a more favorable coordinate system (e.g. internal coordinates z) directly in terms of the untransformed state variables (e.g. Cartesian x). This exchanges the cost of an inner-loop transformation step (e.g. geometry construction F(z)) for an extra Jacobian evaluation, which is fully parallelizable on modern hardware (e.g. GPUs).
+
+3 TRAINING
+
+We train the model on a novel, hierarchically split set of 60,000 protein structures by gradient descent using a composite loss that combines terms from likelihood-based and empirical-risk minimizationbased training.
+
+3.1 DATA There are several scales of generalization in protein structure prediction, which range from predicting the structure of a sequence that differs by a few letters to a sequence in train to predicting a 3D fold that has never been seen by the model. To be able to test these various levels of generalization systematically across many different protein families, we built a training and test set on top of the CATH hierarchical classification of protein folds(Orengo et al., 1997). CATH hierarchically organizes proteins from the Protein Data Bank(Berman et al., 2000) into domains (individual folds) that are classified at the levels of Class, Architecture, Topology, and Homologous superfamily. We collected protein domains from CATH up to length 200 and hierarchically split this set into training (35k folds), validation, and test (10k folds) sets (Appendix B).
+
+3.2 LOSS
+
+Likelihood The gradient of the data-averaged log likelihood of the Boltzmann distribution is
+
+
+
+@ @i
+
+ExData
+
+[log
+
+p(x|s,
+
+)]
+
+=
+
+Exp(x|)
+
+@ @i
+
+U
+
+(x;
+
+s)
+
+
+
+ExData
+
+@ @i
+
+U
+
+(x;
+
+s)
+
+,
+
+(6)
+
+which amounts to minimizing the average energy of samples from the data relative to samples from the model. In an automatic differentiation setting, we implement a Monte Carlo estimator for this gradient by adding the energy gap,
+
+LML = U(?(x(M)); s) U(?(x(D)); s), to the loss, where ? is an identity operator that sets the gradient to zero4.
+
+(7)
+
+Empirical Risk In addition to the likelihood loss, which backpropagates through the energy function but not the whole simulation, we developed an empirical risk loss composing several
+4In TensorFlow this operation is stop gradient.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Mean TM-score TM-score
+TM-score (ours)
+
+Generalization levels
+Class
+
+1.0 0.8
+
+Architecture
+
+0.6
+
+Topology
+
+0.4
+
+Homologous Training
+
+0.2
+0.0 100 80 60 40 20 0
+Model certainty (# clusters)
+
+1.0 1.0
+
+0.8 0.8
+
+0.6 0.6
+
+0.4 0.4
+
+0.2 0.2
+
+0.0 0.0 0.2 0.4 0.6 0.8 1.0
+Sequence distance to train (%ID)
+
+0.0 0.0
+
+0.2 0.4 0.6 0.8
+TM-score (baseline)
+
+1.0
+
+Figure 4: Model generalizes and outperforms baseline for unseen fold topologies. .
+
+measures of protein model quality. It takes the form LER = LDistances + LAngles + LH-bonds + LTM-score + LInit + LTrajectory
+with the individual terms explained in detail in Appendix B.
+
+(8)
+
+3.3 STABILIZING BACKPROPAGATION THROUGH TIME
+We found that the long roll-outs of our simulator were prone to chaotic dynamics and exploding gradients, as seen in previous work on meta-learning (Maclaurin et al., 2015). It is easy to show that even non-pathological 1D simulations analogous to ours can exhibit chaos (Appendix B and Figure 8). Unfortunately, when chaotic dynamics do begin to occus, it is typical for all gradients to explode (across learning steps) and standard techniques such as gradient clipping (Pascanu et al., 2013) are unable to rescue learning. To stabilize training, we developed two complimentary techniques that work to both regularize against chaotic dynamics of the simulator and still facilitate learning when they do occur. They are
+· Lyapunov regularization We regularize the simulator time-step function to be approximately 1-Lipschitz (which, if exactly satisfied, eliminates the possibility of chaotic dynamics)
+· Damped backpropagation through time We exponentially decay gradient accumulation on the backwards pass of automatic differentiation, and adaptively tune the damping factor to cancel the scale of the exploding gradients. This can be thought of as a quantitatively tunable alternative to truncated backpropagation through time.
+The intuition and implementation of these methods is discussed in Appendix B..
+
+4 RESULTS
+4.1 GENERALIZATION ACROSS CATH For each of the 10,381 protein structures in our test set, we sampled 100 models from NEMO, clustered them by structural similarity, and selected a representative structure by a standard consensus algorithm Appendix C. For evaluation of performance we focus on the TM-Score, a measure of structural similarity between 0 and 1 for which TM > 0.5 is typically considered accurate reconstruction of a fold. We find that, when the model is confident (i.e. the number of distinct structural clusters is low 1-3), it is also accurate with many predictions having TM > 0.5) Figure 4A. Unsurprisingly, the confidence of the model tends to go with the difficulty of generalization, with the most confident predictions from the H test set and the least confident from C. However, even when sequence identity is low and generalization difficulty is high Figure 4B, the model is still able to make some accurate predictions of 3D structure. Figure 5 illustrates some of these successful predictions at high CATH difficulty levels, specifically 4ykaC00, 5c3uA02 and
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Real
+
+TM-score Prediction
+
+0.76
+
+0.71 0.74
+
+0.67
+
+Largest clusters
+
+Real
+
+TM-score Prediction
+
+0.68
+
+0.60 0.42
+
+0.31
+
+Largest clusters
+
+Figure 5: Successful fold generalization to topology and architecture level. These predicted structures show a range of prediction accuracy at CA and CAT levels, with the TM-score comparing the top ranked 3D-Jury pick against the target and ensembles of the largest three clusters for each. CATH IDs: 2oy8A03; 5c3uA02; 2y6xA00; 3cimB00; 4ykaC00; 2f09A00; 3i5qA02; 2ayxA01.
+
+Table 1: Test set performance across difficulties of generalization
+
+Model NEMO (ours, profile) NEMO (ours, sequence-only) Baseline model
+2x100 2x300 2x500 2x700 Number of structures
+
+# params 21.3m 19.1m 5.9m 8.8m 13.7m 21.4m
+
+Total 0.364 0.242 0.293 0.335 0.347 0.309 10381
+
+C 0.274 0.193 0.213 0.229 0.222 0.223 1537
+
+A 0.360 0.243 0.230 0.282 0.272 0.259 1705
+
+T 0.329 0.246 0.247 0.278 0.286 0.261 3198
+
+H 0.429 0.258 0.388 0.446 0.477 0.403 3941
+
+beta sheet formation in 2oy8A03. We observe that the predictive distribution is multimodal with non-trivial differences between the clusters representing alternate packing of the chain. In some of the models there is uneven distribition of uncertainty along the chain, which sometimes corresponded to loosely packed regions of the protein. 4.2 RNN BASELINE We constructed a baseline model that is a replica of NEMO but that replaces the coarse-grained simulator module (and energy function) with a two-layer bidirectional LSTM that directly predicts coarse internal coordinates z(0). We trained this across a range of dimensions and found that for difficult C, A, and T tasks, NEMO generalized more effectively than the RNNs (Table 1). For the best performing 2x300 architecture, we trained two additional replicates and report the averaged perfomance in Figure 4C. We report the results of a sequence-only model in Table 1 and Figure 4.
+5 CONCLUSION
+We described a model for protein structure given sequence information that combines a coarse-grained neural energy function and an unrolled simulation into end-to-end differentiable model. To realize this idea at the scale of real proteins, we introduced an efficient simulator for Langevin dynamics in transformed coordinate systems and stabilization techniques for backpropagating through long simulator roll-outs. We find that that model is able to predict the structures of protein molecules with hundreds of atoms while capturing structural uncertainty, and that the model structurally generalizes to distant fold classifications more effectively than a strong baseline.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Mohammed AlQuraishi. End-to-end differentiable learning of protein structure. bioRxiv, pp. 265231, 2018.
+Brandon Amos and J Zico Kolter. Optnet: Differentiable optimization as a layer in neural networks. arXiv preprint arXiv:1703.00443, 2017.
+Namrata Anand and Possu Huang. Generative modeling for protein structures. 2018. Rolf Apweiler, Amos Bairoch, Cathy H Wu, Winona C Barker, Brigitte Boeckmann, Serenella Ferro,
+Elisabeth Gasteiger, Hongzhan Huang, Rodrigo Lopez, Michele Magrane, et al. Uniprot: the universal protein knowledgebase. Nucleic acids research, 32(suppl 1):D115­D119, 2004. David Belanger and Andrew McCallum. Structured prediction energy networks. In International Conference on Machine Learning, pp. 983­992, 2016. David Belanger, Bishan Yang, and Andrew McCallum. End-to-end learning for structured prediction energy networks. arXiv preprint arXiv:1703.05667, 2017. Helen M Berman, John Westbrook, Zukang Feng, Gary Gilliland, Talapady N Bhat, Helge Weissig, Ilya N Shindyalov, and Philip E Bourne. The protein data bank. Nucleic acids research, 28(1): 235­242, 2000. Changyou Chen, Chunyuan Li, Liquan Chen, Wenlin Wang, Yunchen Pu, and Lawrence Carin Duke. Continuous-time flows for efficient inference and density estimation. In International Conference on Machine Learning, pp. 823­832, 2018a. Minmin Chen, Jeffrey Pennington, and Samuel S Schoenholz. Dynamical isometry and a mean field theory of rnns: Gating enables signal propagation in recurrent neural networks. arXiv preprint arXiv:1806.05394, 2018b. Zihang Dai, Amjad Almahairi, Philip Bachman, Eduard Hovy, and Aaron Courville. Calibrating energy-based generative adversarial networks. arXiv preprint arXiv:1702.01691, 2017. Ken A Dill and Justin L MacCallum. The protein-folding problem, 50 years on. Science, 338(6110): 1042­1046, 2012. Sean R Eddy. Accelerated profile hmm searches. PLoS computational biology, 7(10):e1002195, 2011. Krzysztof Ginalski, Arne Elofsson, Daniel Fischer, and Leszek Rychlewski. 3d-jury: a simple approach to improve protein structure predictions. Bioinformatics, 19(8):1015­1018, 2003. Mikael Henaff, Arthur Szlam, and Yann LeCun. Recurrent orthogonal networks and long-memory tasks. In International Conference on Machine Learning, pp. 2034­2042, 2016. Sergey Ioffe. Batch renormalization: Towards reducing minibatch dependence in batch-normalized models. In Advances in Neural Information Processing Systems, pp. 1945­1953, 2017. John M Jumper, Karl F Freed, and Tobin R Sosnick. Trajectory-based parameterization of a coarsegrained forcefield for high-throughput protein simulation. bioRxiv, pp. 169326, 2017. Wolfgang Kabsch and Christian Sander. Dictionary of protein secondary structure: pattern recognition of hydrogen-bonded and geometrical features. Biopolymers: Original Research on Biomolecules, 22(12):2577­2637, 1983. Sebastian Kmiecik, Dominik Gront, Michal Kolinski, Lukasz Wieteska, Aleksandra Elzbieta Dawid, and Andrzej Kolinski. Coarse-grained protein models and their applications. Chemical Reviews, 116(14):7898­7936, 2016. Andrzej Kolinski, Lukasz Jaroszewski, Piotr Rotkiewicz, and Jeffrey Skolnick. An efficient monte carlo model of protein chains. modeling the short-range correlations between side group centers of mass. The Journal of Physical Chemistry B, 102(23):4628­4637, 1998.
+9
+
+Under review as a conference paper at ICLR 2019
+Pawel Krupa, Anna Halabis, Wioletta Zmudzinska, Stanislaw Oldziej, Harold A Scheraga, and Adam Liwo. Maximum likelihood calibration of the unres force field for simulation of protein structure and dynamics. Journal of chemical information and modeling, 57(9):2364­2377, 2017.
+Daniel Levy, Matthew D Hoffman, and Jascha Sohl-Dickstein. Generalizing hamiltonian monte carlo with neural networks. arXiv preprint arXiv:1711.09268, 2017.
+Xiaoyu Lu, Valerio Perrone, Leonard Hasenclever, Yee Whye Teh, and Sebastian J Vollmer. Relativistic monte carlo. arXiv preprint arXiv:1609.04388, 2016.
+Dougal Maclaurin, David Duvenaud, and Ryan Adams. Gradient-based hyperparameter optimization through reversible learning. In International Conference on Machine Learning, pp. 2113­2122, 2015.
+Shakir Mohamed and Balaji Lakshminarayanan. Learning in implicit generative models. arXiv preprint arXiv:1610.03483, 2016.
+Christine A Orengo, AD Michie, S Jones, David T Jones, MB Swindells, and Janet M Thornton. Cath­a hierarchic classification of protein domain structures. Structure, 5(8):1093­1109, 1997.
+Jerod Parsons, J Bradley Holmes, J Maurice Rojas, Jerry Tsai, and Charlie EM Strauss. Practical conversion from torsion space to cartesian space for in silico protein synthesis. Journal of computational chemistry, 26(10):1063­1068, 2005.
+Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difficulty of training recurrent neural networks. In International Conference on Machine Learning, pp. 1310­1318, 2013.
+Michael Remmert, Andreas Biegert, Andreas Hauser, and Johannes So¨ding. Hhblits: lightning-fast iterative protein sequence searching by hmm-hmm alignment. Nature methods, 9(2):173, 2012.
+Tim Salimans, Diederik Kingma, and Max Welling. Markov chain monte carlo and variational inference: Bridging the gap. In International Conference on Machine Learning, pp. 1218­1226, 2015.
+Naomi Siew, Arne Elofsson, Leszek Rychlewski, and Daniel Fischer. Maxsub: an automated measure for the assessment of protein structure prediction quality. Bioinformatics, 16(9):776­785, 2000.
+Jiaming Song, Shengjia Zhao, and Stefano Ermon. A-nice-mc: Adversarial training for mcmc. In Advances in Neural Information Processing Systems, pp. 5140­5150, 2017.
+Steven H Strogatz. Nonlinear dynamics and chaos: with applications to physics, biology, chemistry, and engineering. CRC Press, 2018.
+Baris E Suzek, Yuqi Wang, Hongzhan Huang, Peter B McGarvey, Cathy H Wu, and UniProt Consortium. Uniref clusters: a comprehensive and scalable alternative for improving sequence similarity searches. Bioinformatics, 31(6):926­932, 2014.
+Michalis K Titsias. Learning model reparametrizations: Implicit variational inference by fitting mcmc distributions. arXiv preprint arXiv:1708.01529, 2017.
+Dustin Tran, Rajesh Ranganath, and David Blei. Hierarchical implicit models and likelihood-free variational inference. In Advances in Neural Information Processing Systems, pp. 5523­5533, 2017.
+Dilin Wang and Qiang Liu. Learning to draw samples: With application to amortized mle for generative adversarial learning. arXiv preprint arXiv:1611.01722, 2016.
+Shenlong Wang, Sanja Fidler, and Raquel Urtasun. Proximal deep structured models. In Advances in Neural Information Processing Systems, pp. 865­873, 2016.
+Yang Zhang and Jeffrey Skolnick. Tm-align: a protein structure alignment algorithm based on the tm-score. Nucleic acids research, 33(7):2302­2309, 2005.
+10
+
+Under review as a conference paper at ICLR 2019
+
+Sequence Sequence network
+
+s
+
+1D CNN
+
+1D init
+
+1D
+
+2D init
+
+MPNN
+
+2D
+
+Message Passing
+
+1D CNN
+
+Hyperparams z(0)
+
+Simulator F(z)
+
+x(0)
+
+C
+
+Energy weights
+1D l
+
+Forces  U(x)
+
+2D CNN
+
+2D l
+
+Langevin Integrator Simulator loop
+
+x(t)
+
+Imputation Imputation r 1D CNN z(T)
+x(T) F-1(z)
+
+Structure
+X
+Trajectory x(1) ... x(T)
+
+MPNN
+
+1D 1D CNN
+
+1D
+
+Attention Expand
+
+2D
+
+2D CNN
+
+2D
+
+Legend Input and output State, neural State, structured Computation Loops
+
+Structure x(t)
+
+Invariant features
+
+Forces
+
+1D Internal
+
+z(t) 1D
+
+2D Distances &
+Orientations
+
+Dij 2D
+uij
+
+Structure Network
+
+1D CNN 1D 2D CNN 2D
+Autodiff  U(x)
+
+Energy weights
+1D l Dot Dot 2D l
+U(x)
+
+X(T) X(Data)
+
+Loss
+
+SS(Data) SS(Model) x(1) ... x(T)
+
+Distances Angles H-bonds
+TM-score
+SS
+Trajectory
+
+L
+
+z(0) Init
+
+Coarse
+
+x(Data) x(T)
+
+Weights l Energy loss
+
+Figure 6: Model schematic
+
+APPENDICES
+
+A MODEL
+
+A.1 COORDINATE SYSTEMS
+
+Jacobian The perturbations of
+
+tJhaecoinbtiearnna@@lxzcodoerfidnineasteths ez.inIfit wniitlelsbime iaml preosrptaonntsfeoor fboththe
+
+Cartesian coordinates x to converting Cartesian forces
+
+into angular torques and bond forces as well as the development of our transform integrator. It is
+
+defined element-wise as
+
+
+
+@xj @bi
+
+=
+
+u^i 0
+
+i i
+
+ >
+
+j j
+
+,
+
+
+
+@xj @ai
+
+=
+
+n^ i  (xj 0
+
+xi 1)
+
+i i
+
+ >
+
+j j
+
+,
+
+
+
+@xj @di
+
+=
+
+u^i 1  (xj 0
+
+xi 1)
+
+i i
+
+ >
+
+j j
+
+.
+
+The Jacobian has a simple form that can be understood by imagining the protein backbone as a robot arm that is planted at x0 (Figure 2). Increasing or decreasing the bond length bi extends or retracts all downstream coordinates along the bonds axis, moving a bond angle ai drives circular motion of all downstream coordinates around the bond normal vector n^ i centered at xi 1, and moving a dihedral angle di drives circular motion of downstream coordinate xj around bond vector u^i 1 centered at xi 1.
+
+Unconstrained representations Bond lengths and angles are subject to the constraints bi > 0 and
+
+0 < ai < . We enforce these constraints by representing these degrees of freedom in terms of fully
+
+unconstrained variables ~bi and a~i via the transformations bi = log
+
+1 + e~bi
+
+and
+
+ai
+
+=
+
+ 1+e
+
+.a~i
+
+All
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+Table 2: Coordinate systems and representations for protein structure.
+
+Variable
+
+Notation
+
+Shape
+
+Sequence
+
+s [L, 20]
+
+Cartesian coordinates (coarse)
+
+x [3L,1]
+
+Internal coordinates
+
+z [3L,1]
+
+Cartesian coordinates (atomic)
+
+X [3L,A]
+
+Cartesian coordinates for position i Internal coordinate for position i
+
+zi
+
+=
+
+h xi bi a~i
+
+d~iiT
+
+[3,1] [3,1]
+
+Unit vector from xi 1 to xi Unit vector normal to bond plane at xi 1
+Bond length ||xi xi 1|| Bond angle \(u^i, u^i 1) Dihedral angle \(n^ i, n^ i 1) Unconstrained bond length Unconstrained bond angle
+
+u^i n^ i bi ai di ~bi a~i
+
+[3,1] [3,1] [1] [1] [1] [1] [1]
+
+Jacobian matrix
+
+@x @z
+
+[3L,3L]
+
+references to the internal coordinates representations (Table 3).
+
+z
+
+and
+
+Jacobians
+
+@x @z
+
+will
+
+refer
+
+to
+
+the
+
+use
+
+of
+
+fully
+
+unconstrained
+
+A.2 ENERGY FUNCTION Figure 10 provides an overall schematic of the model, including the components of the energy function.
+
+CNN primitives All convolutional neural network primitives in Figure 10 follow a common structure consisting of stacks of residual blocks. Each residual block includes consists of a layer of channel mixing (1x1 convolution), a variable-sized convolution layer, and a second layer of channel mixing. We use dropout with p = 0.9 and Batch Renormalization(Ioffe, 2017) on all convolutional layers. Batch Renormalization rather than Normalization was necessary rather owing to the large variation in sizes of the structures of the proteins and resulting large variation in mini-batch statistics. -
+
+A.3 INTERNAL COORDINATE DYNAMICS WITH A TRANSFORM INTEGRATOR Why sampling vs. optimization Deterministic methods for optimizing the energy U (x; s) such as gradient descent or quasi-Newton methods can effectively seek local minima of the energy surface, but are challenged to optimize globally and completely ignore the contribution of the widths of energy minima (entropy) to their probability. We prefer sampling to optimization for three reasons: (i) noise in sampling algorithms can facilitate faster global conformational exploration by overcoming local minima and saddle points, (ii) sampling generates populations of states that respect the width (entropy) of wells in U and can be used for uncertainty quantification, and (iii) sampling allows training with an approximate Maximum Likelihood objective (Equation 6).
+
+Table 3: Model architecture.
+
+Location
+
+Type Channels # Blocks Width Dilation
+
+Stride
+
+Pre-MPNN 1D 128
+
+12
+
+3 [1, 2, 4, 8] * 3 1
+
+MPNN
+
+1D 128
+
+4
+
+3
+
+[1, 2, 4, 8]
+
+1
+
+MPNN
+
+2D 50
+
+1
+
+71
+
+1
+
+Post-MPNN 1D q+256 12
+
+3 [1, 2, 4, 8] * 3 1
+
+Post-MPNN* 2D 100
+
+1
+
+91
+
+1
+
+Imputation 1D q+256 12
+
+3 [1, 2, 4, 8] * 3 1
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Langevin Dynamics The Langevin dynamics are a stochastic dynamics that sample from the canonical ensemble. They are defined as a continuous-time stochastic differential equation, and are simulated in discrete time with the first order discretization
+
+x(t+)
+
+x(t)
+
+ 2
+
+rxU
+
+(t)
+
++
+
+p p,
+
+p  N (0, I).
+
+(9)
+
+Each time step of  involves a descent step down the energy gradient plus a perturbation of Gaussian noise. Importantly, as time tends toward to infinity, the time-distribution of the Langevin dynamics converges to the canonical ensemble. Our goal is to design a dynamics that converge to an approximate sample in a very short period of time.
+
+Coordinate systems and preconditioning The efficiency with which Langevin dynamics explore conformational space is highly dependent on the geometry of the energy landscape U (x), which in turn depends on how the system is parameterized. Molecular energy functions in Cartesian coordinates tend to exhibit strong correlations between variables that result from the requirement that underlying molecular geometries satisfy highly stereotyped bond lengths and angles. As a result, simulations of naive Cartesian Langevin dynamics require a small time step to satisfy these constraints and tend to be dominated by high-frequency, localized vibrations of the chain. The large, global motions that are essential to protein folding can require thousands to millions of times steps to manifest.
+
+A well-known solution to the complex dependencies of Cartesian coordinates is to carry out optimization and simulation in internal coordinates, which directly parameterize molecular geometries in terms of the bond lengths and angles (Parsons et al., 2005). Internal coordinate parameterizations possess the advantages that (i) bond length and angle constraints are easy to satisfy and (ii) small changes to a single angle can drive large, coherent rearrangements of the chain (Figure ??). For example, simply replacing x's with z's in Equation 9 yields the dynamics
+
+z(t+)
+
+z(t)
+
+ 2
+
+rz U
+
+(t)
+
++
+
+p p,
+
+p  N (0, I).
+
+The advantages and disadvantages of the two coordinate systems are complementary: Cartesian dynamics efficiently sample local structural rearrangements and inefficiently sample global chain motions, while internal coordinate dynamics efficiently sample global, correlated motions of the chain but are challenged to make precise local rearrangements.
+
+The time dynamics of these alternative parameterizations need not be kinetically realistic to converge to the correct distribution over conformational space. Different coordinate systems warp the local geometry of the energy landscape and will in turn rescale and redirect which global vibrational and local vibrations dominate the dynamics. This relative rescaling can be further optimized by applying a global linear transformation to the energy landscape with a preconditioning `inverse mass' matrix C, giving the update
+
+z(t+)
+
+z(t)
+
+C 2
+
+rz U
+
+(t)
+
++
+
+p Cp,
+
+p  N (0, I).
+
+(10)
+
+Transform integrator The need to rebuild Cartesian geometry x from internal coordinates z with F(z) at every time step is one of the major costs of conformational sampling codes based on Internal coordinates (Parsons et al., 2005) because it is intrinsically sequential. Here we show how it is possible to bypass the need for geometry reconstruction at every step by instead computing on-the-fly geometry modification.
+
+Imagine following a change to the internal coordinates z(t) along a straight path from z(t) to
+
+z(t+) and tracking the corresponding nonlinear path of the Cartesian coordinates from x(t) to x(t+).
+
+If this path is indexed by u 2 (t, t + ), then the dynamics of x with respect to u are given by
+
+@x @u
+
+=
+
+@x @z @z @u
+
+=
+
+@x 1 @z 
+
+z. Integrating the dynamics of x gives
+
+
+
+x(t+) = F z(t) + z(t)
+
+=
+
+x(t)
+
++
+
+Z t+
+t
+
+1 
+
+@x (u) @z
+
+z(t)du.
+
+13
+
+Under review as a conference paper at ICLR 2019
+Time 0 Predictor
+
+Time T
+
+Predictor and Corrector
+
+Figure 7: Accounting for second order errors is essential for internal coordinate dynamics. (Top) Discarding the corrector step rapidly accumulates errors due to the curvilinear motions of internal coordinate dynamics. (Bottom) Heun integration with a corrector step accounts for curvature in curvilinear motion.
+
+This illustrates that it is possible to convert coordinate changes in one coordinate system (e.g. Internal Coordinates) to coordinate changes in another (e.g. Cartesian) by integrating an autonomous system of ODEs with dynamics governed by the Jacobian. Since  is small, we integrate this system with a single step of Heun's method (improved Euler), where we first substitute an Euler approximation to predict x(t+) as
+
+x~(t+)
+
+
+
+x(t)
+
++
+
+@x (t) @z
+
+z(t),
+
+and then substitute the Jacobian evaluated at the predicted state x~(t+) to form trapezoidal approxi-
+
+mation
+
+!
+
+x(t+)
+
+
+
+x(t)
+
++
+
+1 2
+
+@x (t) @z
+
++
+
+@x~ (t+) @z
+
+z(t).
+
+The comparison of this algorithm with naive integration is given in Figure ??. The corrector step is important for eliminating the large second-order errors that arise in curvilinear motions caused by angle changes (Figures ?? and 7). In principle higher-order numerical integration methods or more time steps could increase accuracy at the cost of more evaluations of the Jacobian, but we found that second-order effects seemed to be the most relevant on our timescales.
+
+Mixed integrator Cartesian dynamics favor local structural rearrangements, such as the transitioning from a helical to an extended conformation, while internal coordinate dynamics favor global motions such as the change of the overall fold topology. Since both kinds of structural rearrangements are important to the folding process, we form a hybrid integrator (ALgorithm 3) by taking one step with each integrator per force evaluation.
+
+Translational and rotational detrending Both Cartesian and Internal coordinates are overparameterized with 3L degrees of freedom, since only 3L 6 degrees of freedom are necessary to encode a centered and un-oriented structure5. As a consequence, a significant fraction of the per time-step
+5In Internal coordinates the rotation and translation of the structure are encoded in b1, a1, a2, d1, d,2 , d3 while in Cartesian coordinates they are distributed across all coordinates.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 3: Mixed Integrator
+Input :Initial state z(0), energy U (x), time steps x, z, total time T , preconditioners Cx, Cz, Output :Trajectory x(0), . . . , x(T ) Initialize x(0) F (z(0)); while t < T do
+fx rxU ; x(Cart) CartesianStep(x(t), fx, x, Cx); x(Int) ClippedInternalStep(x + x(Cart), fx, z, Cz);
+x x + Detrend( x(Cart) + x(Int)); t t + ; end
+
+changes x can be explained by rigid translational and rotational motions of the entire structure. We isolate and remove these components of motion by treating the system {x1, . . . , xL} as a set of particles with unit mass, and computing effective structural translational and rotational velocities by summing point-wise momenta.
+
+WTshmptohroeuiexntccittoitro-iuanwn.rnveFaisseslo!earrttairbtonohx¯yngteiaasutalu=ilnocamogrnmmuamllxipaomnorimgonvteeteihnnoleottnuscoxeamiftiTraymoraniusn!odsnttdihadionneitnvhtndoieidsltChicisneea=ignmrcttbepeex¯yrsnliyiottaehftnrhemeeddmaiaxss¯Cvopsiem,alraairaetntcgeniedsestmicwodaoefinesnnipvctdnsloeeeanworfictirenieidamtenhiatneaastanonttt!oedautseca=nfiarlrosnao(snelxPs¯lgteiphudio=ellsaHinir)txoeiv/onuien-nltsPoriacnhnitxitxsey|lig|Tiaix¯rort.aaiifnoTt|si|tno22hh=aneel.
+
+as xi
+
+xRi otx=iTrans12 !
+
+ (x¯i + ! xRi ot.
+
+
+
+x¯i),
+
+which
+
+leaves
+
+the
+
+isolated
+
+structural
+
+motions
+
+as
+
+xiStruct =
+
+Speed clipping We found it helpful to stabilize the model by enforcing a speed limit on overall structural motions for the internal coordinate steps. This prevents small changes to the energy function during learning from causing extreme dynamics that in turn produce a non-informative learning signal. To accomplish this, we translationally and rotationally detrend the update of the predictor step
+x and compute a hypothetical time step ^z that would limit the fastest motion to 2 Angstroms per iteration. We then compute modified predictor and corrector steps subject to this new, potentially slower, time step. While this breaks the asymptotics of Langevin dynamics, (i) it is unlikely on our timescales that we achieve stationarity and (ii) it can be avoided by regularizing the dynamics away from situations where clipping is necessary. In the future, considering non-Gaussian perturbations with kinetic energies similar to Relativistic Monte Carlo(Lu et al., 2016) might accomplish a similar goal in a more principled manner. The final integrator combining these ideas is presented in Figure 3.
+
+B APPENDIX B: TRAINING
+B.1 DATA For a training and validation set, we downloaded all protein domains of length L  200 from Classes , , and / in CATH release 4.1 (2015), and then hierarchically purged a randomly selected set of A, T, and H categories. This created three validation sets of increasing levels of difficulty: H, which contains domains with superfamilies that are excluded from train (but fold topologies may be present), T, which contains fold topologies that were excluded from train (fold generalization), and A which contains secondary structure architectures that were excluded from train. For a test set, we downloaded all folds that were new to CATH release 4.2 (2017), which (due to a propensity of structural biology to make new structures of previously solved folds), provided 10,381 test domains at varying levels of difficulty.
+15
+
+Under review as a conference paper at ICLR 2019
+
+B.2 LOSS We optimize the model using a composite loss containing several terms, which are detailed as follows.
+
+Distance loss We score distances in the model with a contact focused distance loss
+
+X wij
+
+Di(jModel)
+
+Di(jData) ,
+
+i<j
+
+where the contact-focusing weights are wij = Pk<l (D0(D0minm(Dini((jMDokd(Mell)o,deDl)i,(jDDatk(aD)l)a)ta)))
+
+and
+
+(u)
+
+=
+
+1 1+exp(
+
+u) is the sigmoid function.
+
+Angle loss
+
+We use the loss Langles = X ||H(zi(T ))
+i
+
+H(zi(Data))||,
+
+where H(z) = [cos(ai) sin(ai) cos(di) sin(ai) sin(di)]T are unit length feature vectors that map the angles {ai, di} to the unit sphere.
+
+Other angular losses, such as the negative log probability of a Von-Mises Fisher distribution, are
+
+based on the inner product of the feature vectors H(za) · H(zb) rather than the Euclidean distance
+
+||H(za) by ||H(za
+
+H(zb)|| betwepen them. It is ) H(zb)|| = 2(1 H(za
+
+worth noting that these two quantities are directly related ) · H(zb)). Taking za as fixed and zb as the argument, the
+
+Euclidean loss has a cusp at za whereas the Von-Mises Fisher loss is smooth around za. This is
+
+analogous to the difference between L1 and L2 losses, where the cusped L1 loss favors median
+
+behavior while the smooth L2 loss favors average behavior. A third loss similar to the Euclidean loss
+
+would be the Great Circle distance, arccos (H(za) · H(zb)).
+
+Trajectory loss In a further analogy to reinforcement learning, damped backpropation through time necessitates an intermediate loss function that can criticize transient states of the simulator. We compute this by featurizing the per time step coordinates as the product Dijv^ij (Figure 2C) and doing the same contact-weighted averaging as the distance loss.
+
+Template Modelling (TM) Score The TM-score(Zhang & Skolnick, 2005),
+
+X
+i
+
+1
+
++
+
+1 
+Di D0
+
+2
+
+,
+
+is a measure of superposition quality between two protein structures on [0, 1] that was presented as an approximately length-independent alternative to RMSD. The TM-score is the best attainable value of the preceding quantity for all possible superpositions of two structures, where Di = ||x(Model) x(Data)||. This requires iterative optimization, which we implemented with a sign gradient descent with 100 iterations to optimally superimpose the model and target structure. We backpropagate through this unrolled optimization process as well as that of the simulator.
+
+Hydrogen bond loss We determine intra-backbone hydrogen bonds using the electrostatic model
+
+of DSSP (Kabsch & Sander, 1983). First, we place virtual hydrogens at 1 Angstroms along the
+
+negative angle bisector of
+
+aUcihcj-ebopntdor(iant
+
+kcal/mol) j as
+
+for
+
+the Ci 1 Ni each potential
+
+Ci bond angle. Second, we compute a putative energy hydrogen bond from an amide donor at i to a carbonyl
+
+
+
+Uihj-bond(X) =
+
+qN qO DN O
+
++
+
+qH qC DHC
+
++
+
+qH qO DHO
+
++
+
+qN qC DN C
+
+332 
+
+= 0.084
+
+1 DN O
+
++
+
+1 DHC
+
+1 DHO
+
+1 DN C
+
+332
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+where Dab = ||Xi,a Xj,b|| is the Euclidean distance between atom a of residue i and atom b of residue j. We then make hard assignments of hydrogen bonds for the data with
+yidjata = 1 Uihj-bond(X(data)) < 0.5 .
+
+We `predict' the probabilities of hydrogen bonds of the data given the model via logisitic regression
+
+of soft model assignments as   
+
+ 
+
+yimjodel = a b Uihj-bond(X(model)) + 0.5 + c ,
+
+where a, b, c are learned parameters with the softplus parameterizations enforcing a, b > 0 and
+
+(u) = 1/(1 + exp( u) is the sigmoid function. The final hydrogen bond loss is the cross-entropy
+
+between
+
+these
+
+predictions andXthe Lh-bond =
+
+data, yidjata
+
+log
+
+yimjodel
+
++
+
+1
+
+yidjata log 1
+
+yimjodel .
+
+|i j|>2
+
+Secondary Structure Prediction We output standard 8-class predictions of secondary structure and score them with a cross-entropy loss.
+
+B.3 STABILIZING BACKPROPAGATION THROUGH TIME The combination of energy function, simulator, and refinement network can build an atomic level model of protein structure from sequence, and our goal is to optimize (meta-learn) this entire procedure by gradient descent. Before going into specifics of the loss function, however, we will discuss a challenges and solutions for computing gradients of unrolled simulations in the face of chaos.
+
+B.4 CHAOS AND EXPLODING GRADIENTS
+Gradient-based learning of iterative computational procedures such as Recurrent Neural Networks (RNNs) is well known to be subject to the problems of exploding and vanishing gradients(Pascanu et al., 2013). Informally, these occur when the sensitivities of model outputs to inputs become either extremely large or extremely small and the gradient is no longer an informative signal for optimization. We find that backpropagation through unrolled simulations such as those presented is no exception to this rule. Often we observed that a model would productively learn for tens of thousands of iterations, only to suddenly and catastrophically exhibit diverging gradients from which the optimizer could not recover - even when the observed simulation dynamics exhibited no obvious qualitative changes to behavior and the standard solutions of gradient clipping (Pascanu et al., 2013) were in effect. Similar phenomena have been observed previously in the context of meta-learning(Maclaurin et al., 2015). In Figure 8, we furnish a minimal example that illustrates how chaos can lead to irrevocable loss of learning. We see that for even a simple particle-in-a-well, some choices of system parameters (such as too large a time step) can lead to chaotic dynamics which are synonymous with explosive gradients. This example is hardly contrived, and is in fact a simple model of the distance potentials between coordinates in our simulations. Moreover, it is important to note that chaos may not be easy to diagnose: for learning rates  2 [1.7, 1.8] the position of the particle x remains more or less confined in the well while the sensitivities diverge to 10200. It seems unlikely that meta-learning would be able to recover after descending into chaos.
+
+The view per time step Exploding gradients and chaotic dynamics involve the same mechanism: a multiplicative accumulation of sensitivities. In dynamical systems this is frequently phrased as `exponentially diverging sensitivity to initial conditions'. Intuitively, this can be understood by examining how the Jacobian of an entire trajectory decomposes into a product of Jacobians as
+
+@x(T ) @x(0)
+
+=
+
+@x(T ) @x(T 1)
+
+@x(T @x(T
+
+1) 2)
+
+···
+
+@ @
+
+x(1) x(0)
+
+.
+
+(11)
+
+When
+
+the
+
+norms
+
+of
+
+the
+
+per
+
+time-step
+
+Jacobians
+
+@ x(t) @x(t 1)
+
+are
+
+typically
+
+larger
+
+than
+
+1,
+
+the
+
+sensitivity
+
+|i|s@@txhx(e(T0)r)a||tiwonilallegrroewceenxt pwoonreknotinalslytawbiiltihzaTti.onIdoefalRlyN, Nwse(Hweonualdffkeeteapl.t,h2e0s1e6n;oCrmhesnweet lal-l.b,e2h0a1v8ebd).wNhiecxht
+
+we will offer a general-purpose regularizer to approximately enforce this goal for any differentiable
+
+computational iteration with continuous state.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+a 8 7 6 5 4 3 2 1 0 0 2 4 6 8 10 12
+
+b 6 5
+
+Periodic Chaotic
+
+4
+
+3
+
+2
+
+1 1 1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8 1.9 2
+
+10 200
+
+10 0
+
+10 -200
+
+1 1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8 1.9 2
+Step size
+
+Figure 8: Chaos impedes meta-learning for gradient descent in a well. (a) Gradient descent of a
+
+particle in a well with initial conditions x(0) and step size . (b) Orbit diagrams visualize long-term
+
+dynamics
+
+from
+
+iterations
+
+1000
+
+to
+
+2000
+
+of
+
+the
+
+position
+
+x
+
+(top)
+
+and
+
+the
+
+gradient
+
+dx(t) dx(0)
+
+(bottom).
+
+When
+
+the step size  is small, these dynamics converge to a periodic orbit over 2k values where 0  k < 1.
+
+After some critical step size, the dynamics undergo a period-doubling bifurcation(Strogatz, 2018),
+
+become chaotic, and the gradients regularly diverge to huge numbers.
+
+Approximate Lipschitz conditions One condition that guarantees that a deterministic map F : RN ! RN , xt = F (xt 1, ) cannot exhibit exponential sensitivity to initial conditions is the condition of being non-expansive (also known as 1-Lipschitz or Metric). That is, for any two input points xa, xb 2 RN , iterating the map cannot increase the distance between them as |F (xa, ) F (xb, )|  |xa xb|. Repplying the map to the bound immediately implies
+
+|F (t)(x, ) F (t)(x + x, )|  | x|
+
+(12)
+
+for any number of iterations t. Thus, two initially close trajectories iterated through a non-expansive mapping must remain at least that close for arbitrary time.
+
+We approximately enforce non-expansivity by performing an online sensitivity analysis within
+
+simulations. At randomly selected time-steps, the current time step x(t) is rolled back to the preceding state and re-executed with small Gaussian perturbations to the state  N (0, 10 4I)6.
+
+We regularize the sensitivity by adding
+
+LLyapunov
+
+=
+
+ max 0, log
+
+|F (x(t))
+
+F (x(t) + ||
+
+ )|
+
+(13)
+
+to the loss. Interestingly, the stochastic nature of this approximate regularizer is likely a good thing - a truly non-expansive map is quite limited in what it can model. However, being `almost' non-expansive seems to be incredibly helpful for learning.
+
+Damped Backpropagation through Time The approximate Lipschitz conditions (or Lyapunov regularization) encourage but do not guarantee stable backpropagation. When chaotic phasetransitions or otherwise occur we need a fall-back plan to be able to continue learning. At the same time, we would like gradient descent to proceed in the usual manner when simulator dynamics
+6For stochastic processes such as Langevin dynamics that depend on external noise, this must be cached and re-applied.
+
+18
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 4: Damped Backpropagation Through Time
+Input :Initial state x(0), time-stepping function F (x, s, ), external inputs s1, . . . , sT parameters , Loss function L(x1, . . . , xT ), Damping factor 0 << < 1
+Output :Exponentially damped gradient rL Initialize x(0) F (z(0)); for t 2, . . . , T do
+Compute time step x~t F (xt 1, st, ); Decay the gradient xt (1 )?(x~t) + x~t; end Compute loss L(x1, . . . , xT ) ; Compute gradient rL AutoDiff(L, ) ; where ?(·) is the stop gradient function.
+
+are stable. To this end we introduce a damping factor to backpropagation that can adaptively combat exponentially diverging gradients with exponential discounting (Algorithm 4).
+
+Damped backpropagation can be seen as a continuous alternative to the standard approach of
+
+Truncated Backpropagation through Time. Rather than setting the gradient to 0 after some fixed
+
+intervals of time-steps, we decay it on the backwards pass of reverse-mode differentiation by a factor
+
+of . This is mildly evocative of the notion of discounted future rewards in reinforcement learning.
+
+During backpropagation this causes a biased estimate of Jacobians that favors short term sensitivities
+
+(or rewards) as
+
+@
+
+@
+
+x^(t) x(t
+
+k)
+
+ =
+
+@x(t)  @x(t 1)
+
+@x(t @x(t
+
+1)  2) · · ·
+
+@x(t @x(t
+
+k+1) k)
+
+
+
+=
+
+k
+
+@x(t) @x(t k)
+
+.
+
+(14)
+
+B.5 MULTIPLE SEQUENCE ALIGNMENT GENERATION
+To encourage the model to generalize, we developed a strategy of data augmentation based on evolution. Evolutionarily related protein sequences can fold into the same structure though having a high degree of dissimilarity as determined solely from sequence identity. These homologous sequences provide a valuable record of the constraints that drive protein folding and function. Though many of these data are not present directly in the PDB, they can be found in large public sequence databases. Given a query sequence, a set of related sequences can be returned and organized into alignments, where each row represents a separate homologous sequence and each column relates residues with shared function and ancestry. We obtain a separate multiple sequence alignment for each sequence taken from the PDB structure file for the training and test data. Using jackhmmer (Eddy, 2011), we search the Uniprot90 database (Suzek et al., 2014) (release 4/2016) with 5 iterations and a length-normalized bitscore threshold of 0.3. Sequences from the resulting alignment are pruned to remove those with over 50% gaps relative to the query sequence. To remove potential sequence biases in our alignment, such as over-represenation of proteins from commonly sequenced organisms, the alignment was pruned with hhfilter (Remmert et al., 2012) such that all sequences are at least a normalized Hamming distance of 0.8 away from one another.
+
+B.6 PROFILE GENERATION
+Each structure therefore has an associated multiple sequence alignment, and from this, we infer a profile. Profiles summarize the set of evolutionarily related sequences into a single matrix per sequence. First, the identities of each of the amino acids are summed across all N sequences S in the alignment to construct a count matrix C, where the frequency of amino acid j at position l of a length L sequence is defined as
+XN Cl,j = q + I(si,l,j = k)
+i=1
+
+19
+
+Under review as a conference paper at ICLR 2019
+
+where I(Si,l,j = k) is an identity function, k represents each amino acid, and q is a pseudocount, which we set q=10. This pseudocount is added to remove spurious evolutionary signals from small alignments. The count matrix is then normalized per position to obtain the amino acid probability matrix M
+
+Ml,j
+
+=
+
+1 P20
+j=1
+
+Cl,j
+
+Cl,j
+
+We obtain the final profile P via the sigmoid of the log enrichment of amino acid composition relative to the background amino acid frequency vector b of all sequences in Uniprot (Apweiler et al., 2004)
+
+Pl =
+
+log(Ml/b)
+
+where is the sigmoid function 1/(1 + e x). During training and inference, this matrix is concatenated onto the one-hot sequence input.
+
+B.7 EVOLUTIONARY DATA AUGMENTATION To reduce our reliance on alignments and the generation of profiles for inference of new sequences while still leveraging evolutionary sequence data, we expanded our sequence training data by dynamically spiking in diverse, related sequence into the model during training. A random sequence from the alignment was selected with a probability pt proportional to the normalized Hamming distance from the query. Given a set of N sequences in the alignment and a Hamming distance dt, a sequence was chosen from the alignment with the probability
+
+pt
+
+=
+
+e5dt
+
+PN
+i=1
+
+e5di
+
+In this case, more closely related sequences will be chosen more frequently than distantly related sequences. Non-gapped characters from the selected alignment sequence then replace those positions of the query sequence.
+
+C APPENDIX C: RESULTS
+C.1 STRUCTURE GENERATION AND PROCESSING For each sequence from the CATH release 4.2 dataset, 100 structures were generated from both the profile and sequence-only models, while a single structure was generated from the RNN baseline models. The reported TM-scores were calculated using Maxcluster (Siew et al., 2000). A single representative structure was chosen from the ensemble of 100 structures using 3D-Jury (Ginalski et al., 2003). A pairwise distance matrix of TM-scores was calculated for all of the 100 structures in the ensemble. Clusters were determined by agglomerative hierarchical clustering with complete linkage using a TM-score threshold of 0.5 to determine cluster membership.
+
+20
+
+Under review as a conference paper at ICLR 2019
+
+Mean TM-score TM-score
+TM-score (sequence-only)
+
+Generalization levels Class
+Architecture
+Topology
+Homologous
+Training
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0 100 80 60 40 20
+
+0
+
+Model certainty (# clusters)
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0.0 0.2 0.4 0.6 0.8 1.0
+Sequence distance to train (%ID)
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0.0 0.2 0.4 0.6 0.8 1.0
+TM-score (profile)
+
+Figure 9: Predictive performance of structures generated by the sequence-only model. (left) Structures in the test set are hierarchically organized by CATH classification. Groups further up the tree are broader generalization. (center-left) Ensembles of models with increasing certainty tend to have a better average TM-score. (center-right) TM-score of 3D-jury-selected models versus distance from the training data. Withheld (right) Comparing the energy-based model with and without profiles. Profile information greatly improves protein model accuracy as judged by TM-score.
+
+100 hidden units
+1.0
+
+300 hidden units
+1.0
+
+0.8 0.8
+
+TM-score (ours)
+
+TM-score (ours)
+
+0.6 0.6
+
+0.4 0.4
+
+Generalization levels Class
+Architecture
+
+0.2 0.0
+0.0
+
+Topology
+
+1.0
+
+Homologous Training
+
+0.8
+
+0.6
+
+0.2 0.4 0.6
+TM-score (baseline)
+
+0.8
+
+500 hidden units
+
+0.2 0.0 1.0 0.0 1.0 0.8 0.6
+
+0.2 0.4 0.6
+TM-score (baseline)
+
+0.8
+
+700 hidden units
+
+1.0
+
+TM-score (ours)
+
+TM-score (ours)
+
+0.4 0.4
+
+0.2 0.2
+
+0.0 0.0
+
+0.2 0.4 0.6
+TM-score (baseline)
+
+0.8
+
+0.0 1.0 0.0
+
+0.2 0.4 0.6
+TM-score (baseline)
+
+0.8
+
+1.0
+
+Figure 10: RNN baseline across different hyperparmeters. Predictive performance of the twolayer bidirectional LSTM baseline models across a range of hidden unit dimensions compared to the energy model.
+
+21
+
+

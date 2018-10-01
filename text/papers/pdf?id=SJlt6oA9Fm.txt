@@ -1,0 +1,1065 @@
+Under review as a conference paper at ICLR 2019
+SELECTIVE CONVOLUTIONAL UNITS: IMPROVING CNNS VIA CHANNEL SELECTIVITY
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Bottleneck structures with identity (e.g., residual) connection are now emerging popular paradigms for designing deep convolutional neural networks (CNN), for processing large-scale features efficiently. In this paper, we focus on the information-preserving nature of the bottleneck structures and utilize this to enable a convolutional layer to have a new functionality of channel-selectivity, i.e., re-distributing its computations to important channels. In particular, we propose Selective Convolutional Unit (SCU), a widely-applicable architectural unit that improves parameter efficiency of various modern CNNs with bottlenecks. During training, SCU gradually learns the channel-selectivity on-the-fly via the alternative usage of (a) pruning unimportant channels, and (b) rewiring the pruned parameters to important channels. The rewired parameters emphasize the target channel in a way that selectively enlarges the convolutional kernels corresponding to it. Our experimental results demonstrate that the SCU-based models without any postprocessing generally achieve both model compression and accuracy improvement compared to the baselines, consistently for all tested architectures.
+1 INTRODUCTION
+Nowadays, convolutional neural networks (CNNs) have become one of the most effective approaches in various fields of artificial intelligence. With a growing interest of CNNs, there has been a lot of works on designing more advanced CNN architectures (Szegedy et al., 2015; Simonyan & Zisserman, 2014; Ioffe & Szegedy, 2015). In particular, the simple idea of adding identity connection in ResNet (He et al., 2016a) has enabled breakthroughs in this direction, as it allows to train substantially deeper/wider networks than before by alleviating existed optimization difficulties in previous CNNs. Recent CNNs can scale over a thousand of layers (He et al., 2016b) or channels (Huang et al., 2017b) without much overfitting, and most of these "giant" models consider identity connections in various ways (Xie et al., 2017; Huang et al., 2017b; Chen et al., 2017). However, as CNN models grow rapidly, deploying them in the real-world becomes increasingly difficult due to computing resource constraints. This has motivated the recent literature such as network pruning (Han et al., 2015; He et al., 2017; Liu et al., 2017; Neklyudov et al., 2017), weight quantization (Rastegari et al., 2016; Courbariaux & Bengio, 2016; Chen et al., 2018), adaptive networks (Teerapittayanon et al., 2016; Figurnov et al., 2017; Bolukbasi et al., 2017; Huang et al., 2018), and resource-efficient architectures (Huang et al., 2017a; Sandler et al., 2018; Ma et al., 2018).
+For designing a resource-efficient CNN architecture, it is important to process succinct representations of large-scale channels. To this end, the identity connections are useful since they allow to reduce the representation dimension to a large extent while "preserving" information from the previous layer. Such bottleneck architectures are now widely used in modern CNNs such as ResNet (He et al., 2016a) and DenseNet (Huang et al., 2017b) for parameter efficiency, and many state-of-the-art mobile-targeted architectures such as SqueezeNet (Iandola et al., 2016), ShuffleNet (Zhang et al., 2017b; Ma et al., 2018), MoblileNet (Howard et al., 2017; Sandler et al., 2018), and CondenseNet (Huang et al., 2017a) commonly address the importance of designing efficient bottlenecks.
+Contribution. In this paper, we consider various recent bottleneck structures together into a single framework, and propose Selective Convolutional Unit (SCU), a widely-applicable architectural unit for efficient utilization of parameters upon the framework. At a high-level, SCU performs a convolutional operation to transform a given input. The main goal of SCU, however, is rather
+1
+
+Under review as a conference paper at ICLR 2019
+(a) (b)
+Figure 1: (a) An illustration of channel de-allocation and re-allocation procedures. The higher the saturation of the channel color, the higher the ECDS value. (b) The overall structure of SCU, placed inside the generic bottleneck structure.
+to re-distribute their computations only to selected channels of importance, instead of processing the entire input naively. To this end, SCU has two special operations: (a) de-allocate unnecessary input channels (dealloc), and (b) re-allocate the obstructed channels to other channels of importance (realloc) (see Figure 1a). They are performed without damaging the network output (i.e., function-preserving operations), and therefore one can call them safely at any time during training. Consequently, training SCU is a process that increases the efficiency of CNN by iteratively pruning or rewiring its parameters on-the-fly along with learning them. In some sense, it is similar to how hippocampus in human brain learn, where new neurons are generated daily, and rewired into the existing network while maintaining them via neuronal apoptosis or pruning (Sahay et al., 2011a;b).
+We combine several new ideas to tackle technical challenges for such on-demand, efficient trainable SCU. First, we propose expected channel damage score (ECDS), a novel metric of channel importance that is used as the criterion to select channels for dealloc or realloc. Compared to other popular magnitude-based metrics (Li et al., 2016; Liu et al., 2017; Neklyudov et al., 2017), ECDS allows capturing not only low-magnitude channels but also channels of low-contribution under the input distribution. Second, we impose channel-wise spatial shifting bias when a channel is reallocated, providing much diversity in the input distribution. It also has an effect of enlarging the convolutional kernel of SCU. Finally, we place a channel-wise scaling layer inside SCU with sparsity-inducing regularization, which also promotes dealloc (and consequently realloc as well), without further overhead in inference and training.
+We evaluate the effectiveness of SCU by applying it to several modern CNN models including ResNet (He et al., 2016a), DenseNet (Huang et al., 2017b), and ResNeXt (Xie et al., 2017), on various classification datasets. Our experimental results consistently show that SCU improves the efficiency of bottlenecks both in model size and classification accuracy. For example, SCU reduces the error rates of DenseNet-40 model (without any post-processing) by using even less parameters: 6.57%  5.95% and 29.97%  28.64% on CIFAR-10/100 datasets, respectively. We also apply SCU to a mobile-targeted CondenseNet (Huang et al., 2017a) model, and further improve its efficiency: it even outperforms NASNet-C (Zoph et al., 2018), an architecture searched with 500 GPUs for 4 days, while our model is constructed with minimal efforts automatically via SCU.
+There have been significant interests in the literature on discovering which parameters to be pruned during training of neural networks, e.g., see the literature of network sparsity learning (Wen et al., 2016; Lebedev & Lempitsky, 2016; Scardapane et al., 2017; Molchanov et al., 2017; Neklyudov et al., 2017; Louizos et al., 2017; 2018; Dai et al., 2018). On the other hand, the progress is, arguably, slower for how to rewire the pruned parameters of a given model to maximize its utility. Han et al. (2016) proposed Dense-Sparse-Dense (DSD), a multi-step training flow applicable for a wide range of DNNs showing that re-training with re-initializing the pruned parameters can improve the performance of the original network. Dynamic network surgery (Guo et al., 2016), on the other hand, proposed a methodology of splicing the pruned connections so that mis-pruned ones can be recovered, yielding a better compression performance. In this paper, we propose a new way of rewiring for parameter efficiency, i.e., rewiring for channel-selectivity, and a new architectural framework that enables both pruning and rewiring in a single pass of training without any postprocessing or re-training (as like human brain learning). Under our framework, one can easily set a targeted trade-off between model compression and accuracy improvement depending on her purpose, simply by adjusting the calling policy of dealloc and realloc. We believe that our work sheds a new direction on the important problem of training neural networks efficiently.
+2
+
+Under review as a conference paper at ICLR 2019
+
+2 SELECTIVE CONVOLUTIONAL UNITS
+
+In this section, we describe Selective Convolutional Unit (SCU), a generic architectural unit for bottleneck CNN architectures. The overall structure of SCU is described in Section 2.1 and 2.2. In Section 2.3, we introduce a metric deciding channel-selectivity in SCU. We present in Section 2.4 how to handle a network including SCUs in training and inference.
+
+2.1 OVERVIEW OF SCU
+
+Bottleneck structures in modern CNNs. We first consider a residual function defined in ResNet (He et al., 2016a) which has an identity mapping: for a given input random variable X  RI×H×W (H and W are the height and width of each channel, respectively, and I is the number of channels or feature maps) and a non-linear function F : RI×H×W  RI×H×W , the output Y of a residual function is written by Y = X + F(X). This function has been commonly used as a building block for designing recent deep CNN models, in a form that F is modeled by a shallow CNN. However, depending on how F is designed, computing F(X) can be expensive when I is large (as H, W are bounded). For tackling the issue, bottleneck structure is a prominent approach, that is, to model F by P  R, where R maps X into a lower dimensional object of I < I features. Note that this approach, in essence, requires the identity connection, for avoiding information loss from X to Y.
+Namely, the identity connection enables a layer to save redundant computation (or parameters) for
+just "keeping" information from the input. The idea can be generalized by allowing the identity
+connection to aggregate the information differently than by addition, and we formulate this by:
+
+Y = W(X, F(X)) = W(X, (P  R)(X)), where H(X|W(X, 0)) = 0.
+
+(1)
+
+Here, W(X, X ) is a random variable that "merges" two
+
+random variables X and X into one, and H(X|X ) de-
+
+notes the entropy of X conditioned on X . The constraint
+
+H(X|W(X, 0)) = 0 is for forcing X be completely deter-
+
+mined by W(X, 0), thereby W(X, X ) preserves the full
+
+information of X when X = 0. Observe that ResNet structure is a special case of this formulation when W(X, X ) = X + X . Many other recent architectures can also be represented in this formulation, including DenseNet (Huang
+
+(a) ResNet
+
+(b) DenseNet
+
+Figure 2: Memory read-write analogy of bottleneck structures.
+
+et al., 2017b), PyramidNet (Han et al., 2017) and Dual Path Network (Chen et al., 2017). Bottleneck
+
+structures can be effectively visualized with a memory read-write analogy, by regarding X as data
+
+embedded in a large memory. In a situation where one has to deal with some large memory, a natural
+
+approach is to "read" the necessary information from that memory, "process" it, and "write" the pro-
+
+cessed data back there. Bottlenecks can be thought of as applying this read-process-write procedure
+
+to X via R-P-W, respectively. Figure 2 demonstrates how ResNet and DenseNet can be visualized
+
+in this point of view, where the latter uses W(X, X ) = [X, X ] (channel-wise concatenation).
+
+Overall architecture of SCU for the "read"-part. Our intuition is that the information preserv-
+ing, robust characteristics of bottleneck structures brings optimization benefits if some neurons in the bottleneck are dynamically pruned during training, in particular, for its R-part. Hence, we focus on putting SCU into R-parts in this paper, and show that the channel-selectivity of SCU improves
+the parameter efficiency. Nevertheless, our ideas on the SCU design have potentials to apply without
+bottleneck structures, as long as CNN has the information preserving characteristic. In the original ResNet and DenseNet architectures, R-parts are designed using a pointwise convolution with a batch
+normalization layer (BN) (Ioffe & Szegedy, 2015) and a rectified linear unit (ReLU) (Nair & Hinton, 2010), namely, R(X)  (ConvI1×1I  ReLU  BN)(X), where Conv1I×1I denotes a pointwise convolutional layer that maps I features into another I features. Similarly, SCU follows this structure
+except for adding two additional layers: Channel Distributor (CD) and Noise Controller (NC) whose details are presented in Section 2.2. We model a non-linear function SCU : RI×H×W  RI ×H×W as follows (see Figure 1b):
+
+R(X)  SCU(X) := (ConvI1×1I  NC  ReLU  BN  CD)(X).
+
+(2)
+
+With the support of CD and NC, SCU has two special operations which can transform itself to receive a different channel-usage pattern: (a) channel de-allocation (dealloc), which obstructs unnecessary channels from being used in future computations, and (b) channel re-allocation
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+(realloc), which allocates more parameters to important, non-obstructed channels by copying them into the obstructed areas. These operations can be performed at any time during training as we design them so that they do not hurt the original function, i.e., they are "function preserving" operations. Repeating dealloc and realloc alternatively during training translates the original input to what has only a few important channels, potentially duplicated multiple times. Namely, the parameters originally allocated to handle the entire input now operate on its important subset. Here, one should be very careful to design dealloc: de-allocating too many channels during training may harm the overall capacity of a given network, but simultaneously one also wishes to de-allocate them as much as possible to maximize the effect of SCU. To address the challenge, we propose Expected Channel Damage Score (ECDS) that leads to an efficient, safe way to capture unimportant channels as many as possible by measuring how much the output of SCU changes on average (w.r.t. data distribution) after removing each channel. The details of ECDS are in Section 2.3.
+
+2.2 COMPONENTS OF SCU: CD AND NC
+
+Channel Distributor (CD) is the principal mechanism of SCU and is placed at the beginning of the
+unit. The role of CD is to "rebuild" the input, so that unnecessary channels can be discarded, and
+important channels are copied to be emphasized. CD consists of four parameters for each channel: an index pointer i  {1, 2, · · · , I}, a gate variable gi  {0, 1}, and spatial shifting biases bi = (bih, biw)  R2 for each i = 1, · · · , I. Hence, CD can be represented by (, b, g) = (i, bi, gi)iI=1. The output of CD has the same size to X, and each channel CD(X)i is defined as follows:
+
+CD(X)i := gi · shift(Xi , bih, bwi ).
+
+(3)
+
+Here, shift(X, bh, bw) denotes the "shifting" operation along spatial dimensions of X. In other
+
+words, CD(X)i takes (a) the channel which i is pointing, in the spatially shifted form with bias bi, or (b) 0 if the gate gi is closed. For each pixel location (i, j) in X, we define shift(X, bh, bw)i,j as:
+
+HW
+
+shift X, bh, bw i,j :=
+
+Xn,m · max 0, 1 - |i - n + bh| · max (0, 1 - |j - m + bw|) (4)
+
+n=1 m=1
+
+using a bilinear interpolation kernel. This formulation allows bh and bw to be continuous real values, thereby to be learned
+via gradient-based methods with other parameters jointly.
+
+Notice that CD(X) may contain a channel copied multiple times, i.e., multiple i's can have the same value. Since each of those channels is processed with different parameters in the unit, copying a channel has an effect of allocating more Figure 3: The kernel enlarging parameters in the unit to better process the channel. We found effect of spatial shifting. that, however, it is hard to take advantage of the newly allocated parameters by simply copying a channel due to symmetry, i.e., the parameters for each channel usually degenerates. Due to this, we consider spatial shifting in (3), as it can provide much diversity in input distributions (and hence relaxing degeneracy) after CD. This trick is also effective for the convolutional layer in SCU, since it enlarges the convolutional kernel from 1 × 1 for the re-allocated channels, as illustrated in Figure 3.
+
+Noise Controller (NC) is a channel-wise rescaling layer for encouraging channel-wise sparsity, so
+that more channels can be de-allocated during training. For training scaling parameters, we adopt
+Bayesian pruning approach (Molchanov et al., 2017; Neklyudov et al., 2017; Louizos et al., 2017) based on structured Bayesian pruning (SBP) (Neklyudov et al., 2017).1 In general, Bayesian prun-
+ing techniques regard each parameter  as a random variable with a sparsity-inducing prior p(), e.g., the log-uniform prior (Kingma et al., 2015). Updating the posterior distribution p(|D) from data D often leads the model to have much sparsity, in which p(|D) is usually approximated with a
+parametrized model q(). In case of NC, we also regard each scaling parameter as a random variable, so that they become channel-wise multiplicative noises  = (i)Ii=1 on input. Formally, for an input X, NC(X) is defined by X , where   q() (here, denotes the element-wise product). We assume that p() and q() are fully-factorized, so that p(|D)  i qi (i) and therefore NC has a set of parameters  = (i)Ii=1 to be learned. While there are some design choices on qi (i) and p(i), we simply follow SBP, i.e., a log-normal distribution qi (i) = LogN(i|µi, i2) and a
+
+1For completeness, we present for the readers a brief overview of SBP in Appendix B.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+log-uniform
+
+prior
+
+p(i)
+
+=
+
+LogU(i)
+
+
+
+1 i
+
+.
+
+Finally,
+
+we
+
+remark
+
+that
+
+our
+
+framework
+
+is
+
+not
+
+limited
+
+to
+
+SBP (see Section 3.2) and one can also use any other sparsity-inducing regularization methods (Liu
+
+et al., 2017; Wen et al., 2016), which is an interesting future direction to explore.
+
+2.3 METRIC FOR CHANNEL-SELECTIVITY: ECDS
+
+Consider an input random variable X = (Xi  RH×W )Ii=1 of I features. From now on, we denote a SCU by S = (W NC, W CD, W BN, W Conv), where each denotes the parameters in NC, CD, BN, and Conv, respectively. Here, W BN = (i, i)iI=1, and W Conv = (WiConv  RI ×1×1)Ii=1.
+Expected channel damage score (ECDS) aims for measuring E[SCU(X; S) - SCU(X; S-i)]  RI ×H×W , where S-i denotes a SCU identical to S but gi = 0. In other words, it is the expected amount of changes in outputs when Si is "damaged" or "pruned". We define ECDS(S)i by the (Euclidean) norm of the averaged values of E[SCU(X; S)-SCU(X; S-i)] over the spatial dimensions:
+
+1 ECDS(S)i := HW
+
+E[SCU(X; S) - SCU(X; S-i)]:,h,w .
+
+h,w
+
+(5)
+
+Notice that the above definition requires a marginalization over random variable X. One can estimate it via Monte Carlo sampling using training data, but this is computationally too expensive compared to other popular magnitude-based metrics (Li et al., 2016; Liu et al., 2017; Neklyudov et al., 2017). Instead, we utilize the BN layer inside SCU, to infer the current input distribution of each channel at any time of training. This trick enables to approximate ECDS(S)i by a closed formula of Si, avoiding expensive computations of SCU(X; ·), as in what follows.
+Consider a hidden neuron x following BN and ReLU, i.e., y = ReLU(BN(x)), and suppose one wants to estimate E[y] without sampling. To this end, we exploit the fact that BN already "accumulates" its input statistics continuously during training. Under assuming that BN(x)  N (, 2) where  and  are the scaling and shifting parameter in BN, respectively, it is elementary to check:
+
+E[y] = E[ReLU(BN(x))] = ||N
+
+ ||
+
++ N
+
+ || ,
+
+(6)
+
+where N and N denote the p.d.f. and the c.d.f. of the standard normal distribution, respectively. The assumption is quite reasonable during training BN as each mini-batch is exactly normalized before applying the scaling and shifting inside BN. The idea is directly extended to obtain a closed form formula of ECDS(S)i under some assumptions, as stated in the following proposition.
+Proposition 1. Assume BN(CD(X; W CD); W BN)i,h,w  N (i, i2) for all i, h, w.2 Then, it holds
+
+ECDS(S)i = gi ·
+
+|i|N
+
+i |i|
+
++ iN
+
+i |i|
+
+(a)
+
+· E[i] · WiC,o: nv ,
+(b) (c)
+
+for all i.
+
+The proof of the above proposition is given in Appendix D. In essence, there are three main terms in the formula: (a) a term that measures how much the input channel is active, (b) how much the NC amplifies the input, and (c) the total magnitude of weights in the convolutional layer. Therefore, it allows a way to capture not only low-magnitude channels but also channels of low-contribution under the input distribution (see Section 3.2 for comparisons with other metrics).
+
+2.4 TRAINING AND INFERENCE PROCEDURES
+Consider a CNN model p(Y|X, ) employing SCU, where X and Y are random variables, and  denotes the collection of model parameters. For easier explanation, we rewrite  by (V, W): V consists of (, g) in CDs, and W is the remaining ones. Given dataset D = {(xn, yn)}Nn=1 from the distribution of (X, Y), (V, W) is trained via alternating two phases: (a) training W via stochastic gradient descent (SGD), and (b) updating V via dealloc or realloc. The overall training process is mainly driven by (a), and the usage of (b) is optional. In order to incorporate stochasticity incurred from NC, we use stochastic variational inference (Kingma & Welling, 2013), so that SCU
+2In Appendix E, we also provide empirical supports on why the assumption holds in modern CNNs.
+
+5
+
+Under review as a conference paper at ICLR 2019
+can learn its Bayesian parameters in NC jointly with the others via SGD (see Appendix F for more details). On the other hand, in (b), dealloc and realloc are called on demand during training depending on the purpose. For example, one may decide to call dealloc only throughout the training to obtain a highly compressed model, or one could use realloc as well to utilize more model parameters. Once (b) is called, (a) is temporally paused and V are updated. After that, the training is resumed without hurting the original function. In below, we provide more details of (b).
+Consider a SCU S = (W NC, W CD, W BN, W Conv) placed in the model p(Y|X, ). The main role of dealloc and realloc is to update W CD in S that are not trained directly via SGD. They are performed as follows: select slices to operate, say {Sit }tT=1, by thresholding (ECDS(S)i)Ii=1, and update S from the selected channels. More formally, when dealloc is called, Si's where ECDS(S)i < Tl for a fixed threshold Tl are selected, and {git }Tt=1 in W CD are set by 0. If one chooses small Tl, this operation does not hurt the original function. On the other hand, realloc selects channels by collecting Si where ECDS(S)i > Th, for another threshold Th. Each of the selected channels can be re-allocated only if there is a closed channel in S. If there does not exist a enough space, channels with higher ECDS have priority to be selected. A single re-allocation of a channel Si to a closed channel Sj consists of several steps: (i) open Sj by gj  1, (ii) copy WjNC, WjBN  WiNC, WiBN (iii) set WjConv  0, (iv) re-initialize the shifting bias bj, and (v) set j  i. This procedure is function-preserving, due to (iii).
+After training a SCU S, one can safely remove Si's that are closed, to yield a compact unit for inference. The output of CD is then constructed by "selecting" channels rather than by obstructing, thereby the subsequent layers play with smaller dimensions. Considering the memory analogy (see Section 2.1) again, this reading-by-selection is a more intuitive and effective way compared to a standard convolution when the size of memory is large, as SCU does not require to read the entire given memory. For NC, on the other hand, one can still use it for inference, but efficient inference can be performed by replacing each noise i by constant E[i], following the well-known approximation used in many dropout-like techniques (Hinton et al., 2012).
+3 EXPERIMENTAL RESULTS
+In our experiments, we apply SCU to several well-known CNN architectures that uses bottlenecks, and perform experiments on CIFAR-10/100 (Krizhevsky, 2009) and ImageNet (Russakovsky et al., 2015) classification datasets. The more details on our experimental setups, e.g., datasets, training details, and configurations of SCU, are given in Appendix G.
+3.1 IMPROVED CNN MODELS WITH SCU
+Improving existing CNNs with SCU. We consider models using ResNet (He et al., 2016a), DenseNet (Huang et al., 2017b) and ResNeXt (Xie et al., 2017) architectures. In general, every model we used in this paper forms a stack of multiple bottlenecks, where the definition of each bottleneck differs depending on its architecture except that it can be commonly expressed by R-P-W (the details are given in Table 5 in the appendix). We compare the existing models with the corresponding new ones in which the R-part of each block is replaced by SCU. For each SCU-based model, we consider three cases: (a) neither dealloc nor realloc is used during training, (b) only dealloc is used, and (c) both dealloc and realloc are used. We measure the total number of parameters in the R-parts, and error rates.
+Table 1 compares the existing CNN models with the corresponding ones using SCU, on CIFAR10/100. The results consistently demonstrate that SCU improves the original models, showing their effectiveness in different ways. When only dealloc is used, the model tends to be trained with minimizing their parameter to use. Using realloc, SCU now can utilize the de-allocated parameters to improve their accuracy aggressively. Note that SCU can improve the accuracy of the original model even neither dealloc nor realloc is used. This gain is from the regularization effect of stochastic NC, acting a dropout-like layer. We also emphasize that one can set a targeted trade-off between compression of SCU and accuracy improvement depending on her purpose, simply by adjusting the calling policy of dealloc and realloc. For example, in case of DenseNet-100 model on CIFAR-10, one can easily trade-off between reductions in (compression, error) = (-51.4%, -1.78%) and (-18.2%, -8.24%). In overall, SCU-based models achieve both model compression and accuracy improvement under all tested architectures. Table 2 shows the
+6
+
+Under review as a conference paper at ICLR 2019
+
+Table 1: Comparison of performances on CIFAR-10/100 datasets in terms of their total parameter usage in R-parts of the models, and their classification error rates. Here, "S" denotes whether SCU is used, and "D", "R" denote the use of dealloc and realloc, respectively. We indicate k by the growth rate of DenseNet. All the values in the table are taken from averaging over 5 trials.
+
+CIFAR-10
+
+CIFAR-100
+
+Model
+
+S D R R-Params
+
+Error (%)
+
+R-Params
+
+Error (%)
+
+DenseNet-40 (bottleneck, k = 12)
+
+0.11M 0.12M (+4.00%) 0.10M (-12.6%) 0.11M (-4.13%)
+
+6.57 6.30 (-4.11%) 6.32 (-3.81%) 5.95 (-9.44%)
+
+0.11M 0.12M (+4.00%) 0.11M (-2.84%) 0.11M (-0.95%)
+
+29.97 29.25 (-2.40%) 29.31 (-2.20%) 28.64 (-4.44%)
+
+DenseNet-100 (bottleneck, k = 12)
+
+0.73M 0.76M (+4.11%) 0.36M (-51.4%) 0.60M (-18.2%)
+
+4.49 4.23 (-5.79%) 4.41 (-1.78%) 4.12 (-8.24%)
+
+0.73M 0.76M (+4.11%) 0.55M (-24.9%) 0.68M (-7.63%)
+
+22.71 22.23 (-2.11%) 22.16 (-2.42%) 21.34 (-6.03%)
+
+ResNet-164 (bottleneck)
+
+0.39M 0.41M (+5.13%) 0.20M (-48.0%) 0.32M (-19.3%)
+
+4.23 4.20 (-0.71%) 4.10 (-3.07%) 3.97 (-6.15%)
+
+0.39M 0.41M (+5.13%) 0.29M (-24.8%) 0.35M (-10.65%)
+
+21.28 20.94 (-1.60%) 20.94 (-1.60%) 20.49 (-3.71%)
+
+ResNeXt-29 (4 × 32d)
+
+1.72M 1.73M (+0.05%) 1.09M (-33.8%) 1.42M (-17.2%)
+
+4.05 3.92 (-3.21%) 3.96 (-2.22%) 3.74 (-7.65%)
+
+1.72M 1.73M (+0.05%) 1.45M (-15.7%) 1.52M (-11.72%)
+
+19.82 19.39 (-2.17%) 19.56 (-1.31%) 19.17 (-3.28%)
+
+Table 2: Comparison of model performances on Table 3: Comparison of performance on CIFAR-
+
+ImageNet classification dataset. Here, we mea- 10 between different CNN models including
+
+sure the single-crop validation error rates. "S" ours: CondenseNet-SCU-182. Models named "X-
+
+denotes whether the model uses SCU or not, Pruned" are the results by Liu et al. (2017).
+
+and "D", "R" denote the use of dealloc and
+
+realloc, respectively.
+
+Model
+
+Params FLOPs Error
+
+Model
+
+S D R R-Params Error (%)
+
+ResNet-50 (bottleneck)
+
+3.50M 3.52M 2.22M 3.04M
+
+23.19 23.22 23.19 22.82
+
+DenseNet-121 (k = 32)
+
+1.00M 1.01M 0.79M 0.97M
+
+23.63 23.62 23.62 23.24
+
+ResNet-1001 WRN-28-10 ResNeXt-29 DenseNet-190 NASNet-C VGGNet-Pruned ResNet-164-Pruned DenseNet-40-Pruned
+CondenseNet-182 CondenseNet-SCU-182
+
+16.1M 36.5M 68.1M 25.6M
+3.1M 2.30M 1.10M 0.35M
+4.20M 2.59M
+
+2,357M 5,248M 10,704M 9,388M
+391M 275M 381M
+513M 286M
+
+4.62% 4.17% 3.58% 3.46% 3.73% 6.20% 5.27% 5.19%
+3.76% 3.63%
+
+results on ImageNet, which are consistent to those on CIFAR-10/100. Notice that reducing parameters and error simultaneously is much more non-trivial in the case of ImageNet, e.g., reducing error 23.6%  23.0% requires to add 51 more layers to ResNet-101 (i.e., ResNet-152), as reported in the official repository of ResNet (He et al., 2016c).
+Designing efficient CNNs with SCU. We also demonstrate that SCU can be used to design a totally new efficient architecture. Recall that, in this paper, SCU focus on the R-part of bottlenecks. The other parts, P or W, are other orthogonal design choices. To improve the efficiency of the parts, we adopt some components from CondenseNet (Huang et al., 2017a), which is one of the state-ofthe-art architectures in terms of computational efficiency, designed for mobile devices. Although we do not adopt their main component, i.e., learned group convolution (LGC) as it also targets for the R-part as like SCU, we can still utilize other components of CondenseNet: increasing growth rate (IGR) (doubles the growth rate of DenseNet for every N blocks starting from 8) and the use of group convolution in the P-part. Namely, we construct a new model, coined CondenseNet-SCU by adopting IGR and GC upon a DenseNet-182 model with SCU. We replace each 3 × 3 convolution in a P-part by a group convolution of 4 groups. We train this model using dealloc only, to maximize the computational efficiency. In Table 3, we compare our model with state-of-the-art level CNNs, including ResNet-1001 (He et al., 2016b), WRN-28-10 (Zagoruyko & Komodakis, 2016), NASNet-C (Zoph et al., 2018), and the original CondenseNet-182. As one can observe, our model shows better efficiency compared to the corresponding CondenseNet, suggesting the effectiveness of SCU over LGC. Somewhat interestingly, ours even outperforms NASNet-C that is an architecture searched over thousands of candidates, in both model compression and accuracy improvement.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Error rates (%)
+
+6.6 6.4
+
+12%
+
+M1 6.6 M2
+
+6.5
+
+9%
+
+6.2
+
+6.0 6%
+
+6.4
+
+5.8 3%
+
+6.3
+
+Error rates (%) # de-allocated
+
+400
+
+300
+
+200
+
+100
+
+5.6
+D +R +R +S
+
+0% 0
+
+6.2
+0.03 0.06 0.09
+ECDS
+
+M1 M2 with ECDS
+
+M3 M4 M5 without ECDS
+
+0
+
+(a) (b)
+
+(c)
+
+Figure 4: Ablation study on SCU. The model configurations for (b, c) are presented in Table 4. (a) Comparison of error rates between SCU (green) and the ablation on shifting (red). (b) Histograms on ECDS for all the channels of SCUs, using neither dealloc nor realloc. (c) Comparisons of the number of de-allocated channels and error rates. Here, all the models are trained with dealloc.
+
+3.2 ABLATION STUDY
+
+We also perform numerous ablation studies on the proposed SCU, investigating the effect of the key components: CD, NC, and ECDS. For evaluation, we use the DenseNet-SCU-40 model (DenseNet40 using SCU) trained for CIFAR-10. We also follow the training details described in Appendix G.
+
+Spatial shifting and re-allocation. We propose spatial shifting as a trick in realloc procedure to provide diversity in input distributions. To evaluate its effect, we compare three DenseNet-SCU-40 models with different configurations of SCU: (D) only dealloc during training, (+R) realloc together but without spatial shifting, and (+R+S) further with the shifting. Figure 4a shows that +R does not improve the model performance much compared to D, despite +R+S outperforms both of them. This suggests that copying a channel naively is not enough to fully utilize the rewired parameters, and spatial shifting is an effective way to overcome the issue.
+
+Sparsity-inducing effect of NC. We place NC in SCU to encourage Table 4: Configurations.
+
+more sparse channels. To verify such an effect, we consider DenseNetSCU-40 model (say M1) and its variant removing NC from SCU (say M2). We first train M1 and M2 calling neither dealloc nor realloc, and compare them how the ECDS of each channel is distributed. Figure 4b shows that M1 tends to have ECDS closer to zero, i.e., more channels will be de-allocated than M2. Next, we train these models using dealloc, to confirm that NC indeed leads to more de-
+
+Model
+M1 M2
+M3 M4 M5
+
+Metric
+ECDS ECDS
+SNR < 1 SNR < 2.3 2 < 0.25
+
+NC
+
+allocation. The left panel of Figure 4c shows that the number of de-allocated channels of M1 is
+
+relatively larger than that of M2, which is the desired effect of NC. Note that M1 also outperforms
+
+M2 on error rates, which is an additional advantage of NC from its stochastic regularization effect.
+
+Effectiveness of ECDS. Nevertheless, remark that M2 in Figure 4c already de-allocates many chan-
+nels, which suggests that SBP (used in NC) is not crucial for efficient de-allocation. Rather, the
+efficiency mainly comes from ECDS. To prove this claim, we evaluate three variants of M1 which use different de-allocation policies than ECDS < Tl: (a) SNR < 1 (thresholding the signal-to-noise ratio of NC in each channel by 1, proposed by the original SBP; M3), (b) SNR < 2.3 (M4) and (c) 2 < 0.25 (thresholding WiConv 2; M5). We train them using only dealloc, and compare the performances with the proposed model (M1). The right panel of Figure 4c shows the results of the
+three variants. First, we found that the M3 could not de-allocate any channel in our setting (this
+is because we prune a network on-the-fly during training, while the original SBP only did it after
+training). When we de-allocate competitive numbers of channels against M1 by tuning thresholds
+of others (M4 and M5), the error rates are much worse than that of M1. These observations confirm
+that ECDS is a more effective de-allocation policy than other magnitude-based metrics.
+
+4 CONCLUSION
+We demonstrate that CNNs of large-scale features can be trained effectively via channel-selectivity under bottleneck architectures. We expect that the proposed ideas on channel-selectivity would be applicable other than the bottlenecks, with a potential on other research, e.g., interpretability (Selvaraju et al., 2017), robustness (Goodfellow et al., 2014), and memorization (Zhang et al., 2017a).
+
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Tolga Bolukbasi, Joseph Wang, Ofer Dekel, and Venkatesh Saligrama. Adaptive neural networks for efficient inference. In International Conference on Machine Learning (ICML), pp. 527­536, 2017.
+Changan Chen, Frederick Tung, Naveen Vedula, and Greg Mori. Constraint-aware deep neural network compression. In Proceedings of the European Conference on Computer Vision (ECCV), pp. 400­415, 2018.
+Yunpeng Chen, Jianan Li, Huaxin Xiao, Xiaojie Jin, Shuicheng Yan, and Jiashi Feng. Dual path networks. In Advances in Neural Information Processing Systems (NIPS), pp. 4470­4478, 2017.
+Matthieu Courbariaux and Yoshua Bengio. Binarynet: Training deep neural networks with weights and activations constrained to +1 or -1. CoRR, abs/1602.02830, 2016.
+Bin Dai, Chen Zhu, Baining Guo, and David Wipf. Compressing neural networks using the variational information bottleneck. In International Conference on Machine Learning (ICML), pp. 1135­1144, 2018.
+Michael Figurnov, Maxwell D Collins, Yukun Zhu, Li Zhang, Jonathan Huang, Dmitry Vetrov, and Ruslan Salakhutdinov. Spatially adaptive computation time for residual networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 1039­1048, 2017.
+I. J. Goodfellow, J. Shlens, and C. Szegedy. Explaining and Harnessing Adversarial Examples. ArXiv e-prints, December 2014.
+Yiwen Guo, Anbang Yao, and Yurong Chen. Dynamic network surgery for efficient dnns. In Advances in Neural Information Processing Systems (NIPS), pp. 1379­1387, 2016.
+Dongyoon Han, Jiwhan Kim, and Junmo Kim. Deep pyramidal residual networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 6307­6315. IEEE Computer Society, 2017.
+Song Han, Huizi Mao, and William J. Dally. Deep compression: Compressing deep neural network with pruning, trained quantization and huffman coding. CoRR, abs/1510.00149, 2015.
+Song Han, Jeff Pool, Sharan Narang, Huizi Mao, Shijian Tang, Erich Elsen, Bryan Catanzaro, John Tran, and William J. Dally. DSD: regularizing deep neural networks with dense-sparse-dense training flow. CoRR, abs/1607.04381, 2016.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 770­778. IEEE Computer Society, 2016a.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Identity mappings in deep residual networks. In European Conference on Computer Vision (ECCV), volume 9908 of Lecture Notes in Computer Science, pp. 630­645. Springer, 2016b.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual networks. https://github. com/KaimingHe/deep-residual-networks, 2016c.
+Yihui He, Xiangyu Zhang, and Jian Sun. Channel pruning for accelerating very deep neural networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 1389­1397, 2017.
+Geoffrey E. Hinton, Nitish Srivastava, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Improving neural networks by preventing co-adaptation of feature detectors. CoRR, abs/1207.0580, 2012.
+Andrew G. Howard, Menglong Zhu, Bo Chen, Dmitry Kalenichenko, Weijun Wang, Tobias Weyand, Marco Andreetto, and Hartwig Adam. Mobilenets: Efficient convolutional neural networks for mobile vision applications. CoRR, abs/1704.04861, 2017.
+Gao Huang, Shichen Liu, Laurens van der Maaten, and Kilian Q. Weinberger. Condensenet: An efficient densenet using learned group convolutions. CoRR, abs/1711.09224, 2017a.
+Gao Huang, Zhuang Liu, Laurens van der Maaten, and Kilian Q. Weinberger. Densely connected convolutional networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 2261­2269. IEEE Computer Society, 2017b.
+Gao Huang, Danlu Chen, Tianhong Li, Felix Wu, Laurens van der Maaten, and Kilian Weinberger. Multiscale dense networks for resource efficient image classification. In International Conference on Learning Representations (ICLR), 2018. URL https://openreview.net/forum?id=Hk2aImxAb.
+9
+
+Under review as a conference paper at ICLR 2019
+Forrest N. Iandola, Matthew W. Moskewicz, Khalid Ashraf, Song Han, William J. Dally, and Kurt Keutzer. Squeezenet: Alexnet-level accuracy with 50x fewer parameters and <1MB model size. CoRR, abs/1602.07360, 2016.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In International Conference on Machine Learning (ICML), volume 37 of JMLR Workshop and Conference Proceedings, pp. 448­456. JMLR, 2015.
+Diederik P. Kingma and Max Welling. Auto-encoding variational bayes. CoRR, abs/1312.6114, 2013.
+Diederik P. Kingma, Tim Salimans, and Max Welling. Variational dropout and the local reparameterization trick. In Advances in Neural Information Processing Systems (NIPS), pp. 2575­2583, 2015.
+Alex Krizhevsky. Learning multiple layers of features from tiny images. Technical report, Department of Computer Science, University of Toronto, 2009.
+Vadim Lebedev and Victor Lempitsky. Fast convnets using group-wise brain damage. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 2554­2564. IEEE, 2016.
+Hao Li, Asim Kadav, Igor Durdanovic, Hanan Samet, and Hans Peter Graf. Pruning filters for efficient convnets. CoRR, abs/1608.08710, 2016.
+Min Lin, Qiang Chen, and Shuicheng Yan. Network in network. CoRR, abs/1312.4400, 2013.
+Zhuang Liu, Jianguo Li, Zhiqiang Shen, Gao Huang, Shoumeng Yan, and Changshui Zhang. Learning efficient convolutional networks through network slimming. In IEEE International Conference on Computer Vision (ICCV), pp. 2755­2763. IEEE, 2017.
+Ilya Loshchilov and Frank Hutter. SGDR: stochastic gradient descent with restarts. CoRR, abs/1608.03983, 2016.
+Christos Louizos, Karen Ullrich, and Max Welling. Bayesian compression for deep learning. In Advances in Neural Information Processing Systems (NIPS), pp. 3290­3300, 2017.
+Christos Louizos, Max Welling, and Diederik P. Kingma. Learning sparse neural networks through L0 regularization. In International Conference on Learning Representations (ICLR), 2018. URL https: //openreview.net/forum?id=H1Y8hhg0b.
+Ningning Ma, Xiangyu Zhang, Hai-Tao Zheng, and Jian Sun. Shufflenet v2: Practical guidelines for efficient cnn architecture design. In The European Conference on Computer Vision (ECCV), September 2018.
+Dmitry Molchanov, Arsenii Ashukha, and Dmitry Vetrov. Variational dropout sparsifies deep neural networks. In International Conference on Machine Learning (ICML), pp. 2498­2507, 2017.
+Vinod Nair and Geoffrey E. Hinton. Rectified linear units improve restricted boltzmann machines. In International Conference on Machine Learning (ICML), pp. 807­814. Omnipress, 2010.
+Kirill Neklyudov, Dmitry Molchanov, Arsenii Ashukha, and Dmitry P. Vetrov. Structured bayesian pruning via log-normal multiplicative noise. In Advances in Neural Information Processing Systems (NIPS), pp. 6778­6787, 2017.
+Mohammad Rastegari, Vicente Ordonez, Joseph Redmon, and Ali Farhadi. XNOR-Net: Imagenet classification using binary convolutional neural networks. In European Conference on Computer Vision (ECCV), pp. 525­ 542. Springer, 2016.
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, Alexander C. Berg, and Li Fei-Fei. ImageNet Large Scale Visual Recognition Challenge. International Journal of Computer Vision (IJCV), 115(3):211­252, 2015. doi: 10.1007/s11263-015-0816-y.
+Amar Sahay, Kimberly N Scobie, Alexis S Hill, Colin M O'carroll, Mazen A Kheirbek, Nesha S Burghardt, Andre´ A Fenton, Alex Dranovsky, and Rene´ Hen. Increasing adult hippocampal neurogenesis is sufficient to improve pattern separation. Nature, 472(7344):466, 2011a.
+Amar Sahay, Donald A Wilson, and Rene´ Hen. Pattern separation: a common function for new neurons in hippocampus and olfactory bulb. Neuron, 70(4):582­588, 2011b.
+Mark Sandler, Andrew G. Howard, Menglong Zhu, Andrey Zhmoginov, and Liang-Chieh Chen. Inverted residuals and linear bottlenecks: Mobile networks for classification, detection and segmentation. CoRR, abs/1801.04381, 2018.
+10
+
+Under review as a conference paper at ICLR 2019
+Simone Scardapane, Danilo Comminiello, Amir Hussain, and Aurelio Uncini. Group sparse regularization for deep neural networks. Neurocomputing, 241:81­89, 2017.
+Ramprasaath R Selvaraju, Michael Cogswell, Abhishek Das, Ramakrishna Vedantam, Devi Parikh, Dhruv Batra, et al. Grad-cam: Visual explanations from deep networks via gradient-based localization. In IEEE International Conference on Computer Vision (ICCV), pp. 618­626, 2017.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. CoRR, abs/1409.1556, 2014. URL http://arxiv.org/abs/1409.1556.
+Casper Kaae Sønderby, Tapani Raiko, Lars Maaløe, Søren Kaae Sønderby, and Ole Winther. Ladder variational autoencoders. In Advances in Neural Information Processing Systems (NIPS), pp. 3738­3746, 2016.
+Rupesh Kumar Srivastava, Klaus Greff, and Ju¨rgen Schmidhuber. Training very deep networks. In Advances in Neural Information Processing Systems (NIPS), pp. 2377­2385, 2015.
+Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet, Scott E. Reed, Dragomir Anguelov, Dumitru Erhan, Vincent Vanhoucke, and Andrew Rabinovich. Going deeper with convolutions. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 1­9. IEEE Computer Society, 2015.
+Surat Teerapittayanon, Bradley McDanel, and HT Kung. Branchynet: Fast inference via early exiting from deep neural networks. In International Conference on Pattern Recognition (ICPR), pp. 2464­2469. IEEE, 2016.
+Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Learning structured sparsity in deep neural networks. In Advances in Neural Information Processing Systems (NIPS), pp. 2074­2082, 2016.
+Saining Xie, Ross B. Girshick, Piotr Dolla´r, Zhuowen Tu, and Kaiming He. Aggregated residual transformations for deep neural networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 5987­5995. IEEE Computer Society, 2017.
+Sergey Zagoruyko and Nikos Komodakis. Wide residual networks. In Proceedings of the British Machine Vision Conference (BMVC). BMVA Press, 2016.
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding deep learning requires rethinking generalization. In International Conference on Learning Representations (ICLR), 2017a.
+Xiangyu Zhang, Xinyu Zhou, Mengxiao Lin, and Jian Sun. Shufflenet: An extremely efficient convolutional neural network for mobile devices. CoRR, abs/1707.01083, 2017b.
+Barret Zoph, Vijay Vasudevan, Jonathon Shlens, and Quoc V. Le. Learning transferable architectures for scalable image recognition. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2018.
+11
+
+Under review as a conference paper at ICLR 2019
+
+A STOCHASTIC VARIATIONAL INFERENCE FOR BAYESIAN MODELS
+
+Consider a probabilistic model p(Y|X, ) between two random variables X and Y, and suppose one wants to infer  from a dataset D = {(xn, yn)}Nn=1 consisting N i.i.d. samples from the distribution of (X, Y). In Bayesian inference,  is regarded as a random variable, under assuming some prior knowledge in terms of a prior distribution p(). The dataset D is then used to update the posterior belief on , namely p(|D) = p(D|)p()/p(D) from the Bayes rule. In many cases, however, computing p(|D) through Bayes rule is intractable since it requires to compute intractable integrals. To address the issue, variational inference approximates p(|D) by another parametric distribution q(), and tries to minimize the KL-divergence DKL(q() p(|D)) between q() and p(|D). Instead of directly minimizing it, one typically maximizes the variational lower bound L(), due
+to the following:
+
+N
+DKL(q() p(|D)) = -L() + log p(yn|xn),
+n=1 N
+where L() = Eq [log p(yn|xn, )] - DKL(q() p()).
+n=1
+
+(7) (8)
+
+In case of complex models, however, expectations in (8) are still intractable. Kingma & Welling
+(2013) proposed an unbiased minibatch-based Monte Carlo estimator for them, which can be used when q() is representable by  = f (, ) with a non-parametric noise   p(). For a minibatch {(xik , yik )}kM=1 of size M , one can obtain
+
+N
+LD() := Eq [log p(yn|xn, )]
+n=1
+
+N M
+
+M
+
+log p(yik |xik , f (, ik )) =: LSDGVB()
+
+k=1
+
+L() LSGVB() = LDSGVB() - DKL(q() p()).
+
+(9) (10)
+
+Now we can solve optimize L() by stochastic gradient ascent methods, if f is differentiable. For a model having non-Bayesian parameters, say W, we can still apply the above approach by maximizing
+
+N
+L(, W) = Eq [log p(yn|xn, , W)] - DKL(q() p()),
+n=1
+
+(11)
+
+where  and W can be jointly optimized under LSGVB(, W) L(, W).
+
+B STRUCTURED BAYESIAN PRUNING
+
+Structured Bayesian pruning (SBP) (Neklyudov et al., 2017) is a good example to show how stochas-
+tic variational inference can be incorporated into deep neural networks. The SBP framework assumes X to be an object of I features, that is, X = (Xi)iI=1. For example, X  RI×H×W can be a convolutional input consisting I channels, of the form X = (Xi  RW ×H )iI=1 where W and H denote the width and the height of each channel, respectively. It considers a dropout-like layer with a noise vector  = (i)iI=1  pnoise(), which outputs X  of the same size as X.3 Here,  is treated as a random vector, and the posterior p(|D) is approximated by a fully-factorized truncated
+log-normal distribution q():
+
+II
+q() = q(i|µi, i) = LogN[a,b](i|µi, i2)
+i=1 i=1
+LogN[a,b](i|µi, i2)  LogN(i|µi, i2) · 1[a,b](log i),
+
+(12) (13)
+
+where 1[a,b] denotes the indicator function for the inveral [a, b].
+
+3 denotes the element-wise product.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Meanwhile, the prior p() is often chosen by a fully-factorized log-uniform distribution, e.g., Sparse
+
+Variational Dropout (Molchanov et al., 2017), and SBP use the truncated version:
+
+II
+
+p() = p(i) = LogU[a,b](i).
+
+(14)
+
+i=1 i=1
+
+The reason why they use truncations for q() and p() is to prevent DKL(q() p()) to be improper. Previous works (Kingma et al., 2015; Molchanov et al., 2017) ignores such issue by
+
+implicitly regarding them as truncated distributions on a broad interval, but SBP treats this issue
+
+explicitly.
+
+Note that, each i  q(i) = LogN(i|µi, i2) in the noise vector  can be re-parametrized with a non-parametric uniform noise i  U(|0, 1) by:
+
+i = f (µi, i, i) = exp µi + i-1 ((i) + i((i) - (i)))
+
+(15)
+
+where i
+
+=
+
+a-µi i
+
+,
+
+i
+
+=
+
+b-µi i
+
+,
+
+and  denotes the cumulative distribution function of the standard
+
+normal distribution. Now one can optimize  = (µ, ) jointly with the weights W of a given neural
+
+network via stochastic variational inference described in Section A. Unlike (Molchanov et al., 2017),
+
+SBP regards W as a non-Bayesian parameter, and the final loss LSBP to optimize becomes
+
+NM
+
+LSBP(, W) = - M
+
+log p(yik |xik , f (, ik ), W) +  · DKL(q() p()).
+
+k=1
+
+(16)
+
+Here, the KL-divergence term is scaled by  to compensate the trade-off between sparsity and
+
+accuracy. In practice, SBP starts from a pre-trained model, and re-trains it using the above loss. Due
+
+to the sparsity-inducing behavior of log-uniform prior,  is forced to become more noisy troughout
+
+the re-training. Neurons with  of signal-to-noise ratio (SNR) below 1 are selected, and removed
+
+after the re-training:
+
+SNR(i)
+
+=
+
+Ei Vi
+
+=
+
+((i - i) - (i - i))/ (i) - (i)
+
+.
+
+exp(i2)((2i - i) - (2i - i)) - ((i - i) - (i - i))2
+
+(17)
+
+C BAYESIAN PRUNING AND BOTTLENECK STRUCTURES
+
+SCU requires "training-time removal" of input channels for the channel de-allocation and re-
+
+allocation to work. But usually, this process should be done carefully since it can make the op-
+
+timization much difficult and put the network into a bad local minima. In particular, it occurs if we
+
+select channels to remove too aggressively. It is known that this issue becomes more pronounced in
+
+Bayesian neural networks (Sønderby et al., 2016; Molchanov et al., 2017; Neklyudov et al., 2017;
+
+Louizos et al., 2017), such as SBP we use in this paper. Recall the variational lower bound ob-
+
+jective in (11), for Bayesian parameters  and non-Bayesian W. If the gradient of the first term
+
+N n=1
+
+Eq [log
+
+p(yn|xn,
+
+,
+
+W)]
+
+on
+
+the
+
+right-hand
+
+side
+
+does
+
+not
+
+contribute
+
+much
+
+on
+
+L(,
+
+W),
+
+then  will be optimized mostly by -DKL(q() p()), that is, to follow the prior p(). Unfor-
+
+tunately, in practice, we usually observe this phenomena at the early stage of training, when W are
+
+randomly initialized. In that case then, q() will become p() too fast because of the "uncertain" W, thereby many channels will be pruned forever, in SBP for example.
+
+This problem is usually dealt with in one of two ways: (a) using a pre-trained network as a starting point of W (Molchanov et al., 2017; Neklyudov et al., 2017), and (b) a "warm-up" strategy, where the KL-divergence term is rescaled by  that increases linearly from 0 to 1 during training (Sønderby et al., 2016; Louizos et al., 2017). In this paper, however, neither methods are used, but instead we have found that the problem can be much eased in bottleneck structures. It is because bottlenecks can eliminate a possible cause of the optimization difficulty from removing channels: optimization difficulty from losing information as an input passes through a deep network. The definition of bottleneck naturally implies that the information of an input will be fully preserved even in the case when all the parameters in a layer are pruned. This may not be true in non-bottlenecks, for example, in VGGNet (Simonyan & Zisserman, 2014), one can see that the information of an input will be completely lost if any of the layers removes its entire channels. This suggests us that bottlenecks can be advantageous not only for scaling up the network architectures, but also for reducing the size of them.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+D PROOF OF PROPOSITION 1
+
+One can assume that Si is open, i.e. gi = 1, otherwise ECDS(S)i = 0 by definition since S = S-i.
+
+Say Y := BN(CD(X; W CD); W BN), and let ConvI1×1I,(i) : R1×H×W  RI ×H×W be the i-th slice
+
+of Conv1I×1I , which can be defined by the convolution with WiConv so that Conv1I×1I (X; W Conv) =
+
+I i=1
+
+Conv1I×1I,(i)(Xi,:,:; WiConv).
+
+Then,
+
+we
+
+have:
+
+SCU(X; S) - SCU(X; S-i) =: Si(X) = ConvI1×1I,(i)((NC  ReLU  BN  CD)(X)i)
+
+= Conv1I×1I,(i)(NC(ReLU(Y))i)
+
+= Conv1I×1I,(i)(max(Y, 0)i )
+
+= Conv1I×1I,(i)(max(Yi,:,:, 0) · i) =: ConvI1×1I,(i)(Zi). (18)
+
+Now, check that ECDS(Si) becomes:
+
+1 ECDS(Si) = HW
+
+1 E[Si(X)]:,h,w = HW
+
+E[ConvI1×1I,(i)(Zi)]:,h,w
+
+h,w h,w
+
+By the assumption that Yi,h,w  N (i, i2) for all h, w, we get: Zi,h,w = max(Yi,h,w, 0) · i, and
+
+E[Zi,h,w] = E[max(Yi,h,w, 0) · i] = E[max(Yi,h,w, 0)] · E[i]
+
+(19) (20)
+
+=
+
+|i|N
+
+i |i|
+
++ iN
+
+i |i|
+
+· E[i] =: f (Si)
+
+h, w
+
+(21)
+
+where N and N denote the probability distribution function and the cumulative distribution func-
+
+tion of the standard normal distribution.
+
+Therefore, the desired formula for ECDS(Si) can be obtained by using the linearity of expectation:
+
+1 ECDS(Si) = HW
+
+E[ConvI1×1I,(i)(Zi)]:,h,w
+
+h,w
+
+1 =
+HW
+
+  1/2 E 
+
+1/2 I WiC,oj,nxv,y · Zi,h+x,w+y
+
+h,w x=- 1/2 y=- 1/2
+
+j=1
+
+1 =
+HW
+
+(WiC,ojnv · E[Zi,h,w])jI=1
+
+h,w
+
+= f (Si) ·
+
+1 HW
+
+(WiC,ojnv)Ij=1
+
+h,w
+
+= f (Si) · WiConv = gi · f (Si) · WiConv . This completes the proof of Proposition 1.
+
+(22)
+
+E EMPIRICAL SUPPORTS ON THE ASSUMPTION OF PROPOSITION 1
+To validate whether the assumption BN(CD(X; W CD); W BN)i,h,w  N (i, i2) holds in modern CNNs, we first observe that, once we ignore the effects from spatial shifting,4 a necessary condition of the assumption is that (Xi,:,:) are identically distributed normal for a given channel Xi. This is because BN and CD do not change the "shape" of pixel-wise distributions of Xi. From this observation, we conduct a set of experiments focusing on a randomly chosen hidden layer in a DenseNet-40 model. We analyze the empirical distribution of the hidden activation incoming to the layer calculated from CIFAR-10 test dataset. Since the data consists of 10,000 samples, we get an hidden activation Xtest  R10000×C×32×32,5 where C denotes the number of channels of the input.
+4However, we emphasize that one can safely ignore this effect, since it can be successfully bypassed in practice by padding the input with boundary pixels.
+5Here, we get a tensor of 32 × 32 channels, since we choose a layer from the first block of the model.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+-2 -1
+
+0
+
+1
+
+2
+
+(a) Non-boundary pixels
+
+1.2 4
+1.0
+3 0.8
+
+2 0.6
+
+-2 -1
+
+0
+
+1
+
+2
+
+(b) Boundary pixels
+
+0.4 1
+
+0-10 -8 -6 -4 -2
+
+0
+
+0.2 2 -1.5
+
+-1.0
+
+-0.5
+
+0
+
+(c) Initialized randomly (d) Trained to converge
+
+Figure 5: Pixel-wise input distributions of a layer in DenseNet-40 model. (a, b) Empirical distributions of three randomly chosen pixels in a fixed channel of input, which are inferred from CIFAR-10 test dataset. (c, d) Scatter plots between empirical mean and standard deviation of each pixel distributions, plotted for 3 representative channels in the input. Each plot consists 1,024 points, as a channel have 32 × 32 pixels. Pixels in boundaries are specially marked as ×.
+
+Now, suppose that we focus on a specific channel in Xtest, say Xctest  R10000×32×32. Notice that if our assumption is perfectly satisfied, then all the slices Xct,ehs,wt  R10000 will represent a fixed normal distribution for any h, w. Interestingly, by analyzing empirical distributions of Xct,ehs,wt for varying h and w, we found that: (a) for a fixed c, most of the empirical distributions from Xct,ehs,wt have unimodal shapes, except for the pixels in boundaries of the channel (Figure 5a, 5b), and (b) for a large portion of c  {1, · · · , C}, the empirical means and variances of Xct,ehs,wt 's are concentrated in a cluster (Figure 5c, 5d).
+These observations suggest us that the assumption of Proposition 1 can be reasonable except for the boundaries. We also emphasize that these trends we found are also appeared even when the model is not trained at all (Figure 5c), that is, all the weights are randomly initialized, which implies that these properties are not "learned", but come from a structural property of CNN, e.g. equivariance on translation, or the central limit theorem. This observation provides us another support why the ECDS formula stated in Proposition 1 is valid at any time during training.
+
+F TRAINING SCU VIA STOCHASTIC VARIATIONAL INFERENCE
+
+From  = (V, W): V consists of (, g) in CDs, we further rewrite W by (WNC, WC): WNC the parameters in NCs, and WC is the remaining ones. One can safely ignore the effect of V during training of (WNC, WC), since they remain fixed. Recall that each noise  from a NC is assumed to follow LogN(|µ, 2). They can be re-written with a noise  from the standard normal distribution, i.e.,  = f ((µ, ), ) = exp (µ +  · ), where   N (0, 12). In such case that each noise 
+from NC can be "re-parametrized" with an non-parametric noise and the corresponding parameters
+ = (µ, ), we can then use stochastic variational inference (Kingma & Welling, 2013) for the optimization of (WNC, WC) with a minibatch-based stochastic gradient method (see Appendix A for more details). Then, the final loss we minimize for a minibatch {(xik , yik )}kM=1 becomes:
+
+LSCB(WNC,
+
+WC)
+
+=
+
+-
+
+1 M
+
+M
+
+log
+
+p(yik |xik , f (WNC, ik ),
+
+WC)
+
++
+
+1 N
+
+DKL(q() p()) (23)
+
+k=1
+
+(,)
+
+where ik = (ik,u)u|=|1 is a sampled vector from the fully-factorized standard normal distribution, and DKL(· ·) denotes the KL-divergence. Although not shown in (23), an extra regularization term R(WC) can be added to the loss for the non-Bayesian parameters WC, e.g., weight decays.
+
+In fact, in our case, i.e. q() = LogN(|µ, 2) and p() = LogU(), DKL(q() p()) becomes
+
+improper:
+
+DKL(LogN(|µ, 2) LogU()) = C - log , where C  .
+
+(24)
+
+As we explain in Appendix B, SBP bypasses this issue by using truncated distributions on a compact interval [a, b] for q() and p(). We found that, however, this treatment also imposes extra computational overheads on several parts of training process, such as on sampling noises and computing
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+DKL(q() p()). These overheads are non-negligible on large models like ResNet or DenseNet, which we are mainly focusing on. Therefore, unlike SBP, here we do not take truncations on q() and p() due to practical consideration, assuming an approximated form between the truncated distributions of q() and p() on a large interval. Then we can replace each DKL(q() p()) in (23) by - log  for optimization. In other words, each noise  in NC is regularized to a larger variance,
+i.e., the more "noisy". We observed that this approximation does not harm much on the performance of SCU. Nevertheless, one should be careful that q() and p() should not be assumed as the un-truncated forms itself, but instead as approximated forms of truncated distributions on a large
+interval, not to make the problem ill-posed. As used in SBP, if they are truncated, the KL-divergence
+becomes:
+
+DKL(LogN[a,b](|µ, 2)
+
+LogU[a,b]())
+
+=
+
+log
+
+b - a 2e2
+
+- log () - () -
+
+() - () 2(() - ()) ,
+
+(25)
+
+where
+
+
+
+=
+
+a-µ 
+
+,
+
+
+
+=
+
+b-µ 
+
+,
+
+(·)
+
+and
+
+(·)
+
+are
+
+the
+
+p.d.f.
+
+and
+
+c.d.f.
+
+of
+
+the
+
+standard
+
+normal
+
+distribution,
+
+respectively.
+
+G EXPERIMENT SETUPS
+Datasets. We perform our experiments extensively on CIFAR-10 and CIFAR-100 (Krizhevsky, 2009) classification datasets. CIFAR-10/100 contains 60,000 RGB images of size 32 × 32 pixels, 50,000 for training and 10,000 for test. Each image in the two datasets is corresponded to one of 10 and 100 classes, respectively, and the number of data is set evenly for each class. We use a common scheme for data-augmentation (Srivastava et al., 2015; Lin et al., 2013; He et al., 2016a; Huang et al., 2017b). ImageNet classification dataset, on the other hand, consists of 1.2 million training images and 50,000 validation images, which are labeled with 1,000 classes. We follow (Huang et al., 2017a; He et al., 2016a) for preprocessing of data in training and inference time.
+Training details. All models in our experiments is trained by stochastic gradient descent (SGD) method, with Nesterov momentum of weight 0.9 without dampening. We use a cosine shape learning rate schedule (Loshchilov & Hutter, 2016), i.e., decreasing the learning rate gradually from 0.1 to 0 throughout the training. We set the weight decay 10-4 by for non-Bayesian parameters of each model. We train each CIFAR model for 300 epochs with mini-batch size 64, following (Huang et al., 2017b). For ImageNet models, on the other hand, we train for 120 epochs with mini-batch size 256.
+Configurations of SCU. When a SCU S = (W NC, W CD, W BN, W Conv) is employed in a model, we initialize W NC = (µ, ) by (0, e-3), and W CD = (i, bi, gi)iI=1 by (i, 0, 1)iI=1. Initializations of W BN and W Conv may differ depending on models, and we follow the initialization scheme of the given model. In our experiments, we follow a pre-defined calling policy when dealloc and realloc will be called throughout training. If dealloc is used, it is called at the end of each epoch of training. On the other hand, if realloc is used, it start to be called after 10% of the training is done, called for every 3 epochs, and stopped in 50% of training is done. The thresholds for dealloc and realloc, i.e. Tl and Th, is set by 0.0025 and 0.05, respectively, except for CondenseNet-SCU-182 (Table 3), in which Tl is adjusted by 0.001 for an effective comparison with the baseline. For all the CIFAR-10/100 models, we re-initialize bi by a random sample from [-1.5, 1.5] × [-1.5, 1.5] pixels uniformly whenever a channel slice Si is re-open via realloc process. We set the weight decay on each bi to 10-5 separately from the other parameters. For the ImageNet results (Table 2), however, we did not jointly train b for faster training. Instead, each bi is set fixed unless it is re-initialized via realloc. In this case, we sampled a point from [-2.5, 2.5] × [-2.5, 2.5] pixels uniformly for the re-initialization. We found that this simple reallocation scheme can also improve the efficiency of SCU.
+Models. In general, every model we used here forms a stack of multiple bottlenecks, where the definition of each bottleneck differs depending on its architecture (see Table 5). Each stack is separated into three (CIFAR-10/100) or four (ImageNet) stages by average pooling layers of kernel 2 × 2 to perform down-sampling. Each of the stages consists N bottleneck blocks, and we report which N is used for all the tested models in Table 6. The whole stack of each model follows a global average pooling layer (Lin et al., 2013) and a fully connected layer, and followed by single convolutional layer (See Table 7). There exist some minor differences between the resulting models and the original papers (He et al., 2016a; Huang et al., 2017b; Xie et al., 2017). In ResNet and ResNeXt models,
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+we place an explicit 2 × 2 average pooling layer for down-sampling, instead of using convolutional layer of stride 2. Also, we use a simple zero-padding scheme for doubling the number of channels between stages. In case of DenseNet, on the other hand, our DenseNet models are different from DenseNet-BC proposed by (Huang et al., 2017b), in a sense that we do not place a 1 × 1 convolutional layer between stages (which is referred as the "compression" layer in the original DenseNet). Nevertheless, we observed that the models we used are trained as well as the originals.
+Table 5: Listing of definition for each architecture block used in our experiments. Here, BRCKI×IK denotes ConvIK×IK  ReLU  BN, GConvKI×IK denotes a group convolution with 4 groups with kernel size K × K, and LGC denotes the learned group convolution layer originally proposed by Huang et al. (2017a)
+
+Architecture
+ResNet . DenseNet
+ResNeXt CondenseNet
+
+R BRCI1×1I/4 BBRRCCI11I××1I14/k2 LGC1I×14k
+
+P BRC1I×/41I  BRC3I×/43I/4 BRCI1×/21I  GCBoRnvCI334×/×k233 kI/2  ReLU  BN GConv34×k3 k  ReLU  BN
+
+W
+X+X [X, X ] X+X [X, X ]
+
+Table 6: Listing of N values used for each model, with respect to the dataset that each model is trained. For ImageNet models, we use different values of N for each stage.
+
+Dataset CIFAR-10/100
+ImageNet
+
+Model
+DenseNet-40 DenseNet-100 ResNet-164 ResNeXt-29 CondenseNet-SCU-182
+ResNet-50 DenseNet-121
+
+N
+6 16 18 3 30
+3, 4, 6, 3 6, 12, 24, 16
+
+Table 7: The generic model configurations used in our experiments with CIFAR-10/100 and ImageNet datasets. Here, AvgPool and MaxPool denotes the average pooling and the max pooling layer with kernel size 2 × 2 of stride 2, respectively. GAvgPool indicates the global average pooling layer, and FullyConnected indicates a fully-connected layer Unless otherwise specified, the stride of the other operations are set to 1.
+
+CIFAR-10/100
+
+Module
+
+Channel size
+
+Conv3×3 -
+
+32 × 32 -
+
+Bottleneck × N AvgPool
+Bottleneck × N AvgPool
+Bottleneck × N -
+
+32 × 32 16 × 16 16 × 16
+8×8 8×8
+-
+
+AvgPool FullyConnected
+
+1×1 -
+
+ImageNet
+
+Module
+
+Channel size
+
+Conv7st×r7ide:2 MaxPool
+
+112 × 112 56 × 56
+
+Bottleneck × N1 AvgPool
+Bottleneck × N2 AvgPool
+Bottleneck × N3 AvgPool
+Bottleneck × N4
+AvgPool FullyConnected
+
+56 × 56 28 × 28 28 × 28 14 × 14 14 × 14 7×7 7×7
+1×1 -
+
+17
+
+

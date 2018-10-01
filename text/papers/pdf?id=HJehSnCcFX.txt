@@ -1,0 +1,1718 @@
+Under review as a conference paper at ICLR 2019
+INFERENCE OF UNOBSERVED EVENT STREAMS WITH NEURAL HAWKES PARTICLE SMOOTHING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Events that we observe in the world may be caused by other, unobserved events. We consider sequences of discrete events in continuous time. When only some of the events are observed, we propose particle smoothing to infer the missing events. Particle smoothing is an extension of particle filtering in which proposed events are conditioned on the future as well as the past. For our setting, we develop a novel proposal distribution that is a type of continuous-time bidirectional LSTM. We use the sampled particles in an approximate minimum Bayes risk decoder that outputs a single low-risk prediction of the missing events. We experiment in multiple synthetic and real domains, modeling the complete sequences in each domain with a neural Hawkes process (Mei & Eisner, 2017). On held-out incomplete sequences, our method is effective at inferring the ground-truth unobserved events. In particular, particle smoothing consistently improves upon particle filtering, showing the benefit of training a bidirectional proposal distribution.
+1 INTRODUCTION
+Event streams, i.e., discrete events in continuous time, are often partially observed in the world. Given trained models of the complete data and the missingness mechanism, one can probabilistically predict the unobserved events, no matter whether they are missing at random (MAR) or missing not at random (MNAR). Such an ability is useful in many applied domains:
+· Scientific experiments. Scientific findings rely heavily on experimental observations, but due to practical limitations, measurements are often incomplete. For example, a systems neuroscientist will miss all the neural spikes from unmonitored neurons, but these are imputable to some degree from spikes observed elsewhere in the system, providing a more complete picture of neural activity.
+· Medical records. Some patients keep a diary or use a smartphone app to log their behavior in between their hospital visits, but other patients don't. Out-of-hospital events such as symptoms, self-administered medications, diet, and sleep may correlate with monitored inhospital events such as tests, diagnoses, and treatments. Inferring these events when they are not recorded may help doctors counsel patients.
+· Competitive games. In competitive games such as StarCraft and poker, a player does not have full information about what her opponents have done (e.g., build mines and train soldiers) or acquired (e.g., certain cards). Correctly imputing what has happened "what I did" and "what I saw he did" would help the player make good decisions. Similar remarks apply to practical scenarios (e.g., military) where multiple actors compete and/or cooperate.
+· User interface interactions. Many important user actions are not observed by the software. For example, users of an online news provider may have known what they need by reading an information-rich headline without clicking (to read more details). Such events are expensive to observe (e.g. via a gaze tracker) thus often missing. However, imputing them (to some extent) given the observed events (e.g. clicks) would be useful, e.g., helping the software to improve the user satisfaction in the long run.
+· Other partially observed event streams arise in online shopping, social media, etc.
+A flexible probabilistic model for complete event streams is the neural Hawkes process (Mei & Eisner, 2017), a recurrent neural model that allows past events to have complex influences on the
+1
+
+Under review as a conference paper at ICLR 2019
+
+zzz xxx
+
+0 t1 z x
+
+t2 t3 t 0
+
+t1
+
+t2 t3 t 0
+
+(a) Particle filtering
+
+zz xx
+
+t1
+
+t2 t3 t
+
+0 t1
+
+t2 t3 t 0
+
+t1
+
+t2 t3 t 0
+
+(b) Particle smoothing
+
+t1
+
+t2 t3 t
+
+Figure 1: Stochastically imputing a taxi's pick-up events ( ) given its observed drop-off events ( ). At this stage of the computation, we are trying to determine the next event after the at time t1. In Figure 1a (particle filtering), the neural Hawkes process's LSTM has already read the proposed and observed events at times  t1. Its resulting state determines the model intensities and of the two event types (left image). Both intensities are low because there are few passengers at this time of day, so it happens that no event is proposed in (t1, t2). Specifically, Algorithm 1 determines that the next proposed event ( in middle image) would be somewhere after t2, though without bothering to determine its time precisely (line 36). Thus, is discarded (line 37), having been preempted by the observed @t2. We continue to extend the particle by feeding @t2 into the LSTM (right image) and proposing subsequent events based on the new intensities after t2. But because was low at t2, the @t2 was unexpected, which results in downweighting the particle (line 28): intuitively, we have just realized that this particle will be improbable under the posterior, because its complete sequence will include consecutive drop-offs far apart in time ( @t1, @t2). Figure 1b (particle smoothing) samples from a better-informed proposal distribution. A second LSTM (Appendix B) reads the future observations from right to left. Its state is used together with to determine the proposal intensities and (left image). Since a drop-off at t2 strongly suggests a pick-up before t2, considering the future increases the intensity of pick-up on (t1, t2) from to (while decreasing that of drop-off from to ). Consequently, the next proposed event is more likely to be a pick-up in (t1, t2) than it was in Figure 1a. If so (middle image), this event @t1,1 is fed into the neural Hawkes process's LSTM (right image). The updated state determines the new model intensities and : the higher intensity says that a dropoff is now expected, so we will not downweight the particle as much if t2 is the next event. The updated also combines with to determine the new proposal intensities and , which are used to sample the next event (either an unobserved event at t1,2  (t1, t2), or the next observed event t2).
+
+type and timing of subsequent events. Suppose we have a trained version of this model, as well as a separate probability model (the "missingness mechanism") that stochastically determines which of the events will be observed. We can then easily use Bayes' Theorem to define the posterior distribution over the complete sequence x z given just the observed events x: see equation (3) below. However, it is computationally difficult to reason about this posterior distribution. In this paper we provide approximate methods for sampling complete sequences from the posterior. In the remainder of the introduction, we provide a high-level sketch of these methods.
+Mei & Eisner (2017) give an algorithm to sample a complete sequence from a neural Hawkes process. Each event in turn is sampled given the complete history of previous events. However, this algorithm only samples from the prior. We will adapt it into a particle filtering algorithm that samples from the posterior, i.e., given all the observed events. The basic idea (Figure 1a) is to draw the events in sequence as before, but now we force any observed events to be "drawn" at the appropriate times. That is, we add the observed events to the sequence as they happen (and they duly affect the distribution of subsequent events). There is an associated cost: if we are forced to draw an observed event that is improbable given its past history, we must downweight the resulting complete sequence accordingly, because evidently this particular past history--as determined by the previous draws-- was inconsistent with the observed event, and hence cannot be part of a high-likelihood complete sequence. Using this method, we sample many sequences (or particles) of different relative weights.
+Alas, this approach is computationally inefficient. Sampling a complete sequence that is actually probable under the posterior requires great luck, as the thinning algorithm must have the good fortune to draw only events that happen to be consistent with future observations. Such lucky particles would appropriately get a high weight relative to other particles. The problem is that we will rarely
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+get such particles at all (unless we sample a very large number of particles). To get a more accurate picture of the posterior, we can improve the method by drawing each event from a smarter distribution that is explicitly conditioned on the future observations (rather than drawing the event in ignorance of the future and then downweighting the particle if the future does not turn out as hoped).
+This idea is called particle smoothing (Doucet & Johansen, 2009). How does it work in our setting? The neural Hawkes process defines the distribution of the next event using the state of a continuoustime LSTM that has read the past history from left-to-right. When sampling a proposed event, we now use an modified distribution (Figure 1b) that also considers the state of a second continuoustime LSTM that has read the future observations from right-to-left. As this augmented distribution is imperfect--merely a proposal distribution--we still have to reweight our particles to match the actual posterior under the model. But this reweighting is not as drastic as for particle filtering, because the new proposal distribution was constructed and trained to resemble the actual posterior.
+Bidirectional recurrent neural networks have proven effective at predicting linguistic words and their properties given their left and right contexts (Graves et al., 2013; Bahdanau et al., 2015; Peters et al., 2018): in particular, Lin & Eisner (2018) recently applied them to particle smoothing for sequence tagging, To our knowledge, however, this is the first time such an architecture has been extended to predict events in continuous time.
+
+2 PRELIMINARIES1
+
+We consider a missing-data setting (Little & Rubin, 1987). We are given a fixed time interval [0, T ] over which events can be observed. Each possible outcome in our probability distributions is a
+complete event sequence in which each event is designated as either observed or missing. The
+random variables Obs, Miss, and Comp refer respectively to the sets of observed events, missing events, and all events over [0, T ]. Thus Comp = Obs Miss, where denotes disjoint union. Under the probability distributions we will consider, |Comp| is almost surely finite.
+
+We will observe Obs to be some particular set of events x =
+{k0@t0, k1@t1, k2@t2, . . . , kI @tI , kI+1@tI+1}, where each ki  {1, 2, . . . , K} is an event type and 0 = t0 < t1 < t2 < . . . < tI < tI+1 = T are the times of occurrence in increasing order. This sequence always includes the special boundary events k0@t0 = BOS@0 ("beginning of sequence") and kI+1@tI+1 = EOS@T ("end of sequence").
+
+Following each observed event ki@ti for 0  i  I, we may hypothesize some Ji  0 unobserved events {ki,1@ti,1, ki,2@ti,2, . . . , ki,Ji @ti,Ji }, where ti < ti,1 < ti,2 < . . . < ti,Ji < ti+1.
+We may regard the subscript i as a shorthand for (i, 0), so the observed events are x = {ki,j@ti,j : j = 0} and the hypothesized unobserved (missing) events are z = {ki,j@ti,j : j = 0}.
+
+The hypothesized complete event stream x z is thus indexed by pairs = i, j ordered lexicographically, where t < t if < . We write + 1 for the index of the event immediately after , so
+i, j + 1 =def i, j + 1 when j < Ji and i, j + 1 =def i + 1, 0 otherwise. Each event k @t (whether observed or not) may be influenced by the history H(t )--the set of all observed and unobserved
+events that precede it, where we define H(t) =def {k @t : t < t} for any t  [0, T ].
+
+We assume that the complete sequence Comp was first generated by a complete data model p, and
+
+then some of the events were censored (marked as missing) by a missingness mechanism pmiss:
+
+p(Obs = x, Miss = z) = p(Comp = x z) · pmiss(Miss = z | Comp = x z)
+
+(1)
+
+Furthermore, our complete data model (such as a neural Hawkes process) will take the factored form
+
+p(Comp = x
+
+z) =
+
+I Ji
+p(ki,j @ti,j | H(ti,j ))
+i=0 j=0
+
+· p(@  T | H(tI,JI ))
+
+(2)
+
+where p(k @t | H(t )) is the probability density that the next event after H(t ) occurs at time t and has type k , and p(@  T | H(t )) is the probability that it occurs at some time  T .
+
+In this paper, we will attempt to guess Miss by sampling z values from the posterior distribution p(Miss = z | Obs = x)  p(Comp = x z) · pmiss(Miss = z | Comp = x z) (3)
+
+1Our conventions of mathematical notation mainly follow those given by Mei & Eisner (2017, section 2).
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+We may obviously drop the second factor of equation (3) if (for the given x) it is known to be a constant function of z. In this case, the events are said to be missing at random (MAR). Otherwise,
+they are missing not at random (MNAR).
+
+It is often intractable to sample exactly from p(z | x), because the first factor p(x z) is complicated
+
+(e.g. a neural net). The difficulty is that x and z can be interleaved with each other. As an alternative,
+
+we can use normalized importance sampling, drawing many z values from a proposal distribution
+
+q(z
+
+|
+
+x)
+
+and
+
+weighting
+
+them
+
+in
+
+proportion
+
+to
+
+p(z|x) q(z|x)
+
+.
+
+To
+
+make
+
+it
+
+easy
+
+to
+
+sample
+
+from
+
+q(z
+
+|
+
+x),
+
+we
+
+adopt the following factored definition:
+
+I Ji
+
+q(z | x) =
+
+q(ki,j @ti,j | H(ti,j ), F (ti,j )) · q(@  ti+1 | H(ti,Ji ), F (ti,Ji )) (4)
+
+i=0 j=1
+
+This resembles equation (2), but it conditions each proposed unobserved event not only on the
+history but also on the future F (ti,j) =def {ki+1@ti+1, . . . , kI+1@tI+1}. This future consists of all the
+observed events that happen after ti,j, where in general F (t) =def {ki@ti : t < ti} for any t  [0, T ]. Note the asymmetry with H(t), which includes both observed and unobserved events. q(z | x) can be trained to approximate the target distribution p(z | x), by making q(· | H, F)  p(· | H, F).
+
+We can sample z from q(z | x) in chronological order: for each 0  i  I in turn, draw a sequence of Ji unobserved events that follow the observed event ki@ti. This sequence ends (thereby determining Ji) if the next proposed event would have fallen after ti+1 and thus is preempted by the observed event ki+1@ti+1.
+Specific p(x z) and q(z | x) distributions will be introduced below.
+
+2.1 THE NEURAL HAWKES PROCESS
+
+As our generative model of complete event streams Comp in equation (2), we need a multivariate point process model. We choose the neural Hawkes process (Mei & Eisner, 2017), which has proven flexible and effective at modeling many real-world event streams.
+
+Given the history H(t) of all events before time t, the process defines an intensity k(t | H(t))  R0, which may be thought of as the instantaneous rate of events of type k at time t. More precisely, as dt  0+, the number of events of type k occurring in the interval [t, t + dt), divided by dt,
+approaches k(t | H(t)). If no event of any type occurs in this interval (which becomes almost sure as dt  0+), one may still occur in the next interval [t + dt, t + 2dt), and so on.
+
+The intensity functions k(t | H(t)) are continuous on intervals during which no event occurs (note that H(t) is constant on such intervals). They jointly determine a distribution over the time of the
+next event after H(t), as used in every factor of equation (2). As it turns out (Mei & Eisner, 2017),
+
+TK
+
+log p(Comp = x z) =
+
+log k (t | H(t )) -
+
+k(t | H(t))dt
+
+:t <T
+
+t=0 k=1
+
+(5)
+
+We can therefore train the parameters  of the k functions by maximizing log-likelihood on training data. Each datum is a complete event stream x z over some time interval [0, T ]. In practice, we
+stop training early when log likelihood stops increasing on held-out development data.
+
+The neural Hawkes process specifically parametrizes k(t | H(t)) as
+
+k(t | H(t)) = fk(vk h(t))
+
+(6a)
+
+fk(x) = sk log(1 + exp(x/sk))
+
+(6b)
+
+The vector h(t)  (-1, 1)D summarizes (t, H(t)). It is the hidden state of a continuous-time
+
+LSTM (Mei & Eisner, 2017) that read the events in H(t) as they happened, and then waited until
+
+time t. The state of such an LSTM evolves endogenously as it waits for the next event, so the timing
+
+of the past events has been incorporated into the state h(t).
+
+3 PARTICLE METHODS
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+We now describe our particle-based methods for imputing missing z (equation (3)). The details are spelled out in Algorithm 1 and Appendix A. For intuition, Figure 1 walks through part of an example.
+
+Algorithm 1 is a Sequential Monte Carlo (SMC) approach. It returns an ensemble of weighted particles ZM = {(zm, wm)}Mm=1. Each particle zm is sampled from the proposal distribution q(z | x), which is defined to support sampling via a sequential procedure that draws one unobserved event at a time. The corresponding wm are importance weights, which are defined as follows, but
+which are also built up one factor at a time within Algorithm 1:
+
+wm =
+
+w~m
+
+M m=1
+
+w~m
+
+(7a)
+
+w~m
+
+=
+
+p(Obs
+
+= x, Miss q(zm | x)
+
+=
+
+zm)
+
+(7b)
+
+The numerator of (7b) is given by equations (1)­(2).2 Equation (3) implies that if we could set q(z |
+x) equal to p(z | x), so that the particles were IID samples from the desired posterior distribution,
+then all of the w~m would be equal and thus wm = 1/m for all m. In practice, q will not equal p, but will be easier than p to sample from. To correct for the mismatch, the importance weights wm are higher for particles that q proposes more rarely than p would.
+
+The distribution formed by the ensemble, p^(z), approaches p(z | x) as M   (Doucet & Johansen, 2009). Thus, for large M , the ensemble may be used to estimate the expectation of any function f (z), via
+
+M
+Ep(z|x)[f (z)]  Ep^[f (z)] = p^(z)f (zm) = wmf (zm)
+z m=1
+
+(8)
+
+In the subsections below, we will describe two specific proposal distributions q that are appropriate for the neural Hawkes process. These distributions define intensity functions q over time intervals.
+
+The trickiest part of Algorithm 1 (at line 32) is to sample the next unobserved event from the proposal distribution q. Here we use the thinning algorithm (Lewis & Shedler, 1979; Liniger, 2009; Mei & Eisner, 2017). Briefly, this is a rejection sampling algorithm whose own proposal distribution uses a constant intensity , making it a homogeneous Poisson process (which is easy to sample from). A event proposed by the Poisson process at time t is accepted with probability q(t)/  1. If it is rejected, we move on to the next event proposed by the Poisson process, continuing until we either
+accept such an unobserved event or are preempted by the arrival of the next observed event.
+
+3.1 NEURAL HAWKES PARTICLE FILTERING
+We already have a neural Hawkes process p that was trained on complete data. This neurally defines an intensity function kp(t | H(t)) for any history H(t) of events before t and each event type k.
+The simplest proposal distribution uses precisely this process to draw the unobserved events. More precisely, for each i = 0, 1, . . . , I, for each j = 0, 1, 2, . . ., we let the next event ki,j+1@ti,j+1 be the first event generated by the competing intensity functions k(t | H(t)) over the interval t  (ti,j, ti+1), where H(t) consists of all observed and unobserved events up through index i, j . If no event is generated on this interval, then the next event is ki+1@tj+1. This method is implemented by Algorithm 1 with smooth = false.
+
+3.2 NEURAL HAWKES PARTICLE SMOOTHING
+
+The neural Hawkes process p(x z) only offers us k(t | H(t)). Extra machinery is needed to condition on F(t) as well.
+
+We use a right-to-left continuous-time LSTM, whose details will be shown shortly in Appendix B, to summarize the future F(t) for any time t into another hidden state vector h¯(t)  RD . Then we
+parameterize the proposal intensity using an extended variant of equation (6a):
+
+kq (t | H(t), F (t)) = fk(vk (h(t) + Vh¯(t)))
+
+(9)
+
+2As discussed earlier, if we are willing to make a MAR assumption, we may omit the pmiss factor of equation (1) because it is constant (though unknown).
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+This extra machinery is used by Algorithm 1 when smooth = true. Intuitively, the left-to-right h(t), as explained in Mei & Eisner (2017), is supposed to learn sufficient statistics for predicting the future as it reads the complete history H(t), while the right-to-left h¯(t) carries back observed information from the future F(t) in order to correct any mistaken posterior beliefs that h(t) carries.
+The right-to-left LSTM has the same architecture as the left-to-right LSTM used in the neural Hawkes process (Mei & Eisner, 2017), but a separate parameter vector. For any time t  (0, T ), it arrives at h¯(t) by reading only the observed events {ki@ti : t < ti  tI }, i.e., F (t), in reverse chronological order. Formulas are given in Appendix B.
+This is very similar to the forward-backward algorithm (Rabiner, 1989) or Kalman smoothing (Rauch et al., 1965). However, it is approximate rather than exact because of the complicated neural models involved; see Lin & Eisner (2018) for careful discussion of the connection. Regardless of the chosen model, particle smoothing is to particle filtering as Kalman smoothing is to Kalman filtering (Kalman, 1960; Kalman & Bucy, 1961).
+
+3.2.1 LEARNING TO PROPOSE
+
+Training the proposal distribution q(z | x) means learning its parameters , namely the parameters of the right-to-left LSTM together with matrix V. We are interested in minimizing the KullbackLeibler (KL) divergence between q(z | x) and p(z | x). Although p(z | x) is unknown, the gradient of inclusive KL divergence between q(z | x) and p(z | x) is
+
+KL(p q) = Ezp(z|x)[- log q(z | x)]
+
+(10)
+
+where log q(z | x) is analogous to equation (5). The gradient of exclusive KL divergence is:
+
+KL(q p) = Ezq(z|x)[
+
+1 2
+
+(log
+
+q(z
+
+|
+
+x)
+
+-
+
+log
+
+p(x
+
+z) - pmiss(z | x
+
+z))2 ]
+
+(11)
+
+where p(x z) is given in equation (5) and pmiss(z | x z) is assumed known to us for any given pair of x and z.
+
+Minimizing inclusive KL divergence aims at high recall--q(z | x) is adjusted to assign high probabilities to all of the good hypotheses (according to p(z | x)). Conversely, minimizing exclusive KL divergence aims at high precision--q(z | x) is adjusted to assign low probabilities to poor recon-
+structions, so that they will not be proposed. We seek to minimize the linearly combined divergence
+
+Div(p q) = KL(p q) + (1 - )KL(q p) with   [0, 1]
+
+(12)
+
+and our (Adam) training is early-stopped when the divergence stops decreasing on the held-out development set. When tuning our system (Appendix E.2),  = 1 gave the best results (perhaps unsurprisingly).
+
+But how do we measure these divergences between q(z | x) and p(z | x)? Of course, we actually want the expected divergence when the observed sequence x  p. We pretend that the data are distributed identically to the model p, and thus we sample x from our training examples. For the exclusive divergence, we sample z  q(· | x) from our proposal distribution; notice that optimizing q here is essentially the REINFORCE algorithm Williams (1992). For the inclusive divergence, we again pretend that the data are distributed identically to p, so instead of sampling a value of z  p(· | x), we can simply use the ground-truth z that happened to occur with this x. We obtain each example with its ground truth z by starting with a fully observed sequence Comp and sampling a partition into Obs = x, Miss = z from the known missingness mechanism pmiss.
+
+Appendix F discusses situations where training on incomplete data by EM is possible.
+
+4 A LOSS FUNCTION AND DECODING METHOD
+
+It is sometimes useful to find a single hypothesis z^ that minimizes the Bayes risk, i.e., the expected distance from the unknown ground truth z. This procedure is called minimum Bayes risk (MBR) decoding and can be approximated with our ensemble of weighted particles:
+
+M
+
+z^ = arg minzZ
+
+p(z | x)D(z, z)  arg minzZ wmD(z, zm)
+
+(13)
+
+z Z
+
+m=1
+
+where D(z, z) is the distance between z and z. We now propose a specific distance function D.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+4.1 OPTIMAL TRANSPORT DISTANCE
+
+The distance between z and z is defined as the minimum cost to edit z into z. To accomplish
+
+this edit, we must identify the best alignment--a one-to-one partial matching a--of the events in
+
+the two sequences. We require any two aligned events to have the same type k. An alignment edge between a predicted event at time t (in z) and a true event at time t (in z) incurs a cost of |t - t|
+
+to move the former to the correct time. Each unaligned event in z incurs a deletion cost of Cdelete, and each unaligned event in z incurs an insertion cost of Cinsert. Thus,
+
+D(z, z) = min D(z, z, a)
+aA(z ,z)
+
+(14)
+
+where A(z, z) is the set of all possible alignments between z and z. Finding this distance (and its corresponding alignment a) is similar to finding the edit distance or dynamic time warping between
+two discrete-time sequences, and a similar dynamic programming algorithm is presented in Algorithm 2 of Appendix C. We set insertion and deletion costs to be the same, i.e., Cinsert = Cdelete = C, so that the distance is symmetric.
+
+4.2 APPROXIMATE MBR DECODING
+
+Since aligned events must have the same type, the MBR problem decomposes into separately choos-
+ing a set z^(k) of type-k events for each k = 1, 2, . . . , K, based on the particles' sets z(mk) of type-k events. Thus, we simplify the presentation by omitting (k) throughout this section.
+
+Finding the optimal set z^ appears to be NP-hard, by analogy with the Steiner string problem. It involves searching over the infinitely many z  Z. Fortunately, the optimal transport distance D
+define in section 4.1 warrants:
+
+Theorem 1. Given {zm}mM=1, if we define z =
+
+M m=1
+
+zm,
+
+then:
+
+MM
+
+z^  P(z ) such that
+
+wmD(zm,
+
+z^)
+
+=
+
+min
+zZ
+
+wmD(zm, z)
+
+m=1
+
+m=1
+
+(15)
+
+where P(z) is the power set of any given z--the set of subsequences of z (including empty sequence and z itself). That is to say, there exists one subsequence of z that achieves the minimum Bayes
+risk (or the minimum weighted distance).
+
+Why this is true? Let's suppose t is the time of one event in z, and it is aligned to one event at t1 in z . Recall that the alignment cost between these two events is |t - t1|, so we can simply change z by moving t to t1 to minimize its total alignment cost. Then what if it is aligned to events at t1 < t2? While t < t1, increasing t always decreases its total alignment cost |t - t1| + |t - t2| = t1 + t2 - 2t. Similarly, we should decrease t if t > t2. When t1  t  t2, the alignment cost is fixed at t2 - t1. Therefore, the total alignment cost of this event is always minimized if t is moved to t1 or t2. This argument easily generalizes to the cases where t is aligned to more aligned events. The generalization to the cases that each alignment has a weight w is also straightforward, and the full
+proof can be found in Appendix D.1.
+
+Now we have simplified this decoding problem as a combinational optimization problem:
+
+M
+z^ = arg minzP(z ) wmD(zm, z)
+m=1
+which can be approximately solved although it is still NP-hard to exactly solve.
+
+(16)
+
+Our algorithm (details in Algorithm 3 of Appendix D) finds z^ by iteratively (1) finding its optimal
+
+alignment am with each zm (called Align Phase) using this method of section 4.1, and then (2)
+
+going through the following phases--each of them will update z^ and decreases the weighted distance
+
+M m=1
+
+wmD(zm
+
+,
+
+z^,
+
+am)
+
+which
+
+is
+
+an
+
+upper
+
+bound
+
+of
+
+M m=1
+
+wmD(zm,
+
+z^):
+
+Move Phase Thanks to Theorem 1, given fixed |z^| and {am}Mm=1,
+
+M m=1
+
+wmD(zm,
+
+z^,
+
+am
+
+)
+
+can
+
+be
+
+minimized by simply moving each ti in the current z^ to one of the times, if there is any,
+
+which it is aligned to. Otherwise, we keep ti unchanged.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Delete Phase Then we may delete any event in z^ and its associated element in each am if
+
+M m=1
+
+wmD(zm, z^,
+
+am)
+
+is
+
+decreased
+
+afterwards.
+
+Note that deletion of each event does
+
+not depend on one another, so the weighted distance can actually be minimized by inde-
+
+pendently checking each event in z^. The phase tends to discard the events that are aligned
+
+to far-apart times (or nowhere).
+
+Insert Phase Then we may further decrease
+
+M m=1
+
+wmD(zm,
+
+z^,
+
+am
+
+)
+
+by
+
+inserting
+
+to
+
+z^
+
+some
+
+events
+
+that can be aligned, at low cost, to those in zm which would have been left alone otherwise.
+
+Thanks again to Theorem 1, such fortunate events can be chosen from
+
+M m=1
+
+zm.
+
+Note that even though we used D(zm, z^, am) multiple times in the above description, only the one time in Move Phase needs to actually call the dynamic programming algorithm (section 4.1) to get am. Details of the full algorithm (and its theoretical guarantee) can be found in Appendix D.
+
+5 EXPERIMENTS
+We compare our particle smoothing method with the particle filtering baseline on multiple real-world and synthetic datasets. See Appendix E for training details (e.g., hyperparameter selection).
+
+5.1 DATASETS
+The datasets that we use in this paper range from short sequences with mean length 15 to long ones with mean length > 300. For each of the datasets, we have fully observed data that can be used for training. For each dev and test example, we held out some events from the fully observed sequence, so we present the x part as input to the proposal distribution but we also know the z part for evaluation purposes. The dataset and preparation details can be found in Appendix E.
+Synthetic Datasets We first checked that we could successfully impute unobserved events that are generated from known distributions. That is, when the generating distribution actually is a neural Hawkes process, could our method outperform the particle filtering in practice? Is the performance consistent over multiple datasets drawn from different processes? To investigate this, we synthesized 10 datasets, each of which was drawn from a different neural Hawkes process with randomly sampled parameters.
+Elevator System Dataset (Crites & Barto, 1996). A multi-floor building is often equipped with multiple elevator cars that follow cooperative strategies to transport passengers between floors (Lewis, 1991; Bao et al., 1994; Crites & Barto, 1996). Observing the activities of some of the cars might help us impute those of the others. This domain is particularly interesting because it is representative of many real-world cooperative (or competitive) scenarios.
+New York City Taxi Dataset (Whong, 2014). Each medallion taxi of New York City forms a sequence of time-stamped pick-up and drop-off events in the five boroughs (i.e., Manhattan, Brooklyn, Queens, The Bronx, and Staten Island). Having observed a sequence of drop-off events, it is interesting to see if the proposed method is able to impute the pick-up events (Figure 1).
+
+5.2 EVALUATION AND RESULTS
+First, as an internal check, we measure how probable each ground truth reference z is under the proposal distribution constructed by each method, i.e., log q(z | x). The results on the 12 datasets are displayed in Figure 2.
+We now make predictions by MBR decoding. Figure 3 plots the improved performance of neural Hawkes particle smoothing (red) vs. particle filtering (blue).3 It shows the optimal transport distance broken down by (a) how well it is doing at predicting which events happen--measured by the total number of insertions and deletions (x-axis); and (b) how well it is doing at predicting when those events happen--measured by the total move cost (y-axis). Different choices of C yield different trade-offs between these two metrics. Intuitively, when C  0, the decoder is free to insert and
+3We show the 2 real datasets only. The figures for the 10 synthetic datasets are boringly similar to these.
+
+8
+
+Under review as a conference paper at ICLR 2019
+
+(a) Synthetic datasets
+
+(b) Elevator System
+
+(c) NYC Taxi
+
+Figure 2: Scatterplots of neural Hawkes particle smoothing (y-axis) vs. particle filtering (x-axis). Each point represents a single test sequence, and compares the values of log q(z | x)/|z| (i.e., nats per unobserved event) under the two proposal distributions. Larger numbers mean that the proposal distribution is better at proposing the ground truth. Each dataset's scatterplot is converted to a cloud using kernel density estimation, with the centroid denoted by a black dot. A double-arrowed line indicates the improvement of particle smoothing over filtering. For the synthetic datasets, we draw ten clouds on the same figure and show the line for the set where smoothing improves the most. Particle smoothing performs well even on the datasets where particle filtering performs badly. As we can see, the density function is always well concentrated above y = x. That is, this is not merely an average improvement: nearly every ground truth sequence increases in proposal probability!
+
+total_align_cost/# true total_align_cost/# true
+
+C=32.0 10 8 C=16.0
+
+particle filtering particle smoothing
+
+6
+C=8.0 4
+C=4.0 2 C=C2.=01.0
+
+0 0.6 0.8 1.0 1.2 1.4 1.6 1.8 (# insertion + # deletion)/# true
+
+(a) Elevator System
+
+0.200 C=2.43 0.175
+0.150 C=0.81
+0.125
+
+particle filtering particle smoothing
+
+0.100 C=0.27
+0.075
+
+0.050 C=0.09
+0.025 0.000 C=0.03 C=0.01
+0.2 0.4 0.6 0.8 1.0 1.2 1.4 1.6 (# insertion + # deletion)/# true
+
+(b) NYC Taxi
+
+Figure 3: Optimal transport distance of neural Hawkes particle smoothing ( ) vs. particle filtering ( ) on
+
+test data, broken down by the number of insertions and deletions (x-axis) and the total move/alignment cost
+
+(y-axis). Both axes are normalized by the number of true events in the test dataset,
+
+N n=1
+
+|zn|.
+
+On each
+
+dataset, for each C, the achieves an optimal transport distance that is broken down to the x-axis and y-axis.
+
+The pointing to indicates the gradient direction along which the D function would like us to improve for
+
+this C value. The redline starting from this shows the actual improvement obtained by switching to particle
+
+smoothing (which is, indeed, an improvement because it has positive dot product with ). Overall, the Pareto
+
+frontier (convex hull) of the symbols dominates the Pareto frontier of the symbols, lying everywhere to its
+
+left.
+
+delete event tokens, so none of them is moved. As the cost C increases, fewer event tokens are inserted or deleted (so lower cost on the x-axis), but more event tokens are aligned (so higher cost on the y-axis).
+
+6 DISCUSSION
+Our technical contribution is threefold. First of all, as far as we know, we are the first to develop general sequential Monte Carlo methods (Moral, 1997; Liu & Chen, 1998; Doucet et al., 2000; Doucet & Johansen, 2009) to approximate a target posterior distribution q(z | x) where the complete sequence x z is assumed to be drawn from a neural point process (Du et al., 2016; Mei & Eisner,
+9
+
+Under review as a conference paper at ICLR 2019
+2017). Most similar to our work is Linderman et al. (2017)'s sequential Monte Carlo method. They modeled complete sequences by a Hawkes process with latent variables--substituting our neural Hawkes process would obtain exactly our particle filtering method (section 3.1). However, our full method has a particle smoother that takes future observations into account while proposing events at any time t, which is not considered in Linderman et al. (2017). Shelton et al. (2018) developed a reversible jump Markov chain Monte Carlo (MCMC) sampler (Green & Hastie, 2009) for a Hawkes process with latent variables and it allows future observations to "reach back and suggest possible events earlier in the timeline". But their method takes advantage of the Poisson cluster process representation of Hawkes process--each past event generates a Poisson process with exponentially decaying intensity and each new event belongs to one of the processes. Such a representation cannot be established for a neural point process under which the sequence of all past events as a whole generates only one Poisson process, so their method cannot adapt to the complicated neural model that we consider in this work. Other work that infers unobserved events in continuous time also assumes that complete sequences follow a model that is easier to handle than a neural model, including those based on Markov jump processes (Rao & Teh, 2012; 2013) and continuous-time Bayesian networks (Fan et al., 2010). Lin & Eisner (2018) design a neural particle smoothing algorithm that performs dynamic-programming-style approximate inference on a neural sequential model. But they only work on discrete-time sequences; our neural Hawkes particle smoothing can be seen as a continuous-time generalization of their method.
+Secondly, we define the optimal transport distance between event sequences, which is a provably valid metric. It is a Wasserstein distance (Villani, 2008), or Earth Mover's distance (Kantorovitch, 1958; Levina & Bickel, 2001), generalized to unnormalized "distributions". There is more than one way to make this generalization, and this is still a subject of active research (Benamou, 2003; Chizat et al., 2015; Frogner et al., 2015; Chizat et al., 2018). Our definition allows event insertion and deletion while aligning them, but these operations can only apply to an entire event--we cannot align half of an event and delete the other half. Due to these constraints, a dynamic programming rather than linear programming (relaxation) is needed to find the optimal transport. Xiao et al. (2017) also proposed an optimal transport distance between event sequences and it also allows event insertion and deletion. However, their insertion and deletion cost depends on where it is on the time axis while ours doesn't.45 Our optimal transport distance is similar to the dynamic time warping (DTW) and its extensions (Sakoe & Chiba, 1971; Listgarten et al., 2005),which is also a method to calculate an optimal match between sequences. But major difference indeed exists: 1) DTW aligns each event to at least one event and does not allow insertion or deletion, while ours aligns each to at most one and allows insertion and deletion; 2) DTW forces the first-to-first and last-to-last alignment while ours does not; 3) DTW does not allow crossing edges while our cost function is such that within the matching for type k, there is always an optimal solution with no crossing edges (although another equally good solution may have some).
+Last but not least, we design an algorithm to find a sequence of unobserved events whose expected distance to an unknown ground truth reference is approximately minimized, and this reference follows a distribution approximated by a set of (weighted) particles. This problem is similar to finding a consensus representation (Steiner sequence) of a set of sequences, which is described in Gusfield (1997) through the concept of multiple sequence alignment (MSA) (Mount, 2004) in computational biology. The latter is usually solved by progressive alignment construction using a guide tree (Feng & Doolittle, 1987; Larkin et al., 2007; Notredame et al., 2000) and iterative realignment of the initial sequences with addition of new sequences to the growing MSA (Hirosawa et al., 1995; Gotoh, 1996). However, these methods cannot be directly applied to our setting because each event in our sequence is a ki@ti pair, not just a discrete type ki--when two events are aligned, we would like their times as well as their types to match.
+On multiple synthetic and real-world datasets, our method turns out to be effective at inferring the ground-truth sequence of unobserved events. The improvement of particle smoothing upon particle filtering is substantial and consistent, showing the benefit of training a proposal distribution.
+4This dependence actually makes the distance unintuitive. For example, on interval [0, 100), the distance between z1 = 1, 3, 4, 5 and z2 = 3, 4, 5 is |1 - 3| + |3 - 4| + |4 - 5| + |5 - 100| = 99 under their definition while it can be small under our definition (e.g. 0.5 if our insertion and deletion cost C = 0.5). The latter seems more natural because these two sequences are almost identical.
+5Besides optimal transport, Stein's method (Stein et al., 1972) is also used to find (or bound) the distance of point processes (Schuhmacher & Xia, 2008; Decreusefond et al., 2016).
+10
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly learning to align and translate. In Proceedings of the International Conference on Learning Representations (ICLR), 2015.
+G. Bao, C. G. Cassandras, T. E. Djaferis, A. D. Gandhi, and D. P. Looze. Elevators dispatchers for down-peak traffic, 1994.
+Jean-David Benamou. Numerical resolution of an unbalanced mass transport problem. ESAIM: Mathematical Modelling and Numerical Analysis, 37(5):851­868, 2003.
+Lenaic Chizat, Gabriel Peyre´, Bernhard Schmitzer, and Franc¸ois-Xavier Vialard. Unbalanced optimal transport: Geometry and Kantorovich formulation. arXiv preprint arXiv:1508.05216, 2015.
+Lenaic Chizat, Gabriel Peyre´, Bernhard Schmitzer, and Franc¸ois-Xavier Vialard. An interpolating distance between optimal transport and Fisher-Rao metrics. Foundations of Computational Mathematics, 18(1):1­44, 2018.
+Robert H. Crites and Andrew G. Barto. Improving elevator performance using reinforcement learning. In Advances in neural information processing systems, pp. 1017­1023, 1996.
+Laurent Decreusefond, Matthias Schulte, Christoph Tha¨le, et al. Functional poisson approximation in Kantorovich-Rubinstein distance with applications to U-statistics and stochastic geometry. The Annals of Probability, 44(3):2147­2197, 2016.
+Arthur P. Dempster, Nan M. Laird, and Donald B. Rubin. Maximum likelihood from incomplete data via the EM algorithm. Journal of the Royal Statistical Society. Series B (Methodological), pp. 1­38, 1977.
+Arnaud Doucet and Adam M. Johansen. A tutorial on particle filtering and smoothing: Fifteen years later. Handbook of Nonlinear Filtering, 12(656-704):3, 2009.
+Arnaud Doucet, Simon Godsill, and Christophe Andrieu. On sequential Monte Carlo sampling methods for Bayesian filtering. Statistics and computing, 10(3):197­208, 2000.
+Nan Du, Hanjun Dai, Rakshit Trivedi, Utkarsh Upadhyay, Manuel Gomez-Rodriguez, and Le Song. Recurrent marked temporal point processes: Embedding event history to vector. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 1555­1564. ACM, 2016.
+Yu Fan, Jing Xu, and Christian R. Shelton. Importance sampling for continuous-time Bayesian networks. Journal of Machine Learning Research, 11(Aug):2115­2140, 2010.
+Da-Fei Feng and Russell F. Doolittle. Progressive sequence alignment as a prerequisite to correct phylogenetic trees. Journal of Molecular Evolution, 25(4):351­360, 1987.
+Charlie Frogner, Chiyuan Zhang, Hossein Mobahi, Mauricio Araya, and Tomaso A. Poggio. Learning with a Wasserstein loss. In Advances in Neural Information Processing Systems, pp. 2053­ 2061, 2015.
+Osamu Gotoh. Significant improvement in accuracy of multiple protein sequence alignments by iterative refinement as assessed by reference to structural alignments. Journal of Molecular Biology, 264(4):823­838, 1996.
+Alex Graves, Navdeep Jaitly, and Abdel-rahman Mohamed. Hybrid speech recognition with deep bidirectional LSTM. In Automatic Speech Recognition and Understanding (ASRU), 2013 IEEE Workshop on, pp. 273­278. IEEE, 2013.
+Peter J. Green and David I. Hastie. Reversible jump MCMC. Online working paper, 2009.
+Dan Gusfield. Algorithms on Strings, Trees and Sequences: Computer Science and Computational Biology. Cambridge University Press, 1997.
+11
+
+Under review as a conference paper at ICLR 2019
+Makoto Hirosawa, Yasushi Totoki, Masaki Hoshida, and Masato Ishikawa. Comprehensive study on iterative algorithms of multiple sequence alignment. Bioinformatics, 11(1):13­18, 1995.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Rudolph E. Kalman and Richard S. Bucy. New results in linear filtering and prediction theory. Journal of Basic Engineering, 83(1):95­108, 1961.
+Rudolph Emil Kalman. A new approach to linear filtering and prediction problems. Journal of Basic Engineering, 82(1):35­45, 1960.
+Leonid Kantorovitch. On the translocation of masses. Management Science, 5(1):1­4, 1958.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In Proceedings of the International Conference on Learning Representations (ICLR), 2015.
+Mark A. Larkin, Gordon Blackshields, N. P. Brown, R. Chenna, Paul A. McGettigan, Hamish McWilliam, Franck Valentin, Iain M. Wallace, Andreas Wilm, Rodrigo Lopez, et al. Clustal W and Clustal X version 2.0. Bioinformatics, 23(21):2947­2948, 2007.
+E. Levina and P. Bickel. The Earth Mover's distance is the Mallows distance: Some insights from statistics. In Computer Vision, 2001. ICCV 2001. Proceedings. Eighth IEEE International Conference on, volume 2, pp. 251­256. IEEE, 2001.
+J. Lewis. A Dynamic Load Balancing Approach to the Control of Multiserver Polling Systems with Applications to Elevator System Dispatching. Diss., University of Massachusetts, Amherst, 1991.
+Peter A. Lewis and Gerald S. Shedler. Simulation of nonhomogeneous Poisson processes by thinning. Naval Research Logistics Quarterly, 26(3):403­413, 1979.
+Chu-Cheng Lin and Jason Eisner. Neural particle smoothing for sampling from conditional sequence models. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (NAACL-HLT), New Orleans, June 2018.
+Scott W. Linderman, Yixin Wang, and David M. Blei. Bayesian inference for latent hawkes processes. In Advances in Approximate Bayesian Inference Workshop, 31st Conference on Neural Information Processing Systems, Long Beach, December 2017.
+Thomas Josef Liniger. Multivariate Hawkes processes. Diss., Eidgeno¨ssische Technische Hochschule ETH Zu¨rich, Nr. 18403, 2009, 2009.
+Jennifer Listgarten, Radford M. Neal, Sam T. Roweis, and Andrew Emili. Multiple alignment of continuous time series. In NIPS, pp. 817­824, 2005.
+Roderick J. A. Little and Donald B. Rubin. Statistical Analysis with Missing Data. J. Wiley & Sons, New York, 1987.
+Jun S. Liu and Rong Chen. Sequential Monte Carlo methods for dynamic systems. Journal of the American statistical association, 93(443):1032­1044, 1998.
+Geoffrey McLachlan and Thriyambakam Krishnan. The EM algorithm and Extensions. John Wiley & Sons, 2007.
+Hongyuan Mei and Jason Eisner. The neural Hawkes process: A neurally self-modulating multivariate point process. In Advances in Neural Information Processing Systems, Long Beach, December 2017.
+Karthika Mohan and Judea Pearl. Graphical models for processing missing data. arXiv preprint arXiv:1801.03583, 2018.
+Pierre Del Moral. Nonlinear filtering: Interacting particle resolution. Comptes Rendus de l'Academie des Sciences-Serie I-Mathematique, 325(6):653­658, 1997.
+12
+
+Under review as a conference paper at ICLR 2019
+David W. Mount. Bioinformatics: Sequence and Genome Analysis. Cold Spring Harbor Laboratory Press, 2 edition, 2004.
+Ce´dric Notredame, Desmond G. Higgins, and Jaap Heringa. T-Coffee: A novel method for fast and accurate multiple sequence alignment. Journal of molecular biology, 302(1):205­217, 2000.
+Matthew Peters, Mark Neumann, Mohit Iyyer, Matt Gardner, Christopher Clark, Kenton Lee, and Luke Zettlemoyer. Deep contextualized word representations. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long Papers), volume 1, pp. 2227­2237, 2018.
+Lawrence R. Rabiner. A tutorial on hidden Markov models and selected applications in speech recognition. In Proceedings of the IEEE, volume 77, pp. 257­286. IEEE, 1989.
+Vinayak Rao and Yee W. Teh. MCMC for continuous-time discrete-state systems. In Advances in Neural Information Processing Systems, pp. 701­709, 2012.
+Vinayak Rao and Yee Whye Teh. Fast MCMC sampling for Markov jump processes and extensions. The Journal of Machine Learning Research, 14(1):3295­3320, 2013.
+Herbert E. Rauch, C. T. Striebel, and F. Tung. Maximum likelihood estimates of linear dynamic systems. AIAA Journal, 3(8):1445­1450, 1965.
+Hiroaki Sakoe and Seibi Chiba. A dynamic programming approach to continuous speech recognition. In Proceedings of the Seventh International Congress on Acoustics, Budapest, volume 3, pp. 65­69, Budapest, 1971. Akade´miai Kiado´.
+Dominic Schuhmacher and Aihua Xia. A new metric between distributions of point processes. Advances in applied probability, 40(3):651­672, 2008.
+Christian R. Shelton, Zhen Qin, and Chandini Shetty. Hawkes process inference with missing data. In Proceedings of the Thirty-Second AAAI Conference on Artificial Intelligence, 2018.
+Charles Stein et al. A bound for the error in the normal approximation to the distribution of a sum of dependent random variables. In Proceedings of the Sixth Berkeley Symposium on Mathematical Statistics and Probability, Volume 2: Probability Theory. The Regents of the University of California, 1972.
+Ce´dric Villani. Optimal Transport: Old and New, volume 338. Springer Science & Business Media, 2008.
+Greg C. G. Wei and Martin A. Tanner. A Monte Carlo implementation of the em algorithm and the poor man's data augmentation algorithms. Journal of the American statistical Association, 85 (411):699­704, 1990.
+Chris Whong. FOILing NYCs taxi trip data, 2014. R.J. Williams. Simple statistical gradient-following algorithms for connectionist reinforcement
+elarning. Machine Learning, 8(23), 1992. Shuai Xiao, Mehrdad Farajtabar, Xiaojing Ye, Junchi Yan, Xiaokang Yang, Le Song, and Hongyuan
+Zha. Wasserstein learning of deep generative point process models. In Advances in Neural Information Processing Systems 30, 2017.
+13
+
+Under review as a conference paper at ICLR 2019
+
+Appendices
+
+A SEQUENTIAL MONTE CARLO DETAILS
+
+Our main algorithm is presented as Algorithm 1. It covers both particle filtering and particle smoothing, with optional multinomial resampling.
+In this section, we also provide some further notes that are not covered in the pseudocode.
+
+Managing LSTM state information In Algorithm 1, when we push events to stacks Hm and F, we update the respective LSTM's configurations (including gates, cell memories and states), and we revert these updates when we pop events from F. These operations facilitate the computation of intensities pk(t) and qk(t).
+Integral computation Computing the weight wm requires handling the integral on line 28 and line 40 of Algorithm 1. We use the same trick in section B.2 of Mei & Eisner (2017) that gives an unbiased estimate of the integrals by evaluating (ti,j - ti,j-1)p(t) and (ti,j - ti,j-1)q(t) at a random t  Unif(ti,j-1, ti,j). We can draw N samples instead of one, and this Monte Carlo algorithm will average over these samples to reduce the variance of this noisy estimator.
+
+Choice of  How do we construct the upper bound  (line 33 of Algorithm 1)? For particle filtering, we follow the recipe in B.3 of Mei & Eisner (2017): we can express  = fk(maxt g1(t) + . . . + maxt gn(t)) where each summand vkdhd(t) = vkd · oid · (2(2cd(t)) - 1) is upper-bounded
+by maxc{cid,c¯id} vkd · oid · (2(2c) - 1). Note that the coefficients wkd may be either positive or negative.
+
+For particle maxt gn(t)
+
+smoothing, we simply + maxt g¯1(t) + . . . +
+
+have more summands inside fk so  = maxt g¯n¯ (t)) where each extra summand
+
+fukk(dmh¯ da(xtt) g=1 (tu)k+d
+
+. ·
+
+..+ oid ·
+
+(2(2cd(t)) - 1) is upper-bounded by maxc{cid,c¯id} ukd · oid · (2(2c) - 1) and each ukd is the
+
+d-th element of vector vk V (equation (9)). Note that the oid, cid, c¯id of newly added summands g¯
+
+are actually from the right-to-left LSTM while those of g are from the left-to-right LSTM. We only
+
+use the same notation here for presentation simplicity.
+
+Missing data factors in p Recall that the joint model (1) includes a factor pmiss(Miss = z | Comp = x z), which appears in the numerator of the unnormalized importance weight (7b).
+Regardless of the form of this factor, it could be multiplied into the particle's weight w~m at the end of
+sampling (line 15). However, Algorithm 1 assumes a missingness mechanism where the missingness of each event k@t depends only on that event and preceding events,6 so that pmiss(Miss = z | Comp = x z) factors as
+
+pmiss((k @t  Miss) = (k @t  z) | {k @t :  })
+indices(x z)
+
+(17)
+
+Algorithm 1 can thus incrementally incorporate the subfactors of equation (17), and does so at line 30.
+
+Optional missing data factors in q We can optionally improve the particle filtering proposal intensities to incorporate the pmiss factor discussed above (in which case that factor will be multiplied into the denominator of (7b) and not just the numerator). This makes q(z | x) better match p(z | x): it means we will rarely posit an unobserved event that would rarely have gone missing.
+Specifically, if a completed-data event k@t would have probability rk(t | H(t)) of going missing given the preceding events H(t), it is wise to define kq (t | H(t)) = kp(t | H(t)) · rk(t | H(t)).
+We include this extra rk factor in our experiments (section 5), although it is not shown in Algorithm 1. It is particularly simple in our experiments, where rk is constant at 1 or 0 depending on
+6This assumption could trivially be relaxed to allow it to also depend on the missingness of the preceding events, and/or on the future observed events F(t).
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+k. In other words, some event types k are deterministically missing, while others are never missing and thus we never propose them as part of z.
+
+The above considers the particle filtering case. In the case of particle smoothing, we have already
+
+tried to section
+
+3en.2s.u1reaibmysottohetrramineankqs(tth|atHth(et)p, rFop(to)s)alsoditshtraitbuthtieonrewsuilltliningcoqr(pzor|axte) pmissp.(zTh|atxi)s,
+
+because and the
+
+posterior distribution p(z | x) does condition on the missingness of z. However, if the rk factor is
+
+known, why not include it explicitly instead of having to train the BiLSTM to mimic it? Thus it can
+
+be convenient to modify the right-hand side of equation (9) to include a factor of rk. This yields
+
+a more expressive and better-factored family of proposal distributions: missingness is now handled
+
+by the known rk factor and the BiLSTM does not have to explain it.
+
+Modifying equation (9) in this way is particularly useful in the special case rk = 0 (i.e., event type k is never missing and should not be proposed). There, it enforces the hard constraint that qk = 0 (something that the BiLSTM by itself could not achieve); and since this constraint is enforced regardless of the BiLSTM parameters, the events of type k appropriately become irrelevant to the training of the BiLSTM, which can focus on predicting other event types. We do this in our
+experiments.
+
+B RIGHT-TO-LEFT CONTINUOUS-TIME LSTM
+
+Here we give details of the right-to-left LSTM from section 3.2. At each time t  (0, T ), its hidden state h¯(t) is continually obtained from the memory cells c(t) as the cells decay:
+
+h¯(t) = oi (2(2c(t)) - 1) for t  (ti-1, ti]
+
+(18)
+
+where the interval (ti-1, ti) has consecutive observations ki-1@ti-1 and ki@ti as endpoints.
+
+At ti, c(t) to
+
+the continuous-time LSTM reads new initial values ci-1, based on
+
+ki@ti and updates the the current (decayed)
+
+current (decayed) hidden state h¯(ti),
+
+hidden cells as follows:7
+
+ii-1   (Wiki + Uih(ti) + di) (19a)
+f i-1   (Wf ki + Uf h(ti) + df ) (19b)
+zi-1  2 (Wzki + Uzh(ti) + dz) - 1 (19c)
+
+ci-1  f i-1 c(ti) + ii-1 zi-1 c¯i-1  ¯f i-1 c¯i + ¯ii-1 zi-1 i-1  f (Wdki + Udh(ti) + dd)
+
+(20a) (20b) (20c)
+
+oi-1   (Woki + Uoh(ti) + do) (19d)
+
+The vector ki  {0, 1}K is the ith input: a one-hot encoding of the new event ki, with non-zero value only at the entry indexed by ki. Then, c(t) is given by (21), which continues to control h(t) except that i has now decreased by 1).
+
+c(t) =def c¯i-1 + (ci-1 - c¯i-1) exp (-i-1 (ti - t)) for t  (ti-1, ti]
+
+(21)
+
+On the interval [ti-1, ti), c(t) follows an exponential curve that begins at ci-1 (in the sense that limtt-i c(t) = ci-1) and decays, as time t decreases, toward c¯i-1.
+
+C OPTIMAL TRANSPORT DISTANCE DETAILS
+
+In this section, we first present the detailed algorithm of finding the OTD and its corresponding alignment, and then prove it is a valid metric.
+
+C.1 ALGORITHM DETAILS The details of how to find optimal transport distance is presented in Algorithm 2.
+
+C.2 PROOF THAT OPTIMAL TRANSPORTATION DISTANCE IS A VALID METRIC
+We have defined that the optimal transportation distance (OTD), and we prove that it is a valid metric here.
+7The upright-font subscripts i, f, z and o are not variables, but constant labels that distinguish different W, U and d tensors. The ¯f and ¯i in equation (20b) are defined analogously to f and i but with different weights.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 1 Sequential Monte Carlo -- Neural Hawkes Particle Filtering/Smoothing
+
+Input: observed seq. x = k0@t0, . . . , kI+1@tI+1 with k0 = BOS, t0 = 0, kI+1 = EOS, tI+1 = T ; model p; missingness mechanism pmiss; proposal distribution q; number of particles M ;
+boolean flags smooth and resample
+Output: collection {(z1, w1), . . . , (zM , wM )} of weighted particles 1: procedure SEQUENTIALMONTECARLO(x, p, pmiss, q, M, smooth, resample) 2: for m = 1 to M : init weighted particles (zm, wm). History Hm combines zm with a prefix of x
+3: zm  empty sequence; wm  1; Hm  empty stack
+
+4: if smooth :
+
+use particle smoothing
+
+5: F  empty stack
+
+6: for i = I downto 0 :
+
+stack of all future observed events
+
+7: push ki+1@ti+1 onto F as we reach these events, we'll pop from F and push onto Hm (m)
+
+8: else 9: F  ignored
+
+use particle filtering instead special value if we're not using the future stack; unaffected by pop operation
+
+10: for i = 0 to I : observe present event ki@ti, then propose unobserved events on interval (ti, ti+1)
+
+11: for m = 1 to M :
+
+12: DRAWSEGMENT(i, m)
+
+destructively extend zm, wm, Hm with events on [ti, ti+1)
+
+13: pop F
+
+pop ki+1@ti+1 from F : it's no longer in the future but in the present
+
+14: if resample : RESAMPLE() optional multinomial resampling replaces all weighted particles
+
+15:
+
+return {(zm, wm/
+
+M m=1
+
+wm)}Mm=1
+
+M particles with weights normalized as in equation (7a)
+
+16: procedure RESAMPLE
+
+has access to global variables
+
+17: for m = 1 to M : often draws multiple copies of good (high-weight) particles, 0 copies of bad ones
+
+18:
+
+z~m  Categorical({zm  wm/
+
+M m=1
+
+wm}mM=1)
+
+19: for m = 1 to M :
+
+20: zm  z~m; wm  1
+
+update particles and their weights
+
+21: procedure DRAWSEGMENT(i, m)
+
+has access to global variables
+
+22: p gives info to define function kp(t) d=ef k(t | Hm)
+
+23: q gives info to define function qk(t) d=ef k(t | Hm, F ), or qk(t) = kp(t) if F = ignored 24: these functions consult state of left-to-right LSTM that's read Hm & right-to-left LSTM that's read F
+
+25:
+
+we also define the total intensity functions p(t) d=ef
+
+K k=1
+
+kp (t)
+
+and
+
+q
+
+(t)
+
+d=ef
+
+K k=1
+
+qk
+
+(t)
+
+26: j  0; ki,j  ki; ti,j  ti
+
+ready to observe ith event of x
+
+27: while true : one iteration adds event at index i, j (for j = 0, 1, 2, . . . until we break out of loop)
+
+28:
+
+wm
+
+
+
+wm
+
+·
+
+p
+ki,j
+
+(ti,j
+
+)
+
+exp
+
+(-
+
+ti,j t =ti,j-1
+
+p(t
+
+)dt
+
+)
+
+new factor in numerator p of (7b)
+
+29: push ki,j @ti,j onto Hm; t  ti,j
+
+event just generated by p now becomes part of history
+
+30: wm  wm · pmiss((ki,j @ti,j  Miss) = (j > 0) | Hm) new factor in numerator p of (7b)
+
+31: Now draw possible missing event at index i, j +1 ; we'll loop back and add it if it falls in (ti, ti+1)
+
+32: repeat
+
+thinning algorithm (see Mei & Eisner, 2017)
+
+33: find any   sup {q(t ) : t  (t, ti+1)} 34: draw   Exp(), u  Unif(0, 1)
+
+e.g., old  still works if i unchanged
+
+35: t += 
+
+time of next proposed event (before thinning)
+
+36: if t  ti+1 : proposed event falls outside (ti, ti+1), where ki+1@ti+1 is top element of F
+
+37: return
+
+done adding events on [ti, ti+1); time to break out of while loop
+
+38: 39:
+
+until u  q(t) j  j + 1; ti,j  t;
+
+ki,j
+
+
+
+Categorical({k
+
+
+
+thinning: accept proposal
+
+kq (t) q (t)
+
+}kK=1);
+
+append
+
+ki,j
+
+with @ti,j
+
+prob
+
+q (t) 
+
+to zm
+
+
+
+1
+
+40:
+
+wm  wm/
+
+q
+ki,j
+
+(ti,j
+
+)
+
+exp(-
+
+ti,j t =ti,j-1
+
+q (t
+
+)dt
+
+)
+
+new factor in denominator q of (7b)
+
+It's trivial that OTD is non-negative, since movement, deletion and insertion costs are all positive.
+
+It's also trivial to prove that the following statement is true:
+
+D(z1, z2) = 0  z1 = z2,
+
+(22)
+
+where z1 and z2 are two sequences. If z1 is not identical to z2, the distance of them must be larger than 0 since we have to do some movement, insertion or deletion to make them exactly matched, so the right direction of equation (22) holds. If the distance between z1 and z2 is zero, which means
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 2 A Dynamic Programming Algorithm to Find Optimal Transport Distance
+
+Input: proposal z^; reference z
+
+Output: optimal transport distance d; alignment a 1: procedure OTD(z, z^)
+
+2: d  0; a  empty collection {}
+
+3: for k  1 to K : 4: d(k), a(k)  DYNAMICPROGRAMMING(z^(k), z(k))
+
+5: d  d + d(k); a  a  a(k)
+
+6: return d, a
+
+7: procedure DYNAMICPROGRAMMING(z(k), z^(k))
+
+8: I^  |z^(k)|; I  |z(k)|
+
+z^(k) = t^1, . . . , t^I^ and z(k) = t1, . . . , tI
+
+9: D  zero matrix with (M + 1) rows and (N + 1) columns
+
+10: P  empty matrix with M rows and N columns
+
+back pointers
+
+11: for ^i  1 to I^ :
+
+transport reference of length 0 to proposal of length ^i
+
+12: D^i,0  D^i-1,0 + Cinsert
+
+insert t^i = t^^i to reference (and their prefixes are matched)
+
+13: for i  1 to I :
+
+transport preference of length i to proposal of length 0
+
+14: D0,j  D0,j + Cdelete
+
+delete ti (and prefixes are matched)
+
+15: for ^i  1 to I^ :
+
+proposal prefix of length ^i
+
+16: for i  1 to I :
+
+to match reference of length i
+
+17: Dinsert  D^i-1,i + Cinsert
+
+if an event token at t^^i is inserted to z(k)
+
+18: Ddelete  D^i,i-1 + Cdelete
+
+if the event token at ti is deleted from z(k)
+
+19:
+
+Dmove  D^i-1,i-1 + |t^^i - ti |
+
+if the event at ti of z(k) is aligned to event at t^^i of z^(k)
+
+20: D^i,i  min{Dinsert, Ddelete, Dmove}
+
+choose the edit that yields the shortest distance
+
+21: P^i,i  arg mine{insert,delete,move} De
+
+e represents a kind of edition
+
+22: ^i  I^; i  I; a  empty collection{}
+
+23: while ^i > 0 and i > 0 :
+
+back trace
+
+24: if P^i,i = insert :
+
+token ti is deleted.
+
+25: ^i  ^i - 1
+
+26: if P^i,i = delete : 27: i  i - 1
+
+a token at t^^i is inserted
+
+28: if P^i,i = move : 29: ^i  ^i - 1; i  i - 1 30: a  a  {(t^^i, ti )}
+
+token ti is aligned to t^^i
+
+31: return DI^,I , a
+
+they are already matched without any operations, z1 and z2 must be identical, thus the left direction of equation (22) holds.
+
+OTD is symmetric, that is, D(z1, z2) = D(z2, z1), if we set Cinsert = Cdelete. Suppose that a is an alignment between z1 and z2. It's easy to see that the only difference between D(z1, z2, a) and D(z2, z1, a) 8 is that the insertion and deletion operations are exchanged. For example, if we delete a token ti  z1 when calculating D(z1, z2, a), we should insert a token at ti to z2 when calculating D(z2, z1, a). If we set Cinsert = Cdelete, we have
+
+D(z1, z2, a) = D(z2, z1, a), a  A(z1, z2).
+
+(23)
+
+Therefore, we could obtain
+
+D(z1,
+
+z2)
+
+=
+
+min
+a A(z1 ,z2 )
+
+D(z1,
+
+z2,
+
+a)
+
+=
+
+min
+a A(z1 ,z2 )
+
+D(z2,
+
+z1,
+
+a)
+
+=
+
+D(z2,
+
+z1).
+
+(24)
+
+Finally let's prove that OTD satisfies triangle inequality, that is:
+
+D(z1, z2) + D(z2, z3)  D(z1, z3),
+
+(25)
+
+where z1, z2 and z3 are three sequences. This property could be proved intuitively. Suppose that the operations on z1 with minimal costs to make z1 matched to z2 are denoted by o1, o2, . . . , on1 , and
+
+8We abuse the notation a, which we think could represent both the movement from z1 to z2 and from z2 to z1.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+those on z2 to make z2 matched to z3 are denoted by o1, o2, . . . , on2 . oi could be a deletion, insertion or movement on a token. To make z1 matched to z3, one possible way, which is not necessarily the optimal, is to do o1, o2, . . . , on1 , o1, o2, . . . , on2 on z1. Since the total cost is the accumulation of the cost of each operation, and the operations on z1 above to make z1 matched to z3 might not be
+optimal, the triangle inequality equation (25) holds.
+
+D APPROXIMATE MBR DETAILS
+In this section, we first prove the Theorem 1 in section 4.2, and then show the detailed algorithm to find the decode.
+
+D.1 THEOREM PROOF AND RELATED
+
+We have a claim in section 4.2 that:
+
+Theorem 1. Given {zm}mM=1, if we define z =
+
+M m=1
+
+zm,
+
+then:
+
+MM
+
+z^  P(z ) such that
+
+wmD(zm,
+
+z^)
+
+=
+
+min
+zZ
+
+wmD(zm, z)
+
+m=1
+
+m=1
+
+(26)
+
+where P(z) is the power set of any given z--the set of subsequences of z (including empty sequence and z itself). That is to say, there exists one subsequence of z that achieves the minimum Bayes
+risk (or the minimum weighted optimal transport distance).
+
+and we prove it in this section:
+
+Proof. Here we assume that there is only one type of event. Since the distances of different types of events are calculated separately, our conclusion is easy to be extended to the general case.
+
+Suppose z is an optimal decode, that is,
+
+MM
+
+wmD(zm,
+
+z)
+
+=
+
+min
+zZ
+
+wmD(zm, z).
+
+m=1
+
+m=1
+
+If z  P(z ), the proof is done. If not, suppose there exists a token at ti / z . We use tl  z
+
+(tr  z ) to denote the token in z that is left (right) and nearest to ti.9 We will show that if we move
+
+ti around, as long as ti  [tl, tr], the weighted optimal transport distance, i.e.
+
+M m=1
+
+wmD(zm,
+
+z
+
+),
+
+will neither increase nor decrease.
+
+Suppose am = arg minamA(zm,z)
+
+M m=1
+
+wm
+
+D(zm,
+
+z,
+
+am).
+
+Let's use r(t) to indicate the
+
+weighted transport distance of z with fixed alignment if we move ti to t, that is,
+
+M
+
+r(t) =def
+
+wmD(zm, z(t), am ),
+
+m=1
+
+where z(t) is the sequence z with the optimal alignment for z(ti), we
+
+ti moved to t. should have
+
+Because
+
+z(ti)
+
+is
+
+an
+
+optimal
+
+decode,
+
+and
+
+am
+
+is
+
+r(ti)
+
+=
+
+min
+t
+
+r(t).
+
+Note that the transport distance is comprised of three parts: deletion, insertion and alignment costs. Since every am is fixed, if we change t, only the alignment cost that related to token t will affect r(t). This part of r(t) is linear to t, since we have a constraint t  [tl, tr], which guarantees that it will not cross any other tokens in z .
+
+Since r(t) is linear to t  [rl, tr] and r(t) gets minimized at ti  (tl, tr), we could conclude that r(t) = r(ti) = Const, t  [tl, tr].
+
+9We assume that ti is in between two tokens in z , and our proof could be easily extended to the case for which this condition is not satisfied.
+
+18
+
+Under review as a conference paper at ICLR 2019
+
+DATASET
+SYNTHETIC NYCTAXI ELEVATOR
+
+K
+4 10 10
+
+# OF EVENT TOKENS
+
+TRAIN
+
+DEV
+
+ 74967 157916 313043
+
+ 7513 15826 31304
+
+TEST
+ 7507 15808 31206
+
+SEQUENCE LENGTH
+
+MIN MEAN MAX
+
+10  15 22 32 235 313
+
+20 38 370
+
+Table 1: Statistics of each dataset. We write " N " to indicate that N is the average value over multiple datasets of one kind (synthetic); the variance is small in each such case.
+
+Since r(t) is the upper bound of the weighted optimal transport distance
+
+M m=1
+
+wm
+
+D(zm
+
+,
+
+z(t)),
+
+which also gets the same minimal value at ti  (tl, tr) as r(t), we could conclude that
+
+MM
+
+wmD(zm, z(t)) = wmD(zm, z(ti)) = Const, t  [tl, tr].
+
+m=1
+
+m=1
+
+Therefore we could move token ti to either tl or tr without increasing the Bayes risk. We could do this movement for each ti / z to get a new decode z^  P(z ), which is also an optimal decode.
+
+D.2 ALGORITHM DETAILS
+The detailed algorithm is presented in Algorithm 3.
+E EXPERIMENTAL DETAILS
+In this section, we elaborate on the details of data generation, processing, and experimental results.
+E.1 DATASET STATISTICS
+Table 1 shows statistics about each dataset that we use in this paper.
+E.2 TRAINING DETAILS
+We used single-layer LSTMs (Hochreiter & Schmidhuber, 1997), selected the number D of hidden nodes of the left-to-right LSTM, and then D of the right-to-left one from a small set {16, 32, 64, 128, 256, 512, 1024} based on the performance on the dev set of each dataset. The best-performing (D, D ) pairs are (256, 128) on Synthetic, (256, 256) on Elevator (256, 256) on NYC Taxi, but we empirically found that the model performance is robust to these hyperparameters. For the chosen (D, D ) pair on each dataset, we selected  based on the performance on the dev set, and  = 1.0 yields the best performance across all the datasets we use. For learning, we used Adam with its default settings (Kingma & Ba, 2015).
+E.3 SYNTHETIC DATASETS DETAILS
+Each of the ten neural Hawkes processes has its parameters sampled from Unif[-1.0, 1.0]. Then a set of event sequences is drawn from each of them via the plain vanilla thinning algorithm (Mei & Eisner, 2017). For each of the ten synthetic datasets, we took K = 4 as the number of event types. To draw each event sequence, we first chose the sequence length I (number of event tokens) uniformly from {11, 12, . . . , 20} and then used the thinning algorithm to sample the first I events over the interval [0, ). For subsequent training or testing, we treated this sequence (appropriately) as the complete set of events observed on the interval [0, T ] where T = tI , the time of the last generated event. We generate 5000, 500 and 500 sequences for each training, dev, and test set respectively.
+19
+
+Under review as a conference paper at ICLR 2019
+
+START TIME (MIN)
+
+00 05 10 15 20 25 30 35 40 45 50 55
+
+MEAN # PASSENGER 1 2 4 4 18 12 8 7 18 5 3 2
+
+Table 2: The Down-Peak Traffic Profile
+E.4 ELEVATOR SYSTEM DATASET DETAILS
+We examined our method in a simulated 5-floor building with 2 elevator cars. During a typical afternoon down-peak rush hour (when passengers go from floor-2,3,4,5 down to the lobby), elevator cars travel to each floor and pick up passengers that have (stochastically) arrived there according to a traffic profile (Bao et al., 1994). Each car will also avoid floors that already are or will soon be taken care of by the other. Having observed when and where car-1 has stopped (to pick up or drop off passengers) over this hour, we are interested in when and where car-2 has stopped during the same time period. In this dataset, each event type is a tuple of (car number, floor number) so there are K = 10 in total in this simulated 5-floor building with 2 elevator cars.
+Passenger arrivals at each floor are assumed to follow a inhomogeneous Poisson process, with arrival rates that vary during the course of the day. The simulations we use follows a human-recorded traffic profile (Bao et al., 1994) which dictates arrival rates for every 5-minute interval during a typical afternoon down-peak rush hour. Table 2 shows the mean number of passengers (who are going to the lobby) arriving at floor-2,3,4,5 during each 5-minute interval.
+We simulated the elevator behavior following a naive baseline strategy documented in Crites & Barto (1996).10 In details, each car has a small set of primitive actions. If it is stopped at a floor, it must either "move up" or "move down". If it is in motion between floors, it must either "stop at the next floor" or "continue past the next floor". Due to passenger expectations, there are two constraints on these actions: a car cannot pass a floor if a passenger wants to get off there and cannot turn until it has serviced all the car buttons in its current direction. Three additional action constraints were made in an attempt to build in some primitive prior knowledge: 1) a car cannot stop at a floor unless someone wants to get on or off there; 2) it cannot stop to pick up passengers at a floor if another car is already stopped there; 3) given a choice between moving up and down, it should prefer moving up (since the down-peak traffic tends to push the cars toward the bottom of the building). Because of this last constraint, the only real choices left to each car are the stop and continue actions, and the baseline strategy always chooses to continue. The actions of the elevator cars are executed asynchronously since they may take different amounts of time to complete.
+We repeated the (one-hour) simulation 700 times to collect the event sequences, each of which has around 300 time-stamped records of which car stops at which floor. We randomly sampled disjoint train, dev and test sets with 500, 100 and 100 sequences respectively.
+
+E.5 NEW YORK CITY TAXI DATASET DETAILS
+The New York City Taxi dataset (section 5.1) includes 189,550 taxi pick-up and drop-off records in the city of New York in 2013. Each record has its medallion ID, driver license and time stamp. Each combination of medallion ID and driver license naturally forms a sequence of time-stamped pick-up and drop-off events. Following the processing recipe of previous work (Du et al., 2016), we construct shorter sequences by breaking each long sequence wherever the temporal gap between a drop-off event and its following pick-up event is larger than six hours. Since the schedule of different drivers might be very different, it's hard to set a natural t0, that is, the time stamp of BOS.
+We randomly sampled a month from 2013 and then randomly sampled disjoint train, dev and test sets with 5000, 500 and 500 sequences respectively from that month.
+In this dataset, each event type is a tuple of (borough, action) where the action can be either pick-up or drop-off, so there are K = 5 × 2 = 10 event types in total.
+
+10We rebuilt the system in Python following the original Fortran code of Crites & Barto (1996). 20
+
+Under review as a conference paper at ICLR 2019
+
+F MONTE CARLO EM
+
+We normally assume (section 3.2.1) that some complete sequences are available for training the neural Hawkes process models. If incomplete sequences are also available, our particle smoothing method can be used to (approximately) impute the missing events, which yields additional complete sequences for training. Indeed, if we are willing to make an MAR assumption (Little & Rubin, 1987),11 then we can do imputation without modeling the missingness mechanism. Training on such imputed sequences is an instance of Monte Carlo expectation-maximization (MCEM) (Dempster et al., 1977; Wei & Tanner, 1990; McLachlan & Krishnan, 2007), with particle smoothing as the Monte Carlo E-step, and makes it possible to train with incomplete data only. In the more general MNAR scenario, we can extend the E-step to consider the not-at-random missingness mechanism (see equation (7b) below), but then we need both complete and incomplete sequences at training time in order to fit the parameters of the missingness mechanism (unless these parameters are already known) jointly with those of the neural Hawkes process. Although training with incomplete data is out of the scope of our experiments, we describe the methods and provide MCEM pseudocode in Appendix F.
+
+In this case, we would like to know the probability of the observed data under the target distribution:
+
+p(Obs = x) = p(Miss = z, Obs = x) = p(x z)pmiss(z | x)
+
+(27)
+
+zz
+
+where the marginal target distribution p(Obs = x) is abbreviated as p(x). If we propose z from q(z | x), then it can be rewritten as:
+
+p(x) =
+
+p(x
+
+z)pmiss(z
+
+|
+
+x)
+
+q(z q(z
+
+| |
+
+x) x)
+
+dz
+
+=
+
+Ezq(z|x)[
+
+p(x
+
+z)pmiss(z q(z | x)
+
+|
+
+x)
+
+]
+
+z
+
+(28)
+
+Given a finite number M of proposed particles {zm}Mm=1, this expectation can be estimated with empirical average:
+
+p(x)
+
+=
+
+1 M
+
+M m=1
+
+p(x
+
+zm)pmiss(zm | x) q(zm | x)
+
+(29)
+
+and it is obvious that
+
+log p(x)
+
+
+
+1 M
+
+M
+(log p(x
+
+zm) + log pmiss(zm | x) - log q(zm | x))
+
+m=1
+
+(30)
+
+where the right-hand-side (RHS) term is the Evidence Lower Bound (ELBO) that we would maximize in order to maximize the log-likelihood.
+
+The MCEM algorithm is composed of two steps:
+
+E(xpectation)-step We train the proposal distribution q(z | x) using the method in section 3.2.1 and then sample M weighted particles from q(z | x) by calling Algorithm 1.
+M(aximization)-step We train the neural Hawkes process p(x z) by maximizing the ELBO (equation (30)).
+
+Note that in the MAR case, pmiss(z | x) is constant of z so the it can be omitted from the formulation (and thus the algorithms). Also note that, for particle filtering, the proposal distribution q(z | x) is
+only part of p(x z) so we ought only to propose particles in the E-step.
+
+11It is "almost impossible" to determine from the data whether the MAR assumption holds (Mohan & Pearl, 2018).
+21
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 3 Find an approximately minimum-Bayes-risk sequence of events
+
+Input: collection of weighted particles ZM = {(zm, wm)}Mm=1 Output: decode z^
+
+1: procedure APPROXMBR(ZM ) 2: z^  empty sequence
+
+3: for k = 1 to K : 4: z^(k)  DECODEK({(z(mk), wm)}Mm=1) 5: z^  z^ z^(k)
+
+decode for type-k by calling DECODEK
+
+6: return z^
+
+7: procedure DECODEK(ZM )
+
+8: ZM actually means ZM(k) = {(zm(k), wm)}Mm=1 throughout the procedure; zm is constant
+
+9: 10:
+
+z  arg repeat
+
+maxz{zm }Mm=1
+
+wm
+
+init decode as highest weighted particle and it is global
+
+11: for m = 1 to M :
+
+Align Phase
+
+12:
+
+dm, am  DYNAMICPROGRAM(zm, z)
+
+call method in Algorithm 2; dm, am are global
+
+13: rmin  m wmdm
+
+14: z, {dm, am}Mm=1  MOVE(z, {zm, dm, am}Mm=1)
+
+15: z, {dm, am}mM=1  DELETE(z, {zm, dm, am}Mm=1)
+
+16: z, {dm, am}mM=1  INSERT(z, {zm, dm, am}mM=1)
+
+17:
+
+until
+
+M m=1
+
+wmdm
+
+=
+
+rmin
+
+18: return z
+
+track the risk of current z risk stops decreasing
+
+19: procedure MOVE(z, {zm, dm, am}mM=1)
+
+Move Phase
+
+20: for t in z :
+
+21:
+
+for t  {t : (t , t) 
+
+M m=1
+
+am}
+
+:
+
+may replace t with t which is aligned to t
+
+22: (m)dm  dm
+
+23: for (t , m)  {(t , m) : (t , t)  am, m  {1, . . . , M }} :
+
+24: dm  dm - |t - t| + |t - t |
+
+25: if m wmdm < m wmdm : 26: (m)dm  dm; t  t 27: return z, {dm, am}Mm=1 28: procedure DELETE(z, {zm, dm, am}mM=1) 29: for t in z :
+
+t move to t for lower risk
+Delete Phase may delete this event
+
+30: for m = 1 to M :
+
+update each dm
+
+31: if t  zm and (t , t)  am :
+
+find the only, if any, t  zm that is aligned to t
+
+32: dm  dm + Cdelete - |t - t|
+
+dm changes if we delete t and alignment (t , t)
+
+33: else
+
+otherwise, one insertion must have been made to match t
+
+34: dm  dm - Cinsert
+
+so the insertion cost disappears if we delete t
+
+35: if m wmdm < m wmdm : 36: delete t from z; (m) delete (t , t) from am; dm  dm
+
+37: return z, {dm, am}Mm=1
+
+38: procedure INSERT(z, {zm, dm, am}mM=1)
+
+Insert Phase
+
+39:
+
+for t  {t : t 
+
+M m=1
+
+zm,
+
+t
+
+/
+
+z}
+
+:
+
+40: (m)am  am
+
+may insert t if it is not in z yet
+
+41: for m = 1 to M :
+
+find t in zm that is not aligned (thus in z ) and closest to t (arg min)
+
+42: z  {t : t, (t , t) / am}
+
+z may be empty, i.e. all in zm are aligned
+
+43: if z is not empty and |(t  arg mint zmz {|t - t|}) - t| < Cinsert + Cdelete : 44: dm  dm - Cdelete + |t - t|; add (t , t) to am
+
+45: else
+
+46: dm  dm + Cinsert
+
+47: if m wmdm < m wmdm : 48: insert t to z; (m)dm  dm; am  am 49: return z, {dm, am}mM=1
+
+22
+
+

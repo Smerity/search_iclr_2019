@@ -1,0 +1,924 @@
+Under review as a conference paper at ICLR 2019
+THE CASE FOR FULL-MATRIX ADAPTIVE REGULAR-
+IZATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Adaptive regularization methods pre-multiply a descent direction by a preconditioning matrix. Due to the large number of parameters of machine learning problems, full-matrix preconditioning methods are prohibitively expensive. We show how to modify full-matrix adaptive regularization in order to make it practical and effective. We also provide novel theoretical analysis for adaptive regularization in non-convex optimization settings. The core of our algorithm, termed GGT, consists of efficient inverse computation of square roots of low-rank matrices. Our preliminary experiments underscore improved convergence rate of GGT across a variety of synthetic tasks and standard deep learning benchmarks.
+1 INTRODUCTION
+Stochastic gradient descent is the workhorse behind the recent deep learning revolution. This simple and age-old algorithm has been supplemented with a variety of enhancements to improve its practical performance, and sometimes its theoretical guarantees.
+Amongst the acceleration methods there are three main categories: momentum, adaptive regularization, and variance reduction. Momentum (in its various incarnations, like heavy-ball or Nesterov acceleration) is the oldest enhancement. It has a well-developed theory, and is known to improve practical convergence in a variety of tasks, small and large. It is also easy to implement. Variance reduction is the most recent advancement; in theory and practice, it is mostly applicable to convex optimization, and is thus less influential in deep learning.
+This brings us to adaptive regularization: the most sophisticated, hard to implement, and debated acceleration method. While state-of-the-art optimizers such as Adam and AdaGrad (Kingma & Ba, 2014; Duchi et al., 2011) do use adaptive regularization, they do so in a very limited form: with diagonal matrices, often marketed as per-coordinate adaptive learning-rate methods. Despite solid theoretical guarantees, the practical value of diagonal adaptive regularization as compared to "vanilla" SGD has been the subject of much debate (Wilson et al., 2017). However, the efficacy of full-matrix adaptive regularization has been relatively unexplored. This is due to the prohibitive computational cost associated with full-matrix operations: full AdaGrad requires taking the inverse square root of a large matrix.
+In this paper, we present GGT, a practical solution to the computational problems plaguing fullmatrix adaptive regularization, making this technique scalable for modern deep models. At the heart of our method is a simple, GPU-friendly way to apply the inverse square root of the low-rank second-moment matrix of recent gradients; see Figure 1. GGT's running time is comparable to state-of-the-art optimizers.
+We proceed to show that full-matrix preconditioning allows for much better exploitation of anisotropic curvature in loss landscapes. First, we show synthetic experiments which demonstate clear benefits of GGT over baselines, especially when the problem is ill-conditioned. Then, we implement GGT at scale, and show that the benefits translate to faster training on standard deep learning benchmarks. Our improvement is most salient in complicated landscapes like RNN training.
+Our algorithm comes with theoretical guarantees. We give the first proof of convergence to firstorder critical points for an algorithm with adaptive regularization in a stochastic non-convex setting, featuring a rate which is dependent on an adaptive ratio. We show examples where our bound is stronger than that for SGD, providing some theoretical basis for our empirical findings.
+1
+
+Under review as a conference paper at ICLR 2019
+1.1 RELATED WORK
+Since the introduction of AdaGrad (Duchi et al., 2011), diagonal adaptive regularization has been a mainstay in the machine learning practitioner's toolbox. A quick perusal of the literature shows that these methods have continued to thrive in the deep learning era, and appear in all major frameworks (Abadi et al., 2016; Paszke et al., 2017; Chen et al., 2015). By citation count (or GitHub search hits), Adam (Kingma & Ba, 2014) is by far the most popular adaptive optimizer for training a variety of modern deep models. For this reason, this paper's exposition is targeted towards a full-matrix dropin replacement for Adam; however, our techniques extend straightforwardly to a plethora of variants, like RMSprop (Tieleman & Hinton, 2012), Adadelta (Zeiler, 2012), Nadam (Dozat, 2016), etc.
+Full-matrix adaptive regularization has existed alongside the more commonly used diagonal-matrix manifestation since their common inception in (Duchi et al., 2011); however, a major obstacle to the scalability of these methods is the need for the storage and inversion of square matrices in the model dimension. This becomes prohibitively expensive in dimension greater than 104, while state-of-theart models regularly exceed 107 parameters.
+Matrix sketching has been employed to approximate the AdaGrad preconditioner (Krummenacher et al., 2016; Mehta et al., 2016); however, the sketched estimate for the matrix inverse can be sensitive to noise. In the former, the authors report a 5-10× overhead over AdaGrad, even with < 105 model parameters; we could not find a usable GPU implementation for their requisite rank-1 QR update. (Gupta et al., 2018) propose a way to do AdaGrad with Kronecker products of full-matrix preconditioners, a more limited setting which requires knowledge of the model's structure. Finally, as we argue in Section 3.1, there is intrinsic value of "forgetting" past curvature using an exponential window. With this, a low-rank preconditioning matrix naturally arises, allowing us to bypass the computational need for sketching in the model dimension or architecture-dependent restriction of the preconditioner.
+Our algorithm bears a superficial resemblance to L-BFGS (Liu & Nocedal, 1989), a version of BFGS (Broyden, 1970; Fletcher, 1970; Goldfarb, 1970; Shanno, 1970) which uses a sliding window of gradient history. Although some are viable for large-scale implementation, these quasi-Newton methods, along with (subsampled, online, cubic-regularized) Newton methods (Erdogdu & Montanari, 2015; Agarwal et al., 2017b; Luo et al., 2016; Hazan et al., 2007; Agarwal et al., 2017a; Carmon et al., 2017) exhibit very different dynamics than the standard optimizers in deep learning, and thus have not seen widespread adoption. We find recent deep learning applications of secondorder methods (e.g. (Martens & Grosse, 2015; Martens et al., 2018)) to be intriguing, though outside the scope of this paper.
+Recently, the role of adaptive regularization has been a hotly contested topic. In (Wilson et al., 2017), the authors suggest that properly-tuned SGD exhibits superior generalization to adaptive methods. In turn, (Keskar & Socher, 2017) propose switching the optimizer from Adam to SGD at the end of training, to reap the advantages of each. Influentially, Adam's convergence has been the object of recent scrutiny (Reddi et al., 2018). However, Adam continues to enjoy successful convergence in practice; the problematic construction involves pathological outlier gradients. We do not use the analyses of Adam or AMSGrad.
+Several parallel works (Li & Orabona, 2018; Zou & Shen, 2018; Ward et al., 2018; Chen et al., 2018a;b; Zhou et al., 2018) have studied the convergence of adaptive methods for non-convex optimization, matching the asymptotic iteration complexity of SGD. Apart from our algorithmic contribution, our work is (to our knowledge) the first attempt to characterize the advantage of adaptivity in terms of the dimension and geometry of the optimization problem.
+2 THE GGT ALGORITHM
+Our main algorithmic contribution is GGT, an efficient first-order algorithm for full-matrix adaptive preconditioning. In brief, GGT uses the preconditioner from full-matrix AdaGrad, with gradient history attenuated exponentially as in Adam, and truncated to a window parameter r. The name GGT acts as a convenient mnemonic for the gradient second-moment matrix GG maintained by full-matrix AdaGrad, even though we never compute this matrix.
+2
+
+Under review as a conference paper at ICLR 2019
+Figure 1: Sketch of how GGT performs fast full-matrix preconditioning. Note that the inverse matrices are understood here to be Moore-Penrose pseudoinverses; see Section 2.1 for a full treatment.
+The mathematical specification of GGT is given in Algorithm 1, in the usual model of stochastic optimization (see Section 4), with gradients f (x). Notice that the coordinate-wise scaling of Adam is recovered by zeroing out the off-diagonal entries of GG .
+Algorithm 1 GGT adaptive optimizer 1: Input: initializer x1, window size r, learning rate schedule {t}, 2  1,  > 0. 2: for t = 1, . . . , T do 3: Receive stochastic gradient f (xt). 4: Let Gt = [gt gt-1 . . . gt-r+1], where gt-k := 2kf (xt-k), or 0 if k  t. 5: Update xt+1  xt - t · [(GtGt )1/2 + I]-1 f (xt). 6: end for
+GGT provides the power of full-matrix adaptive regularization at a cost not much larger than SGD. This crucially exploits the fact only a small window of historical gradients are used for preconditioning. The intuition for using a small window, as opposed to the entire history, is clear (and time-tested, by the ubiquity of Adam): the curvature of the loss surface changes, rendering previous gradient information obsolete. We expand on the benefits of forgetting gradients in section 3.1. The fact that the preconditioning matrix is based on a small window of gradients implies that it has low rank. GGT exploits this fact by computing the inverse square root of the empirical covariance matrix indirectly, as outlined in Figure 1. In effect, instead of inverting a full matrix in the dimension of parameters, using the special matrix structure GGT inverts a matrix of dimension window-size. The remainder of this section will discuss efficient implementation and some heuristics. GGT has provable guarantees even for non-convex optimization: it is guaranteed to converge to a first-order critical point. Its rate of convergence is never significantly slower than that of SGD, and in some favorable geometric conditions, can be significantly faster. These theoretical bounds are made precise in section 4.
+2.1 FAST LOW-RANK PRECONDITIONING
+The window parameter r should be roughly the number of copies of the model that fit in RAM; in our large-scale experiments, we use r = 200. A pessimistic but principled choice is r = (1/(1 - 2)), which truncates on the time scale of the exponential attenuation. Our key observation, highlighted in Figure 1, is that the inversion of the large low-rank matrix GG can be performed by diagonalizing the small matrix G G, along with some extremely GPU-friendly matrix-vector operations. The basic intuition is contained in Figure 1, but it remains to include the I term. We derive the full update here. Let G  Rd×r, v  Rd be arbitrary, with r  d. Write the singular value decomposition G = UV , with U  Rd×d,   Rd×r, V  Rr×r. Let d  Rd×d := [ 0], and let r  Rr×r be its top left block. Let U =: [Ur Ud-r], so that the columns of Ur  Rd×r are an orthonormal basis for the column space of G, and Ud-r  Rd×(d-r) its orthogonal component,
+3
+
+Under review as a conference paper at ICLR 2019
+
+noting that UrUr + Ud-rUd-r = Id. Then, we have
+
+-1
+(GG )1/2 + I v = (Ud2U )1/2 + UU
+
+-1 v = U(d + I)-1U v
+
+= Ur(r + Ir)-1Ur + Ud-r(Id-r)-1Ud-r v
+
+=
+
+Ur (r
+
++
+
+Ir )-1 Ur
+
+v
+
++
+
+1  (Id
+
+-
+
+Ur Ur
+
+)v
+
+1
+
+=
+
+v 
+
++
+
+Ur
+
+(r
+
++
+
+Ir )-1
+
+-
+
+1  Ir
+
+Ur v.
+
+The first term is none other than an SGD update step. eigendecomposition G G = V2rV , giving Ur =
+
+GThVe restrca. nWbee
+
+computed by prefer this to
+
+taking taking
+
+the the
+
+direct SVD of G, which is > 10 times slower on GPU.
+
+Using a cyclic buffer to store and update Gt, the algorithm takes O(dr2 + r3) (sequential) time per iteration, and O(dr) memory in total. Iterating over the model parameters to update Gt incurs the same overhead cost as usual adaptive optimizers. The r × d matrix multiplication and r × r SVD
+operations benefit from decades of extensive hardware-level optimizations.
+
+In the experiments in Section 3, we observed a  1.3× (CNN) and  2× (RNN) running-time overhead over SGD; we note that this ratio could be even smaller in reinforcement learning (where the environment causes the time bottleneck), or universally with a more optimized implementation.
+
+2.2 TWEAKS FOR GGT ON DEEP MODELS
+Below, we list some practical suggestions for applying GGT to training large-scale models.
+Momentum. In order to bring GGT closer to a drop-in replacement for Adam, we can add momentum to the gradient steps: let vt  1vt-1 + f (xt), and apply the preconditioner to vt to compute the update step. We use momentum in all large-scale experiments, with the standard 1 = 0.9. We also get a small performance boost by using vt instead of the gradients to update Gt. On the other hand, as long as r T , it makes little difference to choose 2 = 1, letting the window (rather than exponential attenuation) forget stale gradient information.
+Interpolation with SGD. We note the possibility of decoupling the scalars  and 1/ which appear in the efficient update step. Appealingly, this allows the user to tune GGT's behavior to be arbitrarily close to that of SGD.
+Numerical concerns. For greater numerical stability, it is possible to add a small multiple of the identity matrix (we suggest 10-6) to G G before computing its eigendecomposition, without noticeable differences in training.
+
+3 EXPERIMENTS
+In this section, we present an empirical study of GGT. We begin with some simple experiments, showing that adaptive methods help in the presence of ill-conditioned optimization problems, as well as the value of limited gradient memory. Next, we evaluate the performance of GGT on largerscale deep learning tasks (and provide some additional such experiments in Appendix B). Finally, we present some interesting empirical insights on the training dynamics in deep learning models. Our visualizations of gradient spectra suggest that adaptive optimizers are indeed correcting for changing anisotropic curvature in the loss landscape.
+3.1 SYNTHETIC DATA: WHEN DO ADAPTIVITY AND FORGETFULNESS HELP?
+The original theorems on the behavior of adaptive first-order methods are established from the perspective of online convex optimization (Duchi et al., 2011). The dynamics are less understood on realistic loss landscapes in stochastic optimization. For this reason, we begin our experimental section with some simple empirical comparisons between full- and diagonal-matrix adaptive optimizers and SGD. Figure 2 summarizes our findings.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+loss loss
+
+0.68 0.66 0.64 0.62 0.60 0
+
+Landscape 1: logistic loss
+SGD diag diag+window full full+window (GGT)
+200 400 600 800 1000 iteration
+
+1.10 1.08 1.06 1.04 1.02 1.00 0.98
+0
+
+Landscape 2: barrier loss
+SGD diag diag+window full full+window (GGT)
+250 500 750 1000 1250 1500 1750 2000 iteration
+
+Figure 2: Synthetic experiments on convex loss functions, demonstrating the value of adaptive regularization and attenuation of gradient history. Left: An ill-conditioned instance of logistic regression. Adaptive regularization finds a good preconditioner, accelerating optimization. Right: Minimizing a barrier function, an example where the curvature changes with position. Optimization is further accelerated by forgetting outdated gradient information.
+
+In each synthetic experiment, we generated an ill-conditioned landscape, and compared SGD with adaptive optimizers, excluding the typical accompanying heuristics (i.e. no momentum, regularization, or learning rate schedule). We tested diagonal-matrix preconditioners with and without exponential gradient attenuation (like Adam and AdaGrad, respectively), and their full-matrix analogues. The experiments were robust with respect to the choice of  (we used 10-4) and batch size.
+In the first synthetic experiment (left), we exhibit an instance of logistic regression in dimension 10, with 103 samples generated from an extremely anisotropic (m2 ax/m2 in  104) Gaussian distribution, and binary labels determined by a random hyperplane. SGD converges the slowest, and diagonal AdaGrad consistently accelerates optimization. Finally, full-matrix preconditioning (using cubic-time matrix inversion) converges the fastest. In this setting, adding a window improved convergence, but not drastically; we elaborate below.
+Next, we show an optimization problem (right) which accentuates the utility of exponentially decaying gradient memory. We consider the problem of minimizing the logarithmic barrier function of a randomly generated anisotropic polytope, otherwise known as finding its analytic center: this replaces the logistic loss terms with fi(w) = - log(w xi + ci), with xi generated the same way as above, and ci generated uniformly from [0, 1]. We observed the same ranking of convergence rates as in the first experiment, but the improvement afforded by the window was much clearer.
+The primary conclusion of our synthetic experiments is to demonstrate some small-scale settings in which adaptive regularization ameliorates anisotropy in the optimization landscape. A subtler point is that the windowed variants can help with changing curvature, even for convex losses. Note that the curvature of the former landscape is constant (in that its Hessian matrix at different locations w only changes by a scalar factor). The latter setting, in contrast, features a changing curvature (its Hessians do not commute in general), necessitating "forgetfulness" in adaptive curvature estimation.
+In Section 3.4, we will return to these proof-of-concept optimization instances, connecting them to an empirical study of curvature in more realistic landscapes.
+3.2 GGT ON DEEP CONVOLUTIONAL MODELS
+We investigated the training dynamics of GGT on a typical deep architecture for computer vision. For this, we used a 26-layer 3-branch residual network with Shake-Shake regularization, recently proposed in (Gastaldi, 2017). Aside from its ability to reach state-of-the-art classification accuracy, this architecture also features a relatively low parameter count ( 3M), enabling the use of a large window parameter (r = 200).
+In each experiment, we kept the cosine learning rate annealing schedule proposed in the paper, originally from (Loshchilov & Hutter, 2016); performance degraded consistently and significantly with a fixed learning rate. For both Adam and GGT, we chose the commonly used parameters 1 = 0.9, 2 = 0.999,  = 10-8; for SGD, we used momentum with parameter 0.9. With correctly
+5
+
+Under review as a conference paper at ICLR 2019
+
+Training loss (CIFAR-10)
+
+Test accuracy (CIFAR-10)
+
+100
+
+SGD AdaGrad 0.95
+
+SGD AdaGrad
+
+Adam Adam
+
+GGT GGT
+
+10 1 0.90
+
+10 2 0
+5.5 5.0 4.5 4.0 3.5 3.0 2.5 0
+
+25 50 75 100 125 150 175 200
+Training perplexity (PTB)
+SGD AdaGrad Adam GGT
+10 20 30 40 50 epoch
+
+0.85 0
+5.5 5.0 4.5 4.0 3.5 3.0 2.5 0
+
+25 50 75 100 125 150 175 200
+Validation perplexity (PTB)
+SGD AdaGrad Adam GGT
+10 20 30 40 50 epoch
+
+Figure 3: Results of CNN and RNN experiments. GGT dominates in training loss across both tasks, and generalizes better on the RNN task. Top: CIFAR-10 classification with a 3-branch ResNet. Bottom: PTB character-level language modeling with a 3-layer LSTM.
+
+tuned RMSprop and Adadelta, with the same window parameters, training curves were virtually identical to those for Adam. We used the standard data augmentation techniques of 4-pixel padding + random cropping and horizontal flipping.
+Our results are shown in Figure 3 (top). In terms of training loss, GGT consistently dominated existing optimizers. We corroborate a number of observations from previous empirical studies of the generalization of optimizers. Most prominently, we found that SGD generalized slightly better than all others (Wilson et al., 2017; Keskar & Socher, 2017) towards the end of training, including ours. The gap (< 0.2%) is less dramatic than that seen in (Wilson et al., 2017) for two reasons: we only show curves with a tuned and annealed learning rate; also, we use an architecture with powerful explicit regularization techniques which have gained attention since their publication. Our preliminary observation is that GGT shrinks this gap slightly (corroborated by another experiment in Appendix B), and expect that there is vastly more empirical work to be done concerning architectures synergistically tuned to existing optimizers.
+We also verify the long-held empirical observation that the learning rate decay of AdaGrad is too aggressive (e.g. in (Zeiler, 2012)), resulting in convergence to a poor solution. Finally, as noted in (Wilson et al., 2017), we find that using a sufficiently low learning rate for any optimizer can result in a better training loss curve, but not without significantly degrading generalization (> 3% worse).
+3.3 GGT ON RECURRENT MODELS
+Next, we move to recurrent architectures for language modeling. We train a 3-layer LSTM (Hochreiter & Schmidhuber, 1997) with  5M parameters for character-level modeling of the Penn Treebank dataset (Marcus et al., 1994). This is the setting in which we observe the most striking improvement over baselines. The particularities of this optimization task, and why it might be especially amenable to full-matrix regularization, remain a fruitful research direction (Pascanu et al., 2013). Figure 3 (bottom) shows training and validation perplexities for the first 50 epochs; no optimizer makes significant progress afterwards.
+The state of the art for character-level language modeling is less thoroughly documented than its word-level counterpart, though we note that our end-to-end result (validation perplexity 2.42 after 500 epochs) is competitive with those reported for recurrent models, like by Krueger et al. (2016). In contrast, Adam, AdaGrad, and SGD reach 2.51, 2.65, and 2.76, respectively. Note that Adam is the de facto standard optimizer for language modeling (Melis et al., 2017). Even with iterations taking twice the time, we outperform all baselines in wall-clock time throughout training.
+6
+
+Under review as a conference paper at ICLR 2019
+Figure 4: Evolution of the spectrum of the gradient matrix during training. Each vertical slice is a density heatmap of the eigenvalues of GtGt. The black lines indicate the minimum and maximum eigenvalues, smoothed in time by a median filter. Top: CNN training. Approaching the end of training, the gradients become more anisotropic. Bottom: RNN training. Within the first few epochs, the gradients become more isotropic, then stabilize. (Truncated to 5 epochs; the density was visually stable for the remainder of training.)
+We also tried using GGT as a drop-in replacement for Adam in the state-of-the-art word-level language modeling code accompanying (Merity et al., 2017; 2018). Although we were competitive with Adam, we only observed an improvement in the first  20 epochs. We hypothesize that the advantage of full-matrix regularization in this setting is more marginal, as the gradients in the embedding layers are naturally sparse in the vocabulary ("one-hot") basis. On a similar note, we found that Adam outperformed GGT on attention-based architectures for NLP; refer to Appendix B for an experiment and discussion.
+3.4 EMPIRICAL INSIGHTS ON THE SPECTRAL DECAY
+In this section, we unify the insights gleaned from the synthetic experiments and deep learning benchmarks. Along the way, we provide some interesting anecdotal observations on the evolution of the preconditioner matrices' singular values. We plot the density of the spectrum of the low-rank preconditioner GtGt as training progresses. Since the fast implementation of GGT takes an eigendecomposition of GtGt, we can read off the distribution of eigenvalues during training at no additional computational cost. Figure 4 visualizes the result of this experiment for the CNN and RNN training settings from the previous two sections. In each case, we observe that GtGt has a condition number of  103, noting that this can be visualized as the vertical range in the logarithmic plot. This visualization affords a new way to see how CNN and RNN landscapes are fundamentally different: their gradient spectra evolve in very distinct ways over the course of training. Interestingly, the condition number of the CNN landscape surges near the end, which may be related to the the low-rank structure of well-trained nets noted by Arora et al. (2018), who derive rank-dependent generalization bounds for neural networks. On recurrent models, the rapidly evolving spectral structure at the early stage of training indicates a possibly more complex landscape. Intriguingly, the enormous condition number ( 106) correlates with the massive lead of GGT over the others, confirming our intuition that full-matrix preconditioning ameliorates anisotropy. To our knowledge, this is the first empirical study of this kind, using the covariance matrix of recent gradients as a surrogate to examining the changing curvature of the loss landscape. In the spirit of recent empirical lenses of this flavor (Raghu et al., 2017; Li et al., 2017), we leave this as a way to visualize deep learning dynamics, possibly of independent exploratory interest.
+7
+
+Under review as a conference paper at ICLR 2019
+
+4 A CONVERGENCE RATE ANALYSIS WITH ADAPTIVITY
+
+In this section we outline our analysis of GGT, for which we show convergence to an approximate first-order critical point, in some settings faster than SGD. To obtain the strongest theory, we analyze GGT with a "hard window" instead of exponentially decaying gradient memory, explained in Section A.2.
+We work in the usual theoretical framework of stochastic optimization of a differentiable non-convex function f (·), equipped with an unbiased variance-bounded stochastic gradient oracle f (·). The objective, as is standard in the literature (see, e.g. Ghadimi & Lan (2013); Allen-Zhu & Hazan (2016)), is to find an -approximate stationary point x; that is, f (x)  .
+
+4.1 THE ADAPTIVE RATIO
+
+We quantify the improvement of adaptive regularization by its advantage over the usual worst-case bound of SGD. To this end, we define the adaptive ratio µ of an algorithm A as
+
+µ d=ef
+
+f (xA) - x1 - x
+
+f (x)
+
+2
+
+·
+
+ T
+
+,
+
+where xA is the output of the A, and x is a comparator. For convex optimization problems x is naturally the global minimum. For non-convex optimization it is a subtler choice, which we detail
+in Appendix A.
+
+This ratio for the AdaGrad algorithm was shown in (Duchi et al., 2011) to be always bounded by a quantity independent of T , and potentially much smaller. Specifically, it was shown to be inversely proportional to the dimension in certain convex optimization problems, providing a theoretical justification for the speedup of adaptive optimizers. In Section A.4, we show a new, simple, and natural setting illustrating adaptive speedup, even for a strongly convex function f .
+
+4.2 ADAPTIVE CONVERGENCE RATE GUARANTEE
+
+We informally state the main theorem below. We defer the full bound without suppressed smoothness constants, as well as all technical proofs, to Appendix A.
+
+Theorem 4.1. Let f : Rd  R be a bounded, Lipschitz, and smooth function with stochastic
+
+gradient oracle f (·), whose variance is at most 2. In expectation, Algorithm 3 outputs an -
+
+approximate critical point of f , with O
+
+µ2  2 4
+
+calls to f (·).
+
+This theorem matches and potentially improves the known analysis for stochastic gradient descent with the introduction of the data-dependent adaptivity constant µ into the leading-order term governing the rate of convergence. Since Duchi et al. (2011) bounded µ by a quantity independent of T , our theorem matches the classic O -4 rate of convergence.
+
+5 CONCLUSION
+This work investigates full-matrix adaptive regularization: our main contribution is to make this technique viable for large-scale optimization, by a method for efficient multiplication by the inverse square root of a full second-moment matrix over a short window of gradients. This leads to a new algorithm, GGT, a truly scalable optimization algorithm with full-matrix adaptive preconditioning.
+Through synthetic experiments, we have shown that GGT accelerates optimization in ill-conditioned loss landscapes; this is supported by accompanying adaptive convergence guarantees. Preliminary experiments show accelerated convergence on standard deep learning benchmarks, with very different training dynamics from existing diagonal adaptive methods. We accompany our algorithm and experiments with the first theoretical characterization of the benefits of adaptive regularization in a non-convex setting. We hope that GGT will be the first of a new class of algorithms for the modern large-scale optimization toolbox, and to foster new discussion towards an ever-elusive understanding of loss landscapes in deep learning.
+
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Martín Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo, Zhifeng Chen, Craig Citro, Greg S Corrado, Andy Davis, Jeffrey Dean, Matthieu Devin, et al. Tensorflow: Large-scale machine learning on heterogeneous distributed systems. arXiv preprint arXiv:1603.04467, 2016.
+Naman Agarwal, Zeyuan Allen-Zhu, Brian Bullins, Elad Hazan, and Tengyu Ma. Finding approximate local minima faster than gradient descent. In Proceedings of the 49th Annual ACM SIGACT Symposium on Theory of Computing, pp. 1195­1199. ACM, 2017a.
+Naman Agarwal, Brian Bullins, and Elad Hazan. Second-order stochastic optimization for machine learning in linear time. The Journal of Machine Learning Research, 18(1):4148­4187, 2017b.
+Zeyuan Allen-Zhu. Katyusha: The first direct acceleration of stochastic gradient methods. In Proceedings of the 49th Annual ACM SIGACT Symposium on Theory of Computing, pp. 1200­1205. ACM, 2017.
+Zeyuan Allen-Zhu and Elad Hazan. Variance reduction for faster non-convex optimization. In International Conference on Machine Learning, pp. 699­707, 2016.
+Sanjeev Arora, Rong Ge, Behnam Neyshabur, and Yi Zhang. Stronger generalization bounds for deep nets via a compression approach. arXiv preprint arXiv:1802.05296, 2018.
+Charles G Broyden. The convergence of a class of double-rank minimization algorithms: 2. the new algorithm. IMA Journal of Applied Mathematics, 6(3):222­231, 1970.
+Sébastien Bubeck et al. Convex optimization: Algorithms and complexity. Foundations and Trends R in Machine Learning, 8(3-4):231­357, 2015.
+Yair Carmon, John C Duchi, Oliver Hinder, and Aaron Sidford. "convex until proven guilty": Dimension-free acceleration of gradient descent on non-convex functions. In International Conference on Machine Learning, pp. 654­663, 2017.
+Tianqi Chen, Mu Li, Yutian Li, Min Lin, Naiyan Wang, Minjie Wang, Tianjun Xiao, Bing Xu, Chiyuan Zhang, and Zheng Zhang. MxNet: A flexible and efficient machine learning library for heterogeneous distributed systems. arXiv preprint arXiv:1512.01274, 2015.
+Xiangyi Chen, Sijia Liu, Ruoyu Sun, and Mingyi Hong. On the convergence of a class of adam-type algorithms for non-convex optimization. arXiv preprint arXiv:1808.02941, 2018a.
+Zaiyi Chen, Tianbao Yang, Jinfeng Yi, Bowen Zhou, and Enhong Chen. Universal stagewise learning for non-convex problems with convergence on averaged solutions. arXiv preprint arXiv:1808.06296, 2018b.
+Timothy Dozat. Incorporating Nesterov momentum into Adam. 2016.
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and stochastic optimization. Journal of Machine Learning Research, 12:2121­2159, 2011.
+Murat A Erdogdu and Andrea Montanari. Convergence rates of sub-sampled newton methods. In Proceedings of the 28th International Conference on Neural Information Processing SystemsVolume 2, pp. 3052­3060. MIT Press, 2015.
+Roger Fletcher. A new approach to variable metric algorithms. The Computer Journal, 13(3): 317­322, 1970.
+Xavier Gastaldi. Shake-shake regularization. arXiv preprint arXiv:1705.07485, 2017.
+Saeed Ghadimi and Guanghui Lan. Stochastic first-and zeroth-order methods for nonconvex stochastic programming. SIAM Journal on Optimization, 23(4):2341­2368, 2013.
+Donald Goldfarb. A family of variable-metric methods derived by variational means. Mathematics of Computation, 24(109):23­26, 1970.
+9
+
+Under review as a conference paper at ICLR 2019
+Vineet Gupta, Tomer Koren, and Yoram Singer. Shampoo: Preconditioned stochastic tensor optimization. arXiv preprint arXiv:1802.09568, 2018.
+Elad Hazan, Amit Agarwal, and Satyen Kale. Logarithmic regret algorithms for online convex optimization. Machine Learning, 69(2-3):169­192, 2007.
+Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Nitish Shirish Keskar and Richard Socher. Improving generalization performance by switching from adam to sgd. arXiv preprint arXiv:1712.07628, 2017.
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+David Krueger, Tegan Maharaj, János Kramár, Mohammad Pezeshki, Nicolas Ballas, Nan Rosemary Ke, Anirudh Goyal, Yoshua Bengio, Aaron Courville, and Chris Pal. Zoneout: Regularizing rnns by randomly preserving hidden activations. arXiv preprint arXiv:1606.01305, 2016.
+Gabriel Krummenacher, Brian McWilliams, Yannic Kilcher, Joachim M Buhmann, and Nicolai Meinshausen. Scalable adaptive stochastic optimization using random projections. In Advances in Neural Information Processing Systems, pp. 1750­1758, 2016.
+Hao Li, Zheng Xu, Gavin Taylor, and Tom Goldstein. Visualizing the loss landscape of neural nets. arXiv preprint arXiv:1712.09913, 2017.
+Xiaoyu Li and Francesco Orabona. On the convergence of stochastic gradient descent with adaptive stepsizes. arXiv preprint arXiv:1805.08114, 2018.
+Dong C Liu and Jorge Nocedal. On the limited memory bfgs method for large scale optimization. Mathematical Programming, 45(1-3):503­528, 1989.
+Ilya Loshchilov and Frank Hutter. Sgdr: stochastic gradient descent with restarts. arXiv preprint arXiv:1608.03983, 2016.
+Haipeng Luo, Alekh Agarwal, Nicolo Cesa-Bianchi, and John Langford. Efficient second order online learning by sketching. In Advances in Neural Information Processing Systems, pp. 902­ 910, 2016.
+Mitchell Marcus, Grace Kim, Mary Ann Marcinkiewicz, Robert MacIntyre, Ann Bies, Mark Ferguson, Karen Katz, and Britta Schasberger. The penn treebank: annotating predicate argument structure. In Proceedings of the workshop on Human Language Technology, pp. 114­119. Association for Computational Linguistics, 1994.
+James Martens and Roger Grosse. Optimizing neural networks with kronecker-factored approximate curvature. In International Conference on Machine Learning, pp. 2408­2417, 2015.
+James Martens, Jimmy Ba, and Matt Johnson. Kronecker-factored curvature approximations for recurrent neural networks. 2018.
+Nishant A Mehta, Alistair Rendell, Anish Varghese, and Christfried Webers. Compadagrad: A compressed, complementary, computationally-efficient adaptive gradient method. arXiv preprint arXiv:1609.03319, 2016.
+Gábor Melis, Chris Dyer, and Phil Blunsom. On the state of the art of evaluation in neural language models. arXiv preprint arXiv:1707.05589, 2017.
+Stephen Merity, Nitish Shirish Keskar, and Richard Socher. Regularizing and optimizing lstm language models. arXiv preprint arXiv:1708.02182, 2017.
+Stephen Merity, Nitish Shirish Keskar, and Richard Socher. An analysis of neural language modeling at multiple scales. arXiv preprint arXiv:1803.08240, 2018.
+Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difficulty of training recurrent neural networks. In International Conference on Machine Learning, pp. 1310­1318, 2013.
+10
+
+Under review as a conference paper at ICLR 2019
+Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic differentiation in PyTorch. In NIPS-W, 2017.
+Boris T Polyak and Anatoli B Juditsky. Acceleration of stochastic approximation by averaging. SIAM Journal on Control and Optimization, 30(4):838­855, 1992.
+Maithra Raghu, Justin Gilmer, Jason Yosinski, and Jascha Sohl-Dickstein. Svcca: Singular vector canonical correlation analysis for deep understanding and improvement. arXiv preprint arXiv:1706.05806, 2017.
+Sashank J Reddi, Satyen Kale, and Sanjiv Kumar. On the convergence of Adam and beyond. In International Conference on Learning Representations, 2018.
+David F Shanno. Conditioning of quasi-newton methods for function minimization. Mathematics of Computation, 24(111):647­656, 1970.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. arXiv preprint arXiv:1409.1556, 2014.
+Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural networks for machine learning, 4(2):26­ 31, 2012.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems, pp. 5998­6008, 2017.
+Rachel Ward, Xiaoxia Wu, and Leon Bottou. Adagrad stepsizes: Sharp convergence over nonconvex landscapes, from any initialization. arXiv preprint arXiv:1806.01811, 2018.
+Ashia C Wilson, Rebecca Roelofs, Mitchell Stern, Nati Srebro, and Benjamin Recht. The marginal value of adaptive gradient methods in machine learning. In Advances in Neural Information Processing Systems, pp. 4151­4161, 2017.
+Matthew D Zeiler. Adadelta: an adaptive learning rate method. arXiv preprint arXiv:1212.5701, 2012.
+Dongruo Zhou, Yiqi Tang, Ziyan Yang, Yuan Cao, and Quanquan Gu. On the convergence of adaptive gradient methods for nonconvex optimization. arXiv preprint arXiv:1808.05671, 2018.
+Fangyu Zou and Li Shen. On the convergence of adagrad with momentum for training deep neural networks. arXiv preprint arXiv:1808.03408, 2018.
+11
+
+Under review as a conference paper at ICLR 2019
+
+A FULL ADAPTIVE CONVERGENCE ANALYSIS
+
+In this section, we give the details on the theoretical treatment of GGT outlined in Section 4. The overall goal is to develop a theory for adaptive regularization in non-convex stochastic optimization. After formalizing the setting, we will define a version of GGT that uses a hard gradient memory window. This will allow us to transfer any insight on the advantage of adaptivity in the convex case to the non-convex case, giving rise to the main theorem. We will conclude this section by with an example illustrating the advantage of adaptive optimizers in the presence of sparse gradients.
+
+A.1 SETTING: STOCHASTIC NON-CONVEX OPTIMIZATION
+Theorem A.2 will provide a bound on the number of stochastic gradient calls required by GGT to achieve a first-order critical point. In particular, the theorem shows that GGT can converge to an approximate first-order critical point faster than SGD, with convergence rate controlled by the adaptive ratio µ, defined in (1).
+We consider the standard setting of stochastic optimization of a differentiable non-convex function f (·), equipped with a bounded-variance stochastic gradient oracle defined as follows. Definition A.1 (stochastic gradient oracle). Given a function f : D  R we call an oracle Of , a -bounded stochastic gradient oracle if for any x, Of returns a a random vector f (x) such that
+E f (x) = f (x) and E f (x) - f (x) 2  2.
+
+The objective, as is standard in non-convex optimization, is to find a first-order critical point, i.e. a point x for which f (x)  . We will also assume that f has a Lipschitz gradient; i.e. 2f (x) 2  L.
+Our algorithm makes a reduction to the case of stochastic convex optimization. The setting formally is that, given a smooth convex function and a -bounded stochastic gradient oracle, the algorithm's aim is to minimize the convex function f . Given any algorithm A we can now define the adaptive ratio of the algorithm, referred to as µ, as
+
+µ d=ef
+
+f (xA) - f (x)
+
+x1 - x
+
+2
+
+·
+
+ T
+
+(1)
+
+where xA is the output of the algorithm A and x  argminx f (x), with a total of at most T calls to the stochastic gradient oracle. µ captures the advantage in convergence rate obtained by the
+algorithm as compared to the error obtained by vanilla SGD, noting that the denominator is a bound
+on the error obtained by SGD in the same setting.
+
+A popular algorithm for stochastic (and in general online) convex optimization is AdaGrad (Duchi
+et al., 2011). Due to adaptive regularization, AdaGrad can often be advantageous over SGD. We
+quantify this advantage by the notion of µ defined above. The bounds of Duchi et al. (2011) imply that µ can be as small as 1 , depending on the geometry of the optimization problem. An example
+d
+of this was provided by Duchi et al. (2011) for both the diagonal and the full version of Adagrad. At
+the end of this section, we provide a different example which shows the same phenomenon even in
+the case of strongly convex functions.
+
+In the rest of this section we describe Algorithm 3, which uses AdaGrad (Algorithm 2) as a subroutine during each window. In this regard, while stating the bounds for our algorithms, we use µ as an upper bound on the advantage of AdaGrad in each iteration.
+
+A.2 A SUITABLE ABSTRACTION FOR GGT
+As mentioned in Section 4, our analysis uses a slightly idealized version of GGT, which replaces the gradient memory mechanism (governed by w and 2) with a hard window; i.e., the gradient buffer is reset every w steps. This simple modification enables us to develop a more informative theory, in which we benefit directly from the familiar theory of AdaGrad for convex optimization, while capturing the necessity of forgetting past gradient information in adaptive non-convex optimization.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+First, for clarity, we restate the definition of the full-matrix AdaGrad algorithm, introduced by Duchi et al. (2011), which accumulates the second-moment matrix of all past gradients:
+
+Algorithm 2 AdaGrad for convex optimization (Duchi et al., 2011)
+
+1: Input: initializer x1, window length w, stochastic gradient oracle f (·), ,  > 0. 2: for t = 1, . . . , w do
+
+3: Receive stochastic gradient f (xt).
+
+4: Let Gt = [gt gt-1 . . . g1], where gt := f (xt).
+
+5: Update xt+1  xt -  · I + (GtGt )1/2 -1 gt.
+
+6: end for
+
+7:
+
+Output:
+
+Average iterate
+
+1 w
+
+(
+
+w t=1
+
+xt).
+
+The final algorithm we analyze simply runs AdaGrad between restarts.
+
+Algorithm 3 GGT with a hard gradient window
+1: Input: initializer x1, time horizon T , window length w,  > 0. 2: for t = 1 to T : do 3: Let ft(x) = f (x) +  x - xt 2. 4: Update xt+1 to be the output of Algorithm 2 on ft(x), starting at xt, for w steps. 5: end for 6: Output: Best iterate xt , where t := argmintT +1 f (xt) .
+
+The remaining discrepancies between Algorithm 3 and Algorithm 1 from the main paper are standard. We provide some references below.
+· Absence of first-moment estimation. Although it is customary to use nonzero 1 (otherwise known as momentum) when applying Adam in practice, it is orthogonal to the effect of adaptive regularization in all established theory. In fact, the convergence rates given by Kingma & Ba (2014) (and fixed by Reddi et al. (2018)) contain only factors of 1/(1 - 1), and are thus strongest when 1 = 0.
+· Model averaging. Theoretical guarantees in online and stochastic convex optimization are most naturally stated on the average iterate; see (Polyak & Juditsky, 1992; Duchi et al., 2011). Thus, we adopt the convention that Algorithm 2 returns the average iterate. We note that model averaging is a common regularization technique in practical non-convex settings, though not the default choice for adaptive optimizers in practice.
+· 2 regularization. The addition of the  x - xt 2 term in Algorithm 3 is an artifact we introduce to obtain a tight analysis for hard-window GGT. It ensures that iterates in each window do not move too far, and allows us to analyze each window as a fixed convex program, so that we can use the convex theory of AdaGrad directly. The soft-window analogue would simply to be decrease the learning rate. Interestingly, a similar technique directly appears in the algorithm proposed by Allen-Zhu (2017). Finally, we note that from a -bounded stochastic gradient oracle for f , it is trivial to construct one for ft, by adding -2xt (deterministically).
+
+A.3 MAIN THEOREM AND PROOF
+
+Theorem A.2. Consider a non-convex function f , such that for all x, 2f (x) 2  L and a point
+
+x1 such that f (x1) - minxK f (x)  M . Further, suppose we have access to a -bounded
+
+stochastic gradient oracle
+
+Of .
+
+Suppose
+
+for any 
+
+
+
+L 2
+
+,
+
+Algorithm
+
+3 is run with
+
+T
+
+=
+
+4M (L+2) 2
+
+and
+
+w=
+
+16µ2  2 (L+2) 2 (2-L)
+
+.
+
+Then
+
+the
+
+point
+
+x
+
+returned by Algorithm 3 is such that
+
+E f (x )  ,
+
+where µ = maxt[T ] µt and µt is the adaptive ratio when run on ft (as defined in (1)). Further,
+
+note that choosing  = 3L/2, the total number of stochastic gradient calls to the oracle Of , made
+
+by
+
+the
+
+algorithm
+
+is
+
+bounded
+
+by
+
+T
+
+·
+
+w
+
+=
+
+512LM 4
+
+µ2
+
+2
+
+.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+For the setting of Theorem A.2, the best known bound on the number of oracle calls to the stochastic
+
+gradient
+
+oracle
+
+in
+
+the
+
+case
+
+of
+
+the
+
+vanilla
+
+SGD
+
+algorithm
+
+is
+
+O(
+
+LM 2 4
+
+).
+
+Note
+
+that
+
+due
+
+to
+
+the
+
+presence
+
+of µ2 in the bound provided in Theorem A.2 reflects the advantage of Algorithm 3 over SGD. This
+
+advantage as we argue in the following section can be as large as up to a factor of 1/d, a significant
+
+improvement over SGD.
+
+Before proving Theorem A.2, we state an oracle complexity bound for AdaGrad (Algorithm 2) for strongly convex functions.
+
+Lemma A.3. Suppose f is a -strongly convex function equipped with a -bounded stochastic gra-
+dient oracle. Given an initial point x1, Algorithm 2 when run for w steps is guaranteed to output a point x such that
+
+µ22 E[f (x )] - min f (x) 
+
+2(f (x1) - minx f (x)) ,
+
+x w
+
+where µ is the adaptive ratio of AdaGrad on f as defined in (1).
+
+Using this lemma we first prove Theorem A.2 and then finish the section by providing a proof of Lemma A.3.
+
+Proof of Theorem A.2. We begin by proving the following useful property regarding the function ft for any t and any :
+
+ft(xt)
+
+-
+
+min
+x
+
+ft(x)
+
+
+
+f
+
+(xt)
+
+-
+
+ft(xt
+
+-
+
+f
+
+(xt))
+
+= f (xt) - f (xt - f (xt)) - 2 f (xt) 2
+
+
+
+f (xt)
+
+2 - L2 2
+
+f (xt)
+
+2 - 2
+
+f (xt)
+
+2.
+
+Setting
+
+
+
+=
+
+1 L+2
+
+,
+
+we
+
+get
+
+that
+
+ft(xt)
+
+-
+
+min
+x
+
+ft(x)
+
+
+
+f (xt)
+
+2
+.
+
+2(L + 2)
+
+(2)
+
+We will now prove the theorem by contradiction. Suppose for all the t, f (xt) 2 > 2. We now have that
+
+f (xt) - f (xt+1)  ft(xt) - ft(xt+1)
+
+=
+
+ft(xt)
+
+-
+
+min
+x
+
+ft(x)
+
+-
+
+(ft(xt+1)
+
+-
+
+min
+x
+
+ft(x)) 
+
+ ft(xt) - min ft(x) - ft(xt) - minx ft(x) 2
+
+x 2 2(L + 2)
+
+
+
+ft(xt)
+
+-
+
+min
+x
+
+ft(x)
+
+-
+
+ft(xt) - minx ft(x) f (xt) 2 2 2(L + 2)
+
+ ft(xt) - minx ft(x)  ft(xt) 2 >
+
+2 .
+
+2 4(L + 2) 4(L + 2)
+
+(3)
+
+where the first inequality follows from noting that f (x)  ft(x) for all x  Rd, and that ft(xt) = f (xt). The second inequality follows from Lemma A.3, by noting that ft is 2 - L strongly convex and the choice of w. The third inequality follows from the counterfactual assumption f (xt) 2 > 2, and the last set of inequalities follow from (2).
+
+Summing (3) over all t  [T ] gives us that
+
+T 2 f (x1) - f (xT +1) > 4(L + 2) = M,
+
+which is a contradiction and hence proves the theorem. The number of stochastic gradient oracle calls when  = 3L/2 is bounded by
+
+T
+
+·w
+
+
+
+4M (L + 2
+
+2)
+
+·
+
+16µ22(L + 2) 2(2 - L)
+
+
+
+512M µ22L 4 .
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Proof of Lemma A.3. We have
+
+E [f (x )] - f (x) = E
+
+µ w
+
+x1 - x
+
+ E µ 2(f(x1) - f (x)) , w
+
+where the equality follows from the definition of µ and the inequality follows from strong convexity.
+
+A.4 EXAMPLE: THE ADVANTAGE OF ADAPTIVITY
+
+Here we provide a strongly convex function (in fact a simple quadratic) and a sketch of the proof of the fact that depending on the starting point adaptive advantage i.e. µ of AdaGrad can be up to a factor of d.
+
+Consider the function x 2 in Rd and consider the starting point x0. Let the stochastic gradient oracle Of be such that before the experiment the oracle samples a random orthonormal basis V = {v1 . . . vd} and when queried at a point x returns the vector
+f (x) = f (x) + atzt
+where at = ±1 with probability 1/2 and zt is a vector picked from the set V uniformly randomly. It is easy to verify that Of is a -bounded stochastic gradient oracle. We now provide an analysis of AdaGrad with the above oracle for f .
+
+Firstly note that we can without loss of generality, assume that the basis chosen is the canonical basis {ei}. This can be seen by performing a simple rotation which does not affect the function x 2. Further under this setting note that AdaGrad is equivalent to running a one dimensional SGD algorithm in each coordinate independently. The following bound now follows directly from the well known analysis of SGD on smooth functions (see Theorem 6.3 in Bubeck et al. (2015) for a concrete reference).
+
+ i  [d] (x [i])2
+
+|x1[i]|
+
+T t=1
+
+(t[i])2
+
+T
+
+=
+
+|x1[i]| ·
+
+1 ,
+Td
+
+where t[i] = 1/d is the variance of the noise in the stochastic gradient seen at time t along coordinate i and x is the output of AdaGrad. Note that in the above we have ignored the bias term which
+
+scales as 1/T (refer to Theorem 6.3 in Bubeck et al. (2015)). This implies that the overall error for
+
+AdaGrad scales as
+
+x2
+
+x1 1 ·
+
+1 .
+Td
+
+Therefore the advantage of adaptivity µ is bounded by
+
+µ
+
+x1 1 x1 2
+
+1
+Td =
+1
+T
+
+x1 1 . x1 2 d
+
+This follows by noting that the variance of the noise in the stochastic gradient measured in the 2 is 1. The above expression implies that µ can be as small as O( 1 ) in particular if the starting point
+d
+x1 is sparse or nearly sparse and therefore x1 1  x1 2.
+
+B ADDITIONAL EXPERIMENTS
+B.1 COMPARISON OF WALL CLOCK TIME
+For those interested in end-to-end performance in terms of model training speed, we provide an alternate visualization for the experiments in Sections 3.2 and 3.3, replacing the epoch count with total cumulative training time on the horizontal axis. Evidently, on the LSTM task, GGT outperforms the baselines at all times (and converges upon a better solution), even with the additional time overhead.
+The same categorical improvement was not observed on the vision task, for training convergence or generalization. This is probably due to the interactions between modern convolutional architectures and the epoch-dependent learning rate schedule, which we have not attempted to re-tune.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Training loss (CIFAR-10)
+
+Test accuracy (CIFAR-10)
+
+SGD SGD
+
+100
+
+AdaGrad Adam
+
+0.95
+
+AdaGrad Adam
+
+GGT GGT
+
+10 1 0.90
+
+10 2
+0
+4.50 4.25 4.00 3.75 3.50 3.25 3.00 2.75 2.50
+0
+
+2000 4000 6000 8000 10000
+Training perplexity (PTB)
+SGD AdaGrad Adam GGT
+
+0.85
+4.50 4.25 4.00
+
+3.75
+
+3.50
+
+3.25
+
+3.00
+
+2.75
+
+5000 10000 15000 wall clock time (sec)
+
+20000
+
+2.50 25000
+
+0 0
+
+2000 4000 6000 8000
+Validation perplexity (PTB)
+
+10000 SGD AdaGrad Adam GGT
+
+5000 10000 15000 wall clock time (sec)
+
+20000
+
+25000
+
+Figure 5: Plot of experiments from Sections 3.2 and 3.3, with wall clock time on horizontal axis instead of epoch count (as in Figure 3). Top: CIFAR-10 classification with a 3-branch ResNet. Bottom: PTB character-level language modeling with a 3-layer LSTM.
+
+B.2 EXPERIMENTS ON ADDITIONAL ARCHITECTURES
+We present some additional large-scale empirical studies in Figure 6.
+To demonstrate a vision task with a harder optimization landscape, we use GGT to train a 19layer "vanilla" convolutional network (VGGNet, Simonyan & Zisserman (2014)), without residual connections or batch normalization, on the same CIFAR-10 classification task. Here, we recover the same insights as found by Wilson et al. (2017), in which diagonal-matrix adaptive methods can fail to train a network dramatically. Here, unlike diagonal-matrix adaptive optimizers, GGT stays on par with SGD throughout training, with a  1% gap remaining in generalization at the end. We use a standard fixed halving learning rate schedule; it is clear here that in the initial epochs after decaying the learning rate, GGT trains the most rapidly. We leave a careful investigation of leveraging this phenomenon, and tuning GGT's learning rate schedule, to future work.
+A recent significant advancement on many NLP tasks, including language modeling, is the introduction of attention-based models. We investigate the behavior of GGT on a Transformer network (Vaswani et al., 2017), on the same Penn Treebank character-level language modeling task. Here, after an initial lead, GGT is outperformed by Adam in training and validation loss. The value of using gradient correlations to assist in the training of attention models seems to be limited.
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+Training loss (VGG19, CIFAR-10)
+
+100 0.90
+
+10 1
+
+0.85
+
+10 2 SGD
+
+AdaGrad
+
+Adam
+
+10 3 GGT 0 50
+
+100 150 200
+
+250
+
+300 0.80 0
+
+7
+
+Training perplexity (Transformer, PTB)
+SGD
+
+7
+
+6
+
+AdaGrad Adam
+
+6
+
+GGT
+
+55
+
+44
+
+33
+
+22
+
+11 0 10 20 30 40 50 0 epoch
+
+Test accuracy (VGG19, CIFAR-10)
+
+SGD AdaGrad Adam GGT
+
+50 100 150 200 250
+Validation perplexity (Transformer, PTB)
+
+300
+
+SGD AdaGrad Adam GGT
+
+10 20 30 40 50 epoch
+
+Figure 6: Plot of experiments from Sections 3.2 and 3.3, with wall clock time on horizontal axis instead of epoch count (as in Figure 3). Top: CIFAR-10 classification with a 19-layer vanilla CNN. Bottom: PTB character-level language modeling a Transformer network.
+
+17
+
+

@@ -1,0 +1,4449 @@
+Under review as a conference paper at ICLR 2019
+STOCHASTIC GRADIENT PUSH FOR DISTRIBUTED DEEP LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Large mini-batch parallel SGD is commonly used for distributed training of deep networks. Approaches that use tightly-coupled exact distributed averaging based on AllReduce are sensitive to slow nodes and high-latency communication. In this work we show the applicability of Stochastic Gradient Push (SGP) for distributed training. SGP uses a gossip algorithm called PushSum for approximate distributed averaging, allowing for much more loosely coupled communications which can be beneficial in high-latency or high-variability scenarios. The tradeoff is that approximate distributed averaging injects additional noise in the gradient which can affect the train and test accuracies. We prove that SGP converges to a stationary point of smooth, non-convex objective functions. Furthermore, we validate empirically the potential of SGP. For example, using 32 nodes with 8 GPUs per node to train ResNet-50 on ImageNet, where nodes communicate over 10Gbps Ethernet, SGP completes 90 epochs in around 1.6 hours while AllReduce SGD takes over 5 hours, and the top-1 validation accuracy of SGP remains within 1.2% of that obtained using AllReduce SGD.
+1 INTRODUCTION
+Deep Neural Networks (DNNs) are the state-of-the art machine learning approach in many application areas, including image recognition (He et al., 2016) and natural language processing (Vaswani et al., 2017). Stochastic Gradient Descent (SGD) is the current workhorse for training neural networks. The algorithm optimizes the network parameters, x, to minimize a loss function, f (·), through gradient descent, where the loss function's gradients are approximated using a subset of training examples (a mini-batch). DNNs often require large amounts of training data and trainable parameters, necessitating non-trivial computational requirements (Wu et al., 2016; Mahajan et al., 2018). There is a need for efficient methods to train DNNs in large-scale computing environments.
+A parallel version of SGD is usually adopted for large-scale, distributed training (Goyal et al., 2017; Li et al., 2014). Worker nodes compute local mini-batch gradients of the loss function on different subsets of the data, and then calculate an exact inter-node average gradient using either the ALLREDUCE communication primitive, in synchronous implementations (Goyal et al., 2017), or using a central parameter server, in asynchronous implementations (Dean et al., 2012). Using a parameter server to aggregate gradients introduces a potential bottleneck and a central point of failure (Lian et al., 2017). The ALLREDUCE primitive computes the exact average gradient at all workers in a decentralized manner, avoiding issues associated with centralized communication and computation.
+However, exact averaging algorithms like ALLREDUCE are not robust in high-latency or highvariability platforms, e.g., where the network bandwidth may be a significant bottleneck, because they involve tightly-coupled, blocking communication (i.e., the call does not return until all nodes have finished aggregating). Moreover, aggregating gradients across all the nodes in the network can introduce non-trivial computational overhead when there are many nodes, or when the gradients themselves are large. This issue motivates the investigation of a decentralized and inexact version of SGD to reduce the overhead associated with distributed training.
+There have been numerous decentralized optimization algorithms proposed and studied in the control-systems literature that leverage consensus-based approaches to aggregate information; see the recent survey Nedic´ et al. (2018) and references therein. Rather than exactly aggregating gradi-
+1
+
+Under review as a conference paper at ICLR 2019
+
+ents (as with ALLREDUCE), this line of work uses less-coupled message passing algorithms which compute inexact distributed averages.
+Most previous work in this area has focused on theoretical convergence analysis assuming convex objectives. Recent work has begun to investigate their applicability to large-scale training of DNNs (Lian et al., 2017; Jiang et al., 2017). However, these papers study methods based on communication patterns which are static (the same at every iteration) and symmetric (if i sends to j, then i must also receive from j before proceeding). Such methods inherently require blocking and communication overhead. State-of-the-art consensus optimization methods build on the PUSHSUM algorithm for approximate distributed averaging (Kempe et al., 2003; Nedic´ et al., 2018), which allows for non-blocking, time-varying, and directed (asymmetric) communication. Since SGD already uses stochastic mini-batches, the hope is that an inexact average mini-batch will be as useful as the exact one if the averaging error is sufficiently small relative to the variability in the stochastic gradient.
+This paper studies the use of Stochastic Gradient Push (SGP), an algorithm blending SGD and PUSHSUM, for distributed training of deep neural networks. We provide a theoretical analysis of SGP, showing it converges for smooth non-convex objectives. We also evaluate SGP experimentally, training ResNets on ImageNet using up to 32 nodes, each with 8 GPUs (i.e., 256 GPUs in total). Our main contributions are summarized as follows:
+· We provide the first convergence analysis for Stochastic Gradient Push when the objective function is smooth and non-convex. We show that, for anappropriate choice of the step size, SGP converges to a stationary point at a rate of O 1/ nK , where n is the number
+of nodes and K is the number of iterations.
+· In a high-latency scenario, where nodes communicate over 10Gbps Ethernet, SGP runs up to 3× faster than ALLREDUCE SGD and exhibits 88.6% scaling efficiency over the range from 4­32 nodes.
+· The top-1 validation accuracy of SGP matches that of ALLREDUCE SGD for up to 8 nodes (64 GPUs), and remains within 1.2% of ALLREDUCE SGD for larger networks.
+· In a low-latency scenario, where nodes communicate over a 100Gbps InfiniBand network supporting GPUDirect, SGP is on par with ALLREDUCE SGD in terms of running time, and SGP exhibits 92.4% scaling efficiency.
+· In comparison to other decentralized consensus-based approaches that require symmetric messaging, SGP runs faster and it produces models with better validation accuracy.
+
+2 PRELIMINARIES
+
+Problem formulation. We consider the setting where a network of n nodes cooperates to solve the stochastic consensus optimization problem
+
+minxiRd,i=1,...,n
+
+1 n
+
+n i=1
+
+Ei
+
+Di
+
+Fi
+
+(xi
+
+;
+
+i
+
+)
+
+subject to
+
+xi = xj, i, j = 1, . . . , n.
+
+(1)
+
+Each node has local data following a distribution Di, and the nodes wish to cooperate to find the parameters x of a DNN that minimizes the average loss with respect to their data, where Fi is the loss function at node i. Moreover, the goal codified in the constraints is for the nodes to reach
+agreement (i.e., consensus) on the solution they report. We assume that nodes can locally evaluate stochastic gradients F (xi; i), i  Di, but they must communicate to access information about the objective functions at other nodes.
+
+Distributed averaging. The problem described above encompasses distributed training based on
+
+data parallelism. There a canonical approach is large mini-batch parallel stochastic gradient descent:
+
+for an overall mini-batch of size nb, each node computes a local stochastic mini-batch gradient
+
+using b samples, and then the nodes use the ALLREDUCE communication primitive to compute the
+
+average gradient at every node. Let fi(xi) = EiDi Fi(xi; i) denote the objective at node i, and
+
+let
+
+f (x)
+
+=
+
+1 n
+
+n i=1
+
+fi(x)
+
+denote
+
+the
+
+overall
+
+objective.
+
+Since
+
+f (x)
+
+=
+
+1 n
+
+n i=1
+
+fi(x),
+
+averaging
+
+gradients via ALLREDUCE provides an exact stochastic gradient of f . Typical implementations of
+
+ALLREDUCE
+
+have
+
+each
+
+node
+
+send
+
+and
+
+receive
+
+2
+
+n-1 n
+
+B
+
+bytes,
+
+where
+
+B
+
+is
+
+the
+
+size
+
+(in
+
+bytes)
+
+of
+
+the
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+tensor being reduced, and involve 2 log2(n) communication steps (Rabenseifner, 2004). Moreover, ALLREDUCE is a blocking primitive, meaning that no node will proceed with local computations
+until the primitive returns.
+
+Approximate distributed averaging. In this work we explore the alternative approach of using
+
+a gossip algorithm for approximate distributed averaging--specifically, the PUSHSUM algorithm.
+
+Gossip algorithms typically use linear iterations for averaging. For example, let yi(0)  Rn be a
+
+vector
+
+at
+
+node
+
+i,
+
+and
+
+consider
+
+the
+
+goal
+
+of
+
+computing
+
+the
+
+average
+
+vector
+
+1 n
+
+n i=1
+
+yi(0)
+
+at
+
+all
+
+nodes.
+
+Stack the initial vectors into a matrix Y (0)  Rn×d with one row per node. Typical gossip iterations
+
+have the form Y (k+1) = P (k)Y (k) where P (k)  Rn×n is referred to as the mixing matrix. This
+
+corresponds to the update yi(k+1) =
+
+n j=1
+
+pi(,kj)yj(k)
+
+at node i.
+
+To implement this update, node i
+
+only needs to receive messages from other nodes j for which p(i,kj) = 0, so it will be appealing to use
+
+sparse P (k) to reduce communications.
+
+Drawing inspiration from the theory of Markov chains (Seneta, 1981), the mixing matrices P (k) are
+
+designed to be column stochastic. Then, under mild conditions (e.g., ensuring that information from
+
+every node eventually reaches all other nodes) one can show that limK
+
+K k=0
+
+P
+
+(k)
+
+=
+
+1
+
+,
+
+where  is the ergodic limit of the chain and 1 is a vector with all entries equal to 1. Consequently,
+
+the gossip iterations converge to a limit Y () =  1 Y (0) ; i.e., the value at node i converges to
+
+yi() = i
+
+n j=1
+
+yj(0)
+
+.
+
+When
+
+the
+
+matrices
+
+P (k)
+
+are
+
+symmetric,
+
+it
+
+is
+
+straightforward
+
+to
+
+design
+
+the
+
+algorithm so that i = 1/n for all i by making P (k) doubly stochastic. However, symmetric P (k)
+
+has strong practical ramifications, such as requiring care in the implementation to avoid deadlocks.
+
+The PUSHSUM algorithm only requires that P (k) be column-stochastic, and not necessarily sym-
+metric (so node i may send to node j, but not necessarily vice versa). Instead, one additional scalar
+parameter wi(k) is maintained at each node. The parameter is initialized to wi(0) = 1 for all i, and updated using the same linear iteration, w(k+1) = P (k)w(k). Consequently, the parameter con-
+verges to w() = (1 w(0)), or wi() = in at node i. Thus each node can recover the average of the initial vectors by computing the de-biased ratio yi()/wi(). In practice, we stop after a finite number of gossip iterations K and compute yi(K)/wi(K). The distance of the de-biased ratio to the exact average can be quantified in terms of properties of the matrices {P (k)}kK=-01. Let Niout(k) = {j : pj(k,i) > 0} and Niin(k) = {j : p(i,kj) > 0} denote the sets of nodes that i transmits
+to and receives from, respectively, at iteration k. If we use B bytes to represent the vector yi(k), then node i sends and receives Niout(k) B and Niin(k) B bytes, respectively, per iteration. In our
+experiments we use graph sequences with Niout(k) = Niin(k) = 1 or 2, and find that approximate averaging is both fast and still facilitates training.
+
+3 STOCHASTIC GRADIENT PUSH
+Algorithm description. The stochastic gradient push (SGP) method for solving equation 1 is obtained by interleaving one local stochastic gradient descent update at each node with one iteration of PUSHSUM. Each node maintains three variables: the model parameters xi(k) at node i, the scalar PUSHSUM weight wi(k), and the de-biased parameters zi(k) = wi(k) -1xi(k). The initial xi(0) and zi(0) can be initialized to any arbitrary value as long as xi(0) = zi(0). Pseudocode is shown in Alg. 1. Each node performs a local SGD step (lines 2­4) followed by one step of PUSHSUM for approximate distributed averaging (lines 5­8).
+Note that the gradients are evaluated at the de-biased parameters zi(k) in line 3, and they are then used to update xi(k), the PUSHSUM numerator, in line 4. All communication takes place in line 5, and each message contains two parts, the PUSHSUM numerator and denominator. In particular, node i controls the values pj(k,i) used to weight the values in messages it sends.
+3
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 1 Stochastic Gradient Push (SGP)
+
+Require: Initialize  > 0, x(i0) = zi(0)  Rd and wi(0) = 1 for all nodes i  {1, 2, . . . , n} 1: for k = 0, 1, 2, · · · , K do at node i
+
+2: Sample new mini-batch i(k)  Di from local distribution
+
+3: Compute a local stochastic mini-batch gradient at zi(k): Fi(zi(k); i(k))
+
+4:
+
+xi(k+
+
+1 2
+
+)
+
+=
+
+x(ik)
+
+-
+
+Fi(zi(k); i(k))
+
+5:
+
+Send
+
+pj(k,i)
+
+x(ik+
+
+1 2
+
+)
+
+,
+
+pj(k,i)
+
+wi(k)
+
+to out-neighbors j  Niout(k);
+
+receive
+
+p(i,kj)
+
+x(jk+
+
+1 2
+
+)
+
+,
+
+p(i,kj)
+
+wj(k)
+
+from in-neighbors j  Niin(k)
+
+6:
+
+xi(k+1) =
+
+p x(k)
+
+(k+
+
+1 2
+
+)
+
+jNiin(k) i,j j
+
+7:
+
+wi(k+1) =
+
+jNiin(k) p(i,kj)wj(k)
+
+8: zi(k+1) = xi(k+1)/wi(k+1)
+
+9: end for
+
+We are mainly interested in the case where the mixing matrices P (k) are sparse in order to have low
+communication overhead. However, we point out that when the nodes' initial values are identical, x(i0) = xj(0) for all i, j  [n], and every entry of P (k) is equal to 1/n, then SGP is mathematically equivalent to parallel SGD using ALLREDUCE.
+
+Theoretical guarantees. SGP was first proposed and analyzed in (Nedic´ & Olshevsky, 2016) assuming the local objectives fi(x) are strongly convex. Here we provide convergence results in the more general setting of smooth, non-convex objectives. We make the following three assumptions:
+
+1. (L-smooth) There exists a constant L > 0 such that fi(x) - fi(y)
+
+equivalently
+
+fi(x)  fi(y) + fi(y)
+
+(x - y) + L 2
+
+y-x
+
+2.
+
+Note that this assumption implies that function f (x) is also L-smooth.
+
+ L x - y , or (2)
+
+2. (Bounded variance) There exist finite positive constants 2 and 2 such that
+
+EDi Fi(x; ) - fi(x) 2  2
+
+1n n
+
+fi(x) - f (x) 2  2
+
+i=1
+
+i, x, and x.
+
+(3) (4)
+
+Thus 2 bounds the variance of stochastic gradients at each node, and 2 quantifies the similarity of data distributions at different nodes.
+
+3. (Mixing connectivity) To each mixing matrix P (k) we can associate a graph with vertex set
+
+{1, . . . , n} and edge set E(k) = {(i, j) : p(i,kj) > 0}; i.e., with edges (i, j) from j to i if i receives
+
+a message from j at iteration k. Assume that the graph with edge set
+
+(l+1)B-1 k=lB
+
+E (k)
+
+is
+
+strongly
+
+connected and has diameter at most  for every l  0. To simplify the discussion, we assume that
+
+every column of the mixing matrices P (k) has at most D non-zero entries.
+
+Let
+
+x(k)
+
+=
+
+1 n
+
+n i=1
+
+x(ik).
+
+Under
+
+similar
+
+assumptions,
+
+Lian
+
+et
+
+al.
+
+(2017)
+
+define
+
+that
+
+a
+
+decentralized
+
+algorithm for solving equation 1 converges if, for any > 0, it eventually satisfies
+
+1 K
+
+K
+
+E
+
+f (x(k))
+
+2
+
+.
+
+k=1
+
+(5)
+
+Our first result shows that SGP converges in this sense.
+
+Theorem 1. Suppose that Assumptions 1­3 hold, and run SGP for K iterations with step-size  = n/K. Let f  = minx f (x) and assume that f  > -. There exist constants C > 0 and
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+q  (0, 1) which depend on B, n, and  such that if the total number of iterations satisfies
+
+K  max
+
+nL4 C 4 602 (1 - q)4 ,
+
+L4 C 4 P12 n (1 - q)4(f (x(0)) - f  +
+
+L2 2
+
+)2
+
+,
+
+L2 C 2 nP2 (1 - q)2(f (x(0)) - f  +
+
+L2 2
+
+)
+
+where P1 = 4(2 + 32)n +
+
+n i=1
+
+xi (0)
+
+n
+
+2
+
+and P2 = 2 + 32L2C2 + 2
+
+n i=1
+
+xi (0)
+
+n
+
+2
+, then
+
+K -1
+k=0 E
+
+2
+
+f (x(k))
+
+
+
+12(f (x(0)) - 
+
+f
+
++
+
+L2 2
+
+)
+
+.
+
+K nK
+
+(6)
+
+The proof is given in Appendix C, where we also provide precise expressions for the constants C and q. The proof of Theorem 1 builds on an approach developed in Lian et al. (2017). Theorem 1 shows that, for a given number of nodes n, by running a sufficiently large number of iterations K (roughly speaking, (n), which is reasonable for distributed training of DNNs) and choosing the step-size  as prescribed, then the criterion equation 5 is satisfied with a number of iterations K = (1/n 2).
+That is, we achieve a linear speedup in the number of nodes.
+
+Theorem 1 shows that the average of the nodes parameters, x(k), converges, but it doesn't directly say anything about the parameters at each node. In fact, we can show a stronger result.
+
+Theorem 2. Under the same assumptions as in Theorem 1,
+
+1 K-1 nK
+
+n
+
+E
+
+x(k) - zi(k)
+
+2
+O
+
+k=0 i=1
+
+11 K + K3/2
+
+.
+
+and
+
+1 K-1 nK
+
+n
+
+E
+
+f (zik)
+
+2O
+
+k=0 i=1
+
+1
+
+1 ++
+
+1
+
+nK K K3/2
+
+The proof is also given in Appendix C. This result shows that as K grows, the de-biased variables zi(k) converge to the node-wise average x(k), and hence the de-biased variables at each node also converge to a stationary point. Note that for fixed n and large K, the 1/ nK term will dominate the other factors.
+
+4 RELATED WORK
+A variety of approaches have been proposed to accelerate distributed training of DNNs, including quantizing gradients (Alistarh et al., 2007; Wen et al., 2007) and performing multiple local SGD steps at each node before averaging (McMahan et al., 2017). These approaches are complementary to the tradeoff we consider in this paper, between exact and approximate distributed averaging. Similar to using PUSHSUM for averaging, quantizing gradients and performing multiple local SGD steps before averaging both can also be seen as injecting additional noise into SGD, leading to a trade off between training faster (by reducing communication overhead) and potentially obtaining a less accurate result. Combining these approaches (quantized, inexact, and infrequent averaging) is an interesting direction for future work.
+For the remainder of this section we review related work applying consensus-based approaches to large-scale training of DNNs. Blot et al. (2016) report initial experimental results on small-scale experiments with an SGP-like algorithm. Jin et al. (2016) make a theoretical connection between PUSHSUM-based methods and Elastic Averaged SGD (Zhang et al., 2015). Relatively to those previous works, we provide the first convergence analysis for a PUSHSUM-based method in the smooth non-convex case. Lian et al. (2017) and Jiang et al. (2017) study synchronous consensus-based versions of SGD. However, unlike PUSHSUM, those methods involve symmetric message passing (if i sends to j at iteration k, then j also sends to i before both nodes update) which is inherently blocking. Consequently, these methods are more sensitive to high-latency communication settings, and each node generally must communicate more per iteration, in comparison to PUSHSUM-based SGP where communication may be directed (i can send to j without needing a response from i). The decentralized parallel SGD (D-PSGD) method proposed in Lian et al. (2017) produces iterates whose
+
+5
+
+Under review as a conference paper at ICLR 2019
+node-wise average, x(k), is shown to converge in the sense of equation 5. Our proof of Theorem 1, showing the convergence of SGP in the same sense, adapts some ideas from their analysis and also goes beyond to show that, since the values at each node converge to the average, the individual values at each node also converge to a stationary point. We compare SGP with D-PSGD experimentally in Section 5 below and find that although the two methods find solutions of comparable accuracy, SGP is consistently faster in both high-latency and low-latency scenarios.
+Jin et al. (2016) and Lian et al. (2018) study asynchronous consensus-based methods for training DNNs. Lian et al. (2018) analyzes an asynchronous version of D-PSGD and proves that its nodewise averages also converge to a stationary point. Asynchrony introduces an additional source of noise, and in general, the models returned by these asynchronous methods generalize worse than their synchronous counterparts.
+5 EXPERIMENTS
+Next, we compare SGP with ALLREDUCE SGD, and D-PSGD (Lian et al., 2017), an approximate distributed averaging baseline relying on doubly-stochastic gossip. We run experiments on a large-scale distributed computing environment using up to 256 GPUs. Our results show that when communication is the bottleneck, SGP is faster than both SGD and D-PSGD. SGP also outperforms D-PSGD in terms of validation accuracy, while achieving a slightly worse accuracy compared to SGD when using a large number of compute nodes. Our results also highlight that, in a setting where communication is efficient (e.g., over InfiniBand), doing exact averaging through ALLREDUCE SGD remains a competitive approach.
+We run experiments on 32 DGX-1 GPU servers in a high-performance computing cluster. Each server contains eight NVIDIA Volta V100 GPUs. We consider two communication scenarios: in the high-latency scenario the nodes communicate over a 10 Gbit/s Ethernet network, and in the low-latency scenario the nodes communicate over 100 Gbit/s InfiniBand which supports GPUDirect RDMA communications. To investigate how each algorithm scales, we run experiments with 4, 8, 16, and 32 nodes (i.e., 32, 64, 128, and 256 GPUs).
+We adopt the 1000-way ImageNet classification task (Russakovsky et al., 2015) as our experimental benchmark. We train a ResNet-50 (He et al., 2016) following the experimental protocol of Goyal et al. (2017), using the same hyperparameters with the exception of the learning rate schedule in the 32 node experiment for SGP and D-PSGD. In the experiments, we also modify SGP to use Nesterov momentum. In our default implementation of SGP, each node sends and receives to one other node at each iteration, and this destination changes from one iteration to the next. Please refer to A.3 for more implementation details.
+All algorithms are implemented in PyTorch v0.5 (Paszke et al.). To leverage the highly efficient NVLink interconnect within each server, we treat each DGX-1 as one node in all of our experiments. In our implementation of SGP, each node computes a local mini-batch in parallel using all eight GPUs using a local ALLREDUCE, which is efficiently implemented via the NVIDIA Collective Communications Library. Then inter-node averaging is accomplished using PUSHSUM either over Ethernet or InfiniBand. In the low-latency experiments, we leverage GPUDirect to directly send/receive messages between GPUs on different nodes and avoid transferring the model back to host memory. In the high-latency experiments this is not possible, so the model is transferred to host memory after the local ALLREDUCE, and then PUSHSUM messages are sent over Ethernet.
+5.1 EVALUATION ON HIGH-LATENCY INTERCONNECT
+We consider the high-latency scenario where nodes communicate over 10Gbit/s Ethernet. With a local mini-batch size of 256 samples per node (32 samples per GPU), a single Volta DGX-1 server can perform roughly 4.384 mini-batches per second. Since the ResNet-50 model size is roughly 100MBytes, transmitting one copy of the model per iteration requires 3.5 Gbit/s. Thus in the highlatency scenario the problem, if a single 10 Gbit/s link must carry the traffic between more than two pairs of nodes, then communication clearly becomes a bottleneck.
+Figure 1 (a) shows the validation curves when training on 4 and 32 nodes (additional training and validation curves for all the training runs can be found in B.1). For any number of nodes used in
+6
+
+Under review as a conference paper at ICLR 2019
+
+Validation Error Time (s)
+Validation Accuracy
+
+100 SGP 4 nodes
+
+SGP 32 nodes
+
+80
+
+SGD 4 nodes SGD 32 nodes
+
+60
+
+D-PSGD 4 nodes D-PSGD 32 nodes
+
+40
+
+20 0 20000 Tim4e00(s0)0 60000
+
+(a) Validation Curve
+
+1.2
+1.0
+0.8
+0.6
+0.4 4
+
+SGP SGD D-PSGD
+N8umber of Nod1e6s
+
+(b) Time Per Iteration
+
+32
+
+76.5
+
+76.0
+
+75.5
+
+75.0
+74.5 4
+
+SGP SGD D-PSGD
+N8umber of Nod1e6s
+
+32
+
+(c) Validation Accuracy
+
+Figure 1: Results on Ethernet 10Gbits. (a): Validation performance w.r.t. training time (in seconds) for model trained on 4 and 32 nodes. (b): Average time per training iteration (in seconds) (c): Best validation accuracy. Stochastic Gradient Push (SGP) is faster than both Decentralized-Parallel SGD (D-PSGD) and ALLREDUCE SGD while decreasing validation accuracy by 1.2%.
+
+our experiments, we observe that SGP consistently outperforms D-PSGD and ALLREDUCE SGD in terms of total training time in this scenario. In particular for 32 nodes, SGP training time takes less than 1.6 hours while D-PSGD and ALLREDUCE SGD require roughly 2.6 and 5.1 hours. Appendix B.2 provides experimental evidence that all nodes converge to models with similar training and validation accuracy when using SGP.
+Figure 1 (b) shows the average time per iteration for the different training runs. As we increase the number of nodes, the average iteration time stays almost constant for SGP and D-PSGD, while we observe a significant time-increase in the case of ALLREDUCE SGD, resulting in an overall slower training time. Moreover, although D-SGD and SGP both exhibit strong scaling, SGP is roughly 200ms faster per iteration, supporting the claim that it involves less communication overhead.
+Figure 1 (c) reports the best validation accuracy for the different training runs. While they all start around the same value, the accuracy of D-PSGD and SGP decreases as we increase the number of nodes. In the case of SGP, we see its performance decrease by 1.2% relative to SGD on 32 nodes. We hypothesize that this decrease is due to the noise introduced by approximate distributed averaging. We will see below than changing the connectivity between the nodes can ameliorate this issue. We also note that the SGP validation accuracy is better than D-PSGD for larger networks.
+5.2 EVALUATION ON A "LOW LATENCY" INTERCONNECT
+
+Validation Error Time (s)
+Validation Accuracy
+
+100 SGP 32 nodes SGD 32 nodes
+80 60 40
+0 1000 2T0i0m0e (s) 3000 4000
+(a) Validation Curve
+
+0.31 0.30 0.29 0.28 0.27 0.26 0.25
+4
+
+SGP SGD
+8 Node 16
+
+(b) Time Per Iteration
+
+32
+
+76.4 76.2 76.0 75.8 75.6 75.4 75.2 75.0 4
+
+SGP SGD
+8 Node 16
+
+32
+
+(c) Validation Accuracy
+
+Figure 2: Results on InfiniBand 100Gbits. (a): Validation performance w.r.t. training time (in second) for model trained on 32 nodes. (b): Average time per training iteration (in second) (c): Best validation accuracy. Stochastic Gradient Push (SGP) is on part and sometime even slightly faster than ALLREDUCE SGD on "low latency" network while slightly degrading the accuracy.
+
+We now investigate the behavior of SGP and ALLREDUCE SGD over InfiniBand 100Gbit/s. We follow the same experimental protocol as in the Ethernet 10Gbit/s case. On this low-latency interconnect, SGD and SGP obtain similar timing and differ at most by 21ms per iteration (Figure 2 (b)
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Training Error Validation Error
+
+100 80 60 40 20 0
+
+SGP 2 Neighbor SGP 1 Neighbors D-PSGD SGD
+5000 Tim10e0(0s)0 15000
+(a) Train
+
+100 80 60 40 20 0
+
+SGP 2 Neighbor SGP 1 Neighbors D-PSGD SGD
+5000 Tim1e00(0s)0 15000
+(b) Valid
+
+Figure 3: Comparison of SGP using a communication graph with 1-neighbor, SGP using a graph with 2-neighbors, D-PSGD and SGD on 32 nodes communicating over 10 Gbit/s Ethernet. Using one additional neighbor improves the validation performance of SGD (from 75.0 to 75.4) while retaining most of the computational benefits.
+
+for 4 nodes). This confirms that for model sizes on the scale of ResNet50, communication is not a bottleneck in this setting. SGP does outperform ALLREDUCE SGD when using 32 nodes by a small 13ms margin (Figure 2 (a) and (b)). Overall SGP trains a ResNet-50 on ImageNet in 1.16 hour and SGD in 1.20 hour. Time differences of this scale could be impacted by other factors such as data loading. We show the computation and communication time during training in Appendix B.3. We observe that SGP computation and communication time is close to constant as the number of nodes increases, while SGD increases slightly. Validation accuracy follows a similar trend as for Ethernet 10Gbit/s (Figure 2 (c)).
+5.3 IMPACT OF GRAPH TOPOLOGY
+Next we investigate the impact of the communication graph topology on the SGP validation performance using Ethernet 10Gbit/s. In the limit of a fully-connected communication graph, SGD and SGP are strictly equivalent (see section 3). By increasing the number of neighbors in the graph, we expect the accuracy of SGP to improve (approximate averages are more accurate) but the communication time required for training will increase.
+In figure 3, we compare the training and validation accuracy for SGP using a communication graph with 1-neighbor and 2-neighbors with D-PSGD and SGD on 32 nodes. By increasing the number of neighbors to two, SGP achieves better training/validation accuracy (from 74.8/75.0 to 75.6/75.4) and gets closer to final validation achieves by SGD (77.0/76.2). Increasing the number of neighbors also to increases the communication, hence the overall training time. SGP with 2 neighbors completes training in 2.1 hours and its average time per iteration increases by 27% relative to SGP with one neighbor. Nevertheless, SGP 2-neighbors is still faster than SGD and D-PSGD, while achieving better accuracy than SGP 1-neighbor.
+6 CONCLUSION
+DNN training often necessistates non-trivial computational requirements leveaging distributed computing resources. Traditional parallel versions of SGD use exact averaging algorithms to parallelize the computation between nodes, and induce additional parallelization overhead as the model and network sizes grow. This paper proposes the use of Stochastic Gradient Push for distributed deep learning. The proposed method computes in-exact averages at each iteartion in order to improve scaling efficiency and reduce the dependency on the underlying network topology. SGP converges to a stationary point at an O 1/ nK rate in the smooth and non-convex case, and proveably achieves a linear speedup (in iterations) with respect to the number of nodes. Empirical results show that SGP can be up to 3× times faster than traditional ALLREDUCE SGD over high-latency interconnect, matches the top-1 validation accuray up to 8 nodes (64GPUs), and remains within 1.2% top-1 validation accuracy for larger-networks.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Dan Alistarh, Demjan Grubic, Jerry Z. Li, Ryota Tomioka, and Milan Vojnovic. Qsgd: Communication-efficient sgd via gradient quantization and encoding. In Advances in Neural Information Processing Systems, pp. 1709­1720, 2007.
+Mahmoud Assran and Michael Rabbat. Asynchronous subgradient-push. arXiv preprint arXiv:1803.08950, 2018.
+Michael Blot, David Picard, Matthieu Cord, and Nicolas Thome. Gossip training for deep learning. In NIPS Workshop on Optimization for Machine Learning, 2016.
+Jeffrey Dean, Greg Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Mark Mao, Andrew Senior, Paul Tucker, Ke Yang, Quoc V Le, et al. Large scale distributed deep networks. In Advances in neural information processing systems, pp. 1223­1231, 2012.
+Priya Goyal, Piotr Dolla´r, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: training imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In CVPR, 2016.
+Zhanhong Jiang, Aditya Balu, Chinmay Hegde, and Soumik Sarkar. Collaborative deep learning in fixed topology networks. In Advances in Neural Information Processing Systems, pp. 5904­5914, 2017.
+Peter H. Jin, Qiaochu Yuan, Forrest Iandola, and Kurt Keutzer. How to scale distributed deep learning? In NIPS ML Systems Workshop, 2016.
+David Kempe, Alin Dobra, and Johannes Gehrke. Gossip-based computation of aggregate information. In Proceedings of the 44th Annual IEEE Symposium on Foundations of Computer Science., pp. 482­491. IEEE, 2003.
+Mu Li, David G Andersen, Jun Woo Park, Alexander J Smola, Amr Ahmed, Vanja Josifovski, James Long, Eugene J Shekita, and Bor-Yiing Su. Scaling distributed machine learning with the parameter server. In OSDI, volume 14, pp. 583­598, 2014.
+Xiangru Lian, Ce Zhang, Huan Zhang, Cho-Jui Hsieh, Wei Zhang, and Ji Liu. Can decentralized algorithms outperform centralized algorithms? a case study for decentralized parallel stochastic gradient descent. In Advances in Neural Information Processing Systems, pp. 5330­5340, 2017.
+Xiangru Lian, Wei Zhang, Ce Zhang, and Ji Liu. Asynchronous decentralized parallel stochastic gradient descent. In International Conference on Machine Learning, pp. 3049­3058, 2018.
+Dhruv Mahajan, Ross Girshick, Vignesh Ramanathan, Kaiming He, Manohar Paluri, Yixuan Li, Ashwin Bharambe, and Laurens van der Maaten. Exploring the limits of weakly supervised pretraining. arXiv preprint arXiv:1805.00932, 2018.
+H. Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Agu¨era y Arcas. Communication-efficient learning of deep networks from decentralized data. In Artificial Intelligence and Statistics, pp. 1273­1282, 2017.
+Angelia Nedic´ and Alex Olshevsky. Stochastic gradient-push for strongly convex functions on timevarying directed graphs. IEEE Trans. Automatic Control, (12):3936­3947, 2016.
+Angelia Nedic´, Alex Olshevsky, and Michael G. Rabbat. Network topology and communicationcomputation tradeoffs in decentralized optimization. Proceedings of the IEEE, (5):953­976, 2018.
+Adam Paszke, Soumith Chintala, Ronan Collobert, Koray Kavukcuoglu, Clement Farabet, Samy Bengio, Iain Melvin, Jason Weston, and Johnny Mariethoz. Pytorch: Tensors and dynamic neural networks in python with strong gpu acceleration, may 2017.
+Rolf Rabenseifner. Optimization of collective reduction operations. In Proc. Intl. Conf. Computational Science, Krakow, Poland, Jun. 2004.
+9
+
+Under review as a conference paper at ICLR 2019
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, et al. Imagenet large scale visual recognition challenge. International Journal of Computer Vision, 115(3):211­252, 2015.
+Eugene Seneta. Non-negative Matrices and Markov Chains. Springer, 1981. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems, pp. 5998­6008, 2017. Wei Wen, Cong Xu, Feng Yan, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. TernGrad: Ternary gradients to reduce communication in distributed deep learning. In Advances in Neural Information Processing Systems, pp. 1509­1519, 2007. Jacob Wolfowitz. Products of indecomposible, aperiodic, stochastic matrices. Proceedings of the American Mathematical Society, 14(5):733­737, 1963. Yonghui Wu, Mike Schuster, Zhifeng Chen, Quoc V Le, Mohammad Norouzi, Wolfgang Macherey, Maxim Krikun, Yuan Cao, Qin Gao, Klaus Macherey, et al. Google's neural machine translation system: Bridging the gap between human and machine translation. arXiv preprint arXiv:1609.08144, 2016. S. Zhang, A. Choromanska, and Y. LeCun. Deep learning with elastic averaged SGD. In Advances in Neural Information Processing Systems, pp. 685­693, 2015.
+10
+
+Under review as a conference paper at ICLR 2019
+
+A IMPLEMENTATION DETAILS
+
+2 1
+
+3
+
+4 5
+
+6 0
+7
+(a) Directed Exponential Graph highlighting node 0's out-neighbours
+Figure 4: Example of an 8-node exponential graph used in experiments
+
+A.1 COMMUNICATION TOPOLOGY
+Directed exponential graph. For the SGP experiments we use a time-varying directed graph to represent the inter-node connectivity. Thinking of the nodes as being ordered sequentially, according to their rank, 0, . . . , n - 1,1 each node periodically communicates with peers that are 20, 21, . . . , 2log2(n-1) hops away. Fig. 4 shows an example of a directed 8-node exponential graph. Node 0's 20-hop neighbour is node 1, node 0's 21-hop neighbour is node 2, and node 0's 22-hop neighbour is node 4.
+In the one-peer-per-node experiments, each node cycles through these peers, transmitting, only, to a single peer from this list at each iteration. E.g., at iteration k, all nodes transmit messages to their 20-hop neighbours, at iteration k + 1 all nodes transmit messages to their 21-hop neighbours, an so on, eventually returning to the beginning of the list before cycling through the peers again. This ensures that each node also only receives a single message at each iteration. By using full-duplex communication, sending and receiving can happen in parallel.
+In the two-peer-per-node experiments, each node cycles through the same set of peers, transmitting to two peers from the list at each iteration. E.g., at iteration k, all nodes transmit messages to their 20-hop and 21-hop neighbours, at iteration k + 1 all nodes transmit messages to their 21hop and 22 neighbours, an so on, eventually returning to the beginning of the list before cycling through the peers again. Similarly, at each iteration, each node also receives, in a full-duplex manner, two messages from some peers that are unknown to the receiving node ahead of time. Thereby performing the send and receive operations in parallel.
+Undirected exponential graph. For the D-PSGD experiments we use a time-varying undirected bipartite exponential graph to represent the inter-node connectivity. Odd-numbered nodes send a message to a peer that are 21 - 1, 22 - 1, . . . , 2log2(n-1) - 1 hops away (even-numbered nodes), and wait to a receive a message back in return. Each odd-numbered node cycles through the peers in the list in a similar fashion to the one-peer-per-node SGP experiments. Even-numbered nodes wait to receive a message from some peer (unknown to the receiving node ahead of time), and send a message back in return.
+We adopt these graphs to be consistent with the experimental setup used in Lian et al. (2017) and Lian et al. (2018).
+Note also that these graphs are all regular, in that all nodes have the same number of in-coming and out-going connections.
+1We use indices 0, . . . , n - 1 rather than 1, . . . , n only in this section, to simplify the discussion.
+11
+
+Under review as a conference paper at ICLR 2019
+A.2 STOCHASTIC GRADIENT PUSH
+In all of our experiments, we minimize the number of floating-point operations performed in each iteration, k, by using the mixing weights
+p(jk,i) = 1/ Niout(k)
+for all i, j = 1, 2, . . . , n. In words, each node assigns mixing weights uniformly to all of its outneighbors in each iteration. Recalling our convention that each node is an in- and out-neighbor of itself, it is easy to see that this choice of mixing-weight satisfies the column-stochasticity property. It may very well be that there is a different choice of mixing-weights that lead to better spectral properties of the gossip algorithm; however we leave this exploration for future work. We denote node i's uniform mixing weights at time t by pi(k) -- dropping the other subscript, which identifies the receiving node.
+To maximize the utility of the resources available on each server, each node (occupying a single server exclusively) runs two threads, a gossip thread and a computation thread. The computation thread executes the main logic used to train the local model on the GPUs available to the node, while the communication thread is used for inter-node network I/O. In particular, the communication thread is used to gossip messages between nodes. When using Ethernet-based communication, the nodes communicate their parameter tensors over CPUs. When using InifiniBand-based communication, the nodes communicate their parameter tensors using GPUDirect RDMA, thereby avoiding superfluous device to pinned-memory transfers of the model parameters.
+Each node initializes its model on one of its GPUs, and initializes its scalar push-sum weight to 1. At the start of training, each node also allocates a send- and a receive- communication-buffer in pinned memory on the CPU (or equivalently on a GPU in the case of GPUDirect RDMA communication).
+In each iteration, the communication thread waits for the send-buffer to filled by the computation thread; transmits the message in the send-buffer to its out-neighbours; and then aggregates any newly-received messages into the receive-buffer.
+In each iteration, the computation thread blocks to retrieve the aggregated messages in the receivebuffer; directly adds the received parameters to its own model parameters; and directly adds the received push-sum weights to its own push-sum weight. The computation thread then converts the model parameters to the de-biased estimate by dividing by the push-sum weight; executes a forwardbackward pass of the de-biased model in order to compute a stochastic mini-batch gradient; converts the model parameters back to the biased estimate by multiplying by the push-sum weight; and applies the newly-computed stochastic gradients to the biased model. The updated model parameters are then multiplied by the mixing weight, pi(k), and asynchronously copied back into the send-buffer for use by the communication thread. The push-sum weight is also multiplied by the same mixing weight and concatenated into the send-buffer.
+In short, gossip is performed on the biased model parameters (push-sum numerators); stochastic gradients are computed using the de-biased model parameters; stochastic gradients are applied back to the biased model parameters; and then the biased-model and the push-sum weight are multiplied by the same uniform mixing-weight and copied back into the send-buffer.
+A.3 HYPERPARAMETERS
+When we "apply the stochastic gradients" to the biased model parameters, we actually carry out an SGD step with nesterov momentum. For the 32, 64, and 128 GPU experiments we use the same exact learning-rate, schedule, momentum, and weight decay as those suggested in (Goyal et al., 2017) for SGD. In particular, we use a reference learning-rate of 0.1 with respect to a 256 sample batch, and scale this linearly with the batch-size; we decay the learning-rate by a factor of 10 at epochs 30, 60, 80; we use a nesterov momentum parameter of 0.9, and we use weight decay 0.0001. For the 256 GPU experiments, we decay the learning-rate by a factor of 10 at epochs 40, 70, 85, and we use a reference learning-rate of 0.0375. In the 256 GPU experiment with two peers-per-node, we revert to the original learning-rate and schedule.
+12
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 2 Stochastic Gradient Push with Momentum
+
+Require: Initialize  > 0, m  (0, 1), x(i0) = zi(0)  Rd and wi(0) = 1 for all nodes i  [n] 1: for k = 0, 1, 2, · · · , K do at node i
+
+2: Sample new mini-batch i(k)  Di from local distribution
+
+3: Compute a local stochastic mini-batch gradient at zi(k): Fi(zi(k); i(k))
+
+4: ui(k+1) = mui(k) + Fi(zi(k); i(k))
+
+5:
+
+xi(k+
+
+1 2
+
+)
+
+=
+
+x(ik)
+
+-
+
+(mui(k+1)
+
++
+
+Fi(zi(k); i(k)))
+
+6:
+
+Send
+
+pj(k,i)
+
+x(ik+
+
+1 2
+
+)
+
+,
+
+pj(k,i)
+
+wi(k)
+
+to out-neighbors j  Niout(k);
+
+receive
+
+pi(,kj)
+
+x(jk+
+
+1 2
+
+)
+
+,
+
+p(i,kj)
+
+wj(k)
+
+from in-neighbors j  Niin(k)
+
+7:
+
+xi(k+1) =
+
+p x(k)
+
+(k+
+
+1 2
+
+)
+
+jNiin(k) i,j j
+
+8:
+
+wi(k+1) =
+
+jNiin(k) pi(,kj)wj(k)
+
+9: zi(k+1) = xi(k+1)/wi(k+1)
+
+10: end for
+
+B EXTRA EXPERIMENTS
+B.1 ADDITIONAL TRAINING CURVES
+
+Training Error
+
+100 80 60 40 20 0
+
+SGP 4 nodes SGP 8 nodes SGP 16 nodes SGP 32 nodes SGD 4 nodes SGD 8 nodes SGD 16 nodes SGD 32 nodes
+
+100 80 60
+
+SGP 4 nodes SGP 8 nodes SGP 16 nodes SGP 32 nodes SGD 4 nodes SGD 8 nodes SGD 16 nodes SGD 32 nodes
+
+Validation Error
+
+40
+
+20000 Tim4e00(s0)0 60000
+
+20 0 20000 Tim4e00(s0)0 60000
+
+(a) Train
+
+(b) Validation
+
+Figure 5: Training on Ethernet 10Gbit/s
+
+Training Error
+
+100
+
+SGP 4 nodes
+
+100
+
+SGP 4 nodes
+
+SGP 8 nodes
+
+SGP 8 nodes
+
+SGP 16 nodes
+
+SGP 16 nodes
+
+80
+
+SGP 32 nodes SGD 4 nodes
+
+80
+
+SGP 32 nodes SGD 4 nodes
+
+SGD 8 nodes
+
+SGD 8 nodes
+
+SGD 16 nodes
+
+SGD 16 nodes
+
+60
+
+SGD 32 nodes
+
+60
+
+SGD 32 nodes
+
+Validation Error
+
+40 40
+
+20 0 5000 10000T1i5m0e00(s2)0000 25000 30000
+
+20 0 5000 10000T1i5m0e00(s2)0000 25000 30000
+
+(a) Train
+
+(b) Validation
+
+Figure 6: InfiniBand 100Gbit/s
+
+Figure5 show the train and validation curve for the different runs performed on Ethernet 10Gbit/s. Figure 6 show the train and validation curve for the different runs performed on InfiniBand 100Gbit/s.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Error
+Time
+Error
+
+4 nodes
+80 60 40 20 0 20 4E0poch 60 80
+
+100 80 60 40
+0
+
+32 nodes
+20 4E0poch 60 80
+
+Figure 7: Resnet50, trained with SGP, training and validation errors for 4 and 32 node experiments. The solid and dashed lines in each figure show the mean training and validation error, respectively, over all nodes. The shaded region shows the maximum and minimum error attained at different nodes in the same experiment. Although there is non-trivial variability across nodes early in training, all nodes eventually converge to similar validation errors, achieving consensus in the sense that they represent the same function.
+
+B.2 DISCREPANCY ACROSS DIFFERENT NODES
+Here, we investigate the performance variability across nodes during training for SGP. In figure 7, we report the minimum, maximum and mean error across the different nodes for training and validation. In an initial training phase, we observe that nodes have different validation errors; their local copies of the Resnet-50 model diverge. As we decrease the learning, the variability between the different nodes diminish and the nodes eventually converging to similar errors. This suggests that all models ultimately represent the same function, achieving consensus.
+B.3 TIMING OF A RESNET-50 TRAINED ON INFINIBAND
+
+0.25 0.20 0.15 0.10 0.05
+4
+
+SGP Compute/Comm Time SGD Data Loading Time SGD Compute/Comm Time SGD Data Loading Time
+
+8 Nodes 16
+
+32
+
+Figure 8: Average computation and communication and data loading time (per-iteration times (s)) of a ResNet-50 model on a cluster using InfiniBand interconnect. SGP computation and communication time remains almost constant as we increase the number of nodes. SGD on the other hand shows a slight increases in its per-iteration time.
+
+On InfiniBand interconnect, SGD and SGP obtain similar timing and differs at most by 21ms per iteration. In addition, SGP outperforms ALLREDUCE SGD when using 32 nodes by a small 13ms second margin Time differences of this scale could be impacted by other factors such as data loading. We therefore specificaly track the computation and communication time and the data loading time during training in figure 8. We observe that SGP computation and communication time is close to constant as we grows the number of nodes. SGD on the other hand sees a slight increases. Data loading time remains similar for both algorithms.
+14
+
+Under review as a conference paper at ICLR 2019
+
+Samples Throughput Samples Throughput
+
+20000 15000
+
+idea SGP
+
+10000
+
+5000 4 8 Num1b6er of Nodes
+
+30000 idea 25000 SGP 20000 15000 10000 5000 32 4 8 Num1b6er of Nodes
+
+32
+
+(a) ETH 10Gbit/s
+
+(b) InfiniBand 100Gbit/s
+
+Figure 9: SGP throughput on Ethernet and InfiniBand. SGP exhibits 88.6% scaling efficiency on Ethernet 10Gbit/s and 92.4% on InfiniBand
+
+B.4 SGP SCALING ANALYSIS
+Figure 9 highlights SGP input images throughput as we scale up the number of cluster node on both Ethernet 10Gbit/s and Infiniband 100Gbit/s. SGP exhibits 88.6% scaling efficiency on Ethernet 10Gbit/s and 92.4% on InfiniBand and stay close to the ideal scaling in both cases.
+
+C PROOFS OF THEORETICAL GUARANTEES
+
+Our convergence rate analysis is divided into three main parts. In the first one (subsection C.1) we present upper bounds for three important expressions that appear in our computations. In subsection C.2 we focus on proving the important for our analysis Lemma 8 based on which we later build the proofs of our main Theorems. Finally in the third part (subsection C.3) we provide the proofs for Theorems 1 and 2.
+
+Preliminary results. In our analysis two preliminary results are extensively used. We state them here for future reference.
+
+· Let a, b  R. Since (a - b)2  0, it holds that
+
+2ab  a2 + b2.
+
+(7)
+
+Thus, x y  ( x 2 + y 2)/2.
+
+· Let r  (0, 1) then from the summation of geometric sequence and for any K   it holds
+
+that
+
+K
+rk  rk =
+
+1
+
+1-r
+
+k=0
+
+k=0
+
+(8)
+
+Matrix Representation. The presentation of stochastic gradient push (Algorithm 1) was done from node i's perspective for all i  [n]. Note however, that the update rule of SGP at the kth iteration can be viewed from a global viewpoint. To see this let us define the following matrices (concatenation of the values of all nodes at the kth iteration):
+X(k) = x(1k), x(2k), . . . , xn(k)  Rd×n (k) = 1(k), 2(k), . . . , n(k)  Rn
+
+Z(k) = z1(k), z2(k), . . . , zn(k)  Rd×n F (Z(k), (k)) = F1(z1(k); 1(k)), F2(z2(k); 2(k)), . . . , Fn(zn(k); n(k))  Rd×n
+f (Z(k)) = f1(z1(k)), f2(z2(k)), . . . , fn(zn(k))  Rd×n
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Using the above matrices, the 6th step of SGP (Algorithm 1) can be expressed as follows 2: X(k+1) = X(k) - F (Z(k), (k)) [P (k)]T
+
+(9)
+
+where [P (k)]T is the transpose of matrix P k with entries:
+
+p(i,kj) =
+
+1/dj (k), 0,
+
+if j  Niin(k). otherwise.
+
+Recall that we also have x(k)
+
+=
+
+X(k) 1n n
+
+=
+
+1 n
+
+n i=1
+
+x(ik)
+
+.
+
+(10)
+
+Bound for the mixing matrices. Next we state a known result from the control literature studying consensus-based optimization which allows us to bound the distance between the de-biased parameters at each node and the node-wise average.
+
+Recall that we have assumed that the sequence of mixing matrices P (k) are B-strongly connected.
+
+A directed graph is called strongly connected if every pair of vertices is connected with a directed
+
+path (i.e., following the direction of edges), and the B-strongly connected assumption is that the
+
+graph with edge set
+
+(l+1)B-1 k=lB
+
+E (k)
+
+is
+
+strongly
+
+connected,
+
+for
+
+every
+
+l
+
+
+
+0.
+
+We have also assumed that for all k  0, each column of P (k) has D non-zero entries, and the diam-
+
+eter of the graph with edge set
+
+(l+1)B-1 k=lB
+
+E (k)
+
+has
+
+diameter
+
+at
+
+most
+
+.
+
+Based
+
+on
+
+these
+
+assumptions,
+
+after B consecutive iterations, the product
+
+A(k) := P (k+B-1) . . . P (k+1)P (k)
+
+has no non-zero entries. Moreover, every entry of A(k) is at least D-B.
+
+Lemma 3. Suppose that Assumption 3 (mixing connectivity) holds. Let  = 1 - nD-B and let
+
+q = 1/(B+1). Then there exists a constant
+
+
+
+2 dDB
+
+C<
+
+,B+2
+
+ B+1
+
+where d is the dimension of x(k), zi(k), and xi(0), such that, for all i = 1, 2, . . . , n and k  0,
+
+2
+x(k) - zi(k) 
+2
+
+Cqk
+
+k
+xi(0) + C qk-s
+2 s=0
+
+Fi(zi(s); i(s)) 2
+
+2
+.
+
+This particular lemma follows after a small adaptation to Theorem 1 in Assran & Rabbat (2018) and its proof is based on Wolfowitz (1963). Similar bounds appear in a variety of other papers, including Nedic´ & Olshevsky (2016).
+
+C.1 IMPORTANT UPPER BOUNDS
+
+Lemma 4 (Bound of stochastic gradient). We have the following inequality under Assumptions 1
+
+and 2:
+
+E
+
+fi(zi(k))
+
+2
+ 3L2E
+
+zi(k) - x(k)
+
+2
++ 32 + 3E
+
+2
+f (x(k))
+
+Proof. E fi(zi(k)) 2
+
+
+L-smooth
+
+Bounded Variance
+
+
+3E
+
+fi(zi(k)) - fi(x(t))
+
+2
++ 3E
+
+fi(x(t)) - f (x(t))
+
+2
++ 3E
+
+f (x(t))
+
+2
+
+3L2E
+
+zi(k) - x(k)
+
+2
++ 3E
+
+2
+fi(x(t)) - f (x(t)) + 3E
+
+2
+f (x(k))
+
+3L2E
+
+zi(k) - x(k)
+
+2
++ 32 + 3E
+
+2
+f (x(k))
+
+(11)
+
+2Note that in a similar way we can obtain matrix expressions for steps 7 and 8 of Algorithm 1. 16
+
+Under review as a conference paper at ICLR 2019
+
+Lemma 5. Let Assumptions 1-3 hold. Then,
+
+Qi(k) = E x(k) - zi(k) 2 
+
+2
+
+4C (1 -
+
+2
+q)2
+
++
+
+qkC2 1-q
+
+2 +
+
+
+
+2
+
+12C 2 (1 - q)2
+
+qk 3C 2 + 1-q
+
++
+
+2
+
+12L2C 1-q
+
+2
+
++
+
+ qk 3L2 C 2
+
+k
+qk-j Qi(j)
+
+j=0
+
++
+
+2
+
+12C 2 1-q
+
++
+
+ qk 3C 2
+
+k2
+qk-j E f (x(j))
+
+j=0
+
++
+
+q2kC2 + qk 2C2 1-q
+
+2
+xi(0) .
+
+2 (12)
+
+Proof.
+
+Q(ik)
+
+=
+Lemma 3
+
+=
+
+2
+E x(k) - zi(k)
+
+k
+
+E Cqk xi(0) + C
+
+qk-s Fi(zi(s); i(s))
+
+s=0
+
+2
+
+k
+E Cqk xi(0) + C qk-s Fi(zi(s); i(s)) - fi(zi(s)) + fi(zi(s))
+s=0
+
+
+
+2
+
+2
+
+kk
+
+
+
+
+
+E
+
+C 
+
+qk
+
+xi(0)
+
++ C
+
+qk-s Fi(zi(s); i(s)) - fi(z(s)) + C
+
+qk-s
+
+fi(zi(s))
+
+  
+
+
+a
+
+s=0
+
+b
+
+s=0
+
+c
+
+
+
+(13)
+
+Thus, using the above expressions of a, b and c we have that Q(ik)  E(a2+b2+c2+2ab+2bc+2ac). Let us now obtain bounds for all of these quantities:
+
+2
+a2 = C2 xi(0) q2k
+
+b2 = 2C2 k q2(k-j) Fi(zi(j); i(j)) - fi(zi(j)) 2
+j=0
+
+k
++ 22C2
+
+k
+q2k-j-s Fi(zi(j); i(j)) - fi(zi(j))
+
+j=0 s=j+1
+
+b1
+
+Fi(zi(s); i(s)) - fi(zi(s))
+
+c2
+
+=
+
+2C2
+
+k
+
+q2(k-j)
+
+fi(zi(j))
+
+2
++ 22C2
+
+k
+
+k
+q2k-j-s fi(zi(j))
+
+j=0
+
+j=0 s=j+1
+
+c1
+
+fi(zi(s))
+
+k
+
+2ab = 2C2qk xi(0)
+
+qk-s Fi(zi(s); i(s)) - fi(zi(s))
+
+s=0
+
+k
+
+2ac = 2C2qk xi(0)
+
+qk-s fi(zi(s))
+
+s=0
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+kk
+
+2bc = 22C2
+
+q2k-j-s Fi(zi(j); i(j)) - fi(zi(j))
+
+j=0 s=0
+
+fi(zi(s)) .
+
+The expression b1 is bounded as follows:
+
+kk
+
+b1 = 2C2
+
+q2k-j-s2 Fi(zi(j); i(j)) - fi(zi(j)) Fi(zi(s); i(s)) - fi(zi(s))
+
+j=0 s=j+1
+
+(7) k
+ 2C2
+
+k q2k-s-j Fi(zi(j); i(j)) - fi(zi(j)) 2
+
+j=0 s=j+1
+
+k
++ 2C2
+
+k q2k-s-j Fi(zi(s); i(s)) - fi(zi(s)) 2
+
+j=0 s=j+1
+
+
+
+k
+2C2
+
+k q2k-s-j Fi(zi(j); i(j)) - fi(zi(j)) 2
+
+j=0 s=0
+
++
+
+k
+2C2
+
+k q2k-s-j Fi(zi(s); i(s)) - fi(zi(s)) 2
+
+j=0 s=0
+
+= 2C2 k qk-j Fi(zi(j); i(j)) - fi(zi(j)) 2 k qk-s
+
+j=0
+
+s=0
+
++ 2C2 k qk-s Fi(zi(s); i(s)) - fi(zi(s)) 2 k qk-j
+
+s=0
+
+j=0
+
+(8)
+
+
+1 2C2 1-q
+
+k
+
+qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j)) 2
+
+j=0
+
++
+
+1
+
+1 -
+
+q
+
+
+
+2
+
+C
+
+2
+
+k
+
+qk-s
+
+Fi(zi(s); i(s)) - fi(zi(s)) 2
+
+s=0
+
+=
+
+1
+
+2 -
+
+q
+
+
+
+2
+
+C
+
+2
+
+k
+
+qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
+.
+
+j=0
+
+(14)
+
+Thus,
+
+b2
+
+=
+
+2C2
+
+k
+
+q2(k-j)
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
++ b1
+
+j=0
+
+
+
+2C2 1-q
+
+k
+
+qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
++ b1
+
+j=0
+
+(14)
+
+
+3 2 C 2 1-q
+
+k
+qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j)) 2
+
+j=0
+
+(15)
+
+where
+
+in
+
+the
+
+first
+
+inequality
+
+above
+
+we
+
+use
+
+the
+
+fact
+
+that
+
+for
+
+q
+
+
+
+(0, 1),
+
+we
+
+have
+
+qk
+
+<
+
+1 1-q
+
+,
+
+k
+
+>
+
+0.
+
+By identical construction we have
+
+c2
+
+
+
+3 2 C 2 1-q
+
+k
+
+qk-j
+
+fi(zi(j))
+
+2
+.
+
+j=0
+
+Now let us bound the products 2ab, 2ac and 2bc.
+
+18
+
+Under review as a conference paper at ICLR 2019
+
+k
+2ab = C2qk qk-s2 xi(0)
+s=0
+
+Fi(zi(s); i(s)) - fi(zi(s))
+
+(7)
+
+
+k
+C2qk qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
++ C2qk
+
+k
+
+qk-j
+
+2
+xi(0)
+
+j=0
+
+j=0
+
+(8)
+
+
+k
+C2qk qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2 C2 +
+
+xi(0)
+
+1-q
+
+2
+qk
+
+j=0
+
+(16)
+
+By similar procedure,
+
+2ac  C2qk
+
+k s=0
+
+qk-s
+
+fi(zi(s))
+
++2 C2 xi(0)
+1-q
+
+2
+qk
+
+(17)
+
+Finally,
+
+kk
+
+2bc = 2C2
+
+q2k-j-s2 Fi(zi(j); i(j)) - fi(zi(j)) fi(zi(s))
+
+j=0 s=0
+
+(7) k
+ 2C2
+
+k
+
+q2k-j-s
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
++ 2C2
+
+k
+
+k
+
+q2k-j-s
+
+fi(zi(s))
+
+2
+,
+
+j=0 s=0
+
+j=0 s=0
+
+= 2C2 k qk-j Fi(zi(j); i(j)) - fi(zi(j)) 2 k qk-s + 2C2 k qk-s fi(zi(s)) 2 k qk-j ,
+
+j=0
+
+s=0
+
+s=0
+
+j=0
+
+(8)
+
+
+2C2 1-q
+
+k
+
+qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2 2C2 + 1-q
+
+k
+
+qk-s
+
+fi(zi(s)) 2
+
+j=0
+
+s=0
+
+(18)
+
+By combining all of the above bounds together we obtain:
+
+Qi(k)  E(a2 + b2 + c2 + 2ab + 2bc + 2ac)
+
+
+
+4 2 C 2 E 1-q
+
+k qk-j Fi(zi(j); i(j)) - fi(zi(j)) 2
+
+j=0
+
++
+
+4 2 C 2 E 1-q
+
+k qk-j fi(zi(j)) 2
+
+j=0
+
+2
++ C2 xi(0) q2k
+
++
+
+2C2 xi(0) 1-q
+
+2
+qk
+
++
+
+k
+EC2qk qk-j
+
+fi(zi(j)) 2
+
+j=0
+
++
+
+k
+EC2qk qk-j
+
+Fi(zi(j); i(j)) - fi(zi(j))
+
+2
+.
+
+j=0
+
+19
+
+(19)
+
+Under review as a conference paper at ICLR 2019
+
+After grouping terms together and using the upper bound of Lemma 4, we obtain
+
+Q(ik)
+
+
+
++
+Lemma 4
+
+
++
+
++
+
++
+
+
+
+2
+
+4C 2 (1 - q)2
+
+qkC2 +
+1-q
+
+2 +
+
+q2kC2 + qk 2C2 1-q
+
+2 4C2 + qkC2 1-q
+
+k qk-j E fi(zi(j)) 2
+
+j=0
+
+
+
+2
+
+4C 2 (1 - q)2
+
+qkC2 +1-q
+
+2 +
+
+q2k
+
+C
+
+2
+
++
+
+qk
+
+2C 2 1-q
+
+
+
+2
+
+12C 2 (1 - q)2
+
++
+
+ qk 3C 2 1-q
+
+2
+
+
+
+2
+
+12L2 1-
+
+C q
+
+2
+
++
+
+ qk 3L2 C 2
+
+k
+qk-j Qi(j)
+
+j=0
+
+2 12C2 + qk3C2 1-q
+
+k2
+qk-j E f (x(j))
+
+j=0
+
+2
+xi(0) .
+2
+xi(0)
+
+This completes the proof.
+
+(20)
+
+Having found a bound for the quantity Q(ik), let us know present a lemma for bounding the quantity
+
+K -1 k=0
+
+M
+
+(k)
+
+where
+
+K
+
+>
+
+1
+
+is
+
+a
+
+constant
+
+and
+
+M (k)
+
+is
+
+the
+
+average
+
+of
+
+Qi(k)across
+
+all
+
+nodes
+
+i
+
+
+
+[n].
+
+That
+
+is,
+
+M (k)
+
+=
+
+1 n
+
+n i=1
+
+Q(ik)
+
+.
+
+Lemma 6.
+
+Let Assumptions 1-3 hold and let us define D2 = 1 -
+
+ 2 12L2 C 2 (1 - q)2
+
+-
+
+ 3L2 C 2 (1 - q)2
+
+. Then,
+
+K-1
+M (k)
+k=0
+
+
+
+
+
+2
+
+(1
+
+4C 2 - q)2D2
+
+2K +
+
+C2  (1 - q)2D2
+
+2
+
++
+
+
+
+2
+
+(1
+
+12C 2 - q)2D2
+
+2K +
+
+ 3C 2 (1 - q)2D2
+
+2
+
+C2 2C2
+
++
+
+(1
+
+-
+
+q)2D2
+
++
+
+ (1
+
+-
+
+q)2D2
+
+n i=1
+
+xi(0) 2
+
+n
+
++
+
+2 (1
+
+12C 2 - q)2D2
+
++
+
+ (1
+
+3C 2 - q)2D2
+
+K -1
+
+2
+
+E f (x(k))
+
+k=0
+
+(21)
+
+Proof. Using the bound for Qi(k) let us first bound its average across all nodes M (k)
+
+M (k)
+
+=
+Lemma 5
+
+
+1 n
+
+n
+
+Q(ik)
+
+i=1
+
+
+
+2
+
+4C 2 (1 - q)2
+
++
+
+qkC2 1-q
+
+2 +
+
+2
+
+12C 2 (1 - q)2
+
++
+
+ qk 3C 2 1-q
+
++
+
+
+
+2
+
+12C 2 1-q
+
++
+
+ qk 3C 2
+
+k
+
+qk-j E
+
+2
+f (x(j))
+
+j=0
+
++
+
+2 12L2C2 + qk3L2C2
+
+k
+qk-j M (j)
+
+1-q
+
+j=0
+
++
+
+q2kC2 + qk 2C2
+
+n i=1
+
+xi(0)
+
+2
+.
+
+1-q
+
+n
+
+2
+
+(22)
+
+20
+
+Under review as a conference paper at ICLR 2019
+
+At this point note that for any   (0, 1), non-negative integer K  N, and non-negative sequence {(j)}kj=0, it holds that
+
+Kk
+k-j (j) = (0) K + K-1 + · · · + 0 + (1) K-1 + K-2 + · · · + 0 + · · · + (K) 0
+
+k=0 j=0
+
+
+
+1
+
+K
+(j).
+
+1-
+
+j=0
+
+(23)
+
+Similarly,
+
+Kk
+
+K
+
+k k-j (j) =
+
+kK
+2k-j (j) 
+
+k
+2(k-j)(j)
+
+(23)
+
+
+1 1 - 2
+
+K
+
+(j) (24)
+
+k=0 j=0
+
+k=0 j=0
+
+k=0 j=0
+
+j=0
+
+Now by summing from k = 0 to K - 1 and using the bounds of (23) and (24) we obtain:
+
+K -1
+M (k) 
+
+
+
+2
+
+4C 2 (1 - q)2
+
+2K +
+
+C2  (1 - q)2
+
+2
+
+k=0
+
++
+
+
+
+2
+
+12C 2 (1 - q)2
+
+2K +
+
+ 3C 2 1-q
+
+2
+
+C2 2C2
+
++
+
+1
+
+-
+
+q2
+
++
+
+ (1
+
+-
+
+q)2
+
+n i=1
+
+xi(0) 2
+
+n
+
++
+
+
+
+2
+
+12C 2 (1 - q)2
+
++
+
+3C 2  1 - q2
+
+K -1
+
+2
+
+E f (x(k))
+
+k=0
+
++
+
+
+
+2
+
+12L2 C 2 (1 - q)2
+
++
+
+3L2 C 2  1 - q2
+
+K -1
+M (k).
+
+k=0
+
+By rearranging:
+
+1
+
+-
+
+
+
+2
+
+12L2 C 2 (1 - q)2
+
+-
+
+
+
+3L2 C 2 1 - q2
+
+K -1
+M (k) 
+
+
+
+2
+
+4C 2 (1 - q)2
+
+2K +
+
+C2  (1 - q)2
+
+2
+
+k=0
+
++
+
+
+
+2
+
+12C 2 (1 - q)2
+
+2K +
+
+ 3C 2 (1 - q)2
+
+2
+
+C2 2C2
+
++
+
+1
+
+- q2
+
++ (1
+
+- q)2
+
+n i=1
+
+xi(0) 2
+
+n
+
++
+
+
+
+2
+
+12C 2 (1 - q)2
+
++
+
+3C 2  1 - q2
+
+K -1
+
+2
+
+E f (x(k))
+
+k=0
+
+Note that since q
+
+
+
+(0, 1) it holds that
+
+1 1-q2
+
+
+
+1 (1-q)2
+
+.3
+
+Thus,
+
+3This step is used to simplified the expressions involve the parameter q. One can still obtain similar results
+
+by keeping the expression
+
+1 1-q2
+
+in the definition of D2
+
+21
+
+Under review as a conference paper at ICLR 2019
+
+1
+
+-
+
+
+
+2
+
+12L2 C 2 (1 - q)2
+
+-
+
+3L2 C 2  (1 - q)2
+
+K -1
+M (k) 
+
+2
+
+4C (1 -
+
+2
+q)2
+
+2K +
+
+C2  (1 - q)2
+
+2
+
+k=0
+
++
+
+2
+
+12C 2 (1 - q)2
+
+2K +
+
+ 3C 2 (1 - q)2
+
+2
+
+C2 2C2
+
++
+
+(1
+
+-
+
+q)2
+
++
+
+ (1
+
+-
+
+q)2
+
+n i=1
+
+xi(0) 2
+
+n
+
++
+
+2
+
+12C 2 (1 - q)2
+
++
+
+3C 2  (1 - q)2
+
+K -1
+
+2
+
+E f (x(k))
+
+k=0
+
+Dividing
+
+both
+
+sides
+
+with
+
+D2
+
+=
+
+1
+
+-
+
+ 2 12L2 C 2 (1 - q)2
+
+-
+
+ 3L2 C 2 (1 - q)2
+
+completes
+
+the
+
+proof.
+
+C.2 TOWARDS THE PROOF OF THE MAIN THEOREMS
+
+The goal of this section is the presentation of Lemma 8. It is the main lemma of our convergence analysis and based on which we build the proofs of Theorems 1 and 2.
+Let us first state a preliminary lemma that simplifies some of the expressions that involve expectations with respect to the random variable i(t). Lemma 7. Under the definition of our problem and the Assumptions 1-3 we have that:
+
+(i) Ei(k)
+
+n i=1
+
+Fi
+
+(zi(k);
+
+i(k)
+
+)
+
+n
+
+2
+= Ei(k)
+
+n i=1
+
+Fi(zi(k);
+
+i(k))
+
+-
+
+fi(zi(k))
+
+n
+
+2
++Ei(k)
+
+n i=1
+
+fi(zi(k)
+
+)
+
+2
+
+n
+
+(ii)
+
+Ei(k)
+
+n i=1
+
+Fi(zi(k); i(k)) - fi(zi(k))
+
+n
+
+2
+2 
+n
+
+Proof. Ei(k)
+
+n i=1
+
+Fi
+
+(zi(k);
+
+i(k)
+
+)
+
+2
+
+=
+
+n
+
+Ei(k)
+
+n i=1
+
+Fi(zi(k); i(k))
+
+-
+
+fi(zi(k))
+
++
+
+n
+
+n i=1
+
+fi
+
+(zi(k))
+
+2
+
+n
+
+= Ei(k)
+
+n i=1
+
+Fi(zi(k);
+
+i(k))
+
+-
+
+fi(zi(k))
+
+2
+
+n
+
++Ei(k)
+
+n i=1
+
+fi(zi(k))
+
+2
+
+n
+
++2
+
+n i=1
+
+Ei(k) Fi(zi(k); i(k))
+
+-
+
+fi(zi(k))
+
+,
+
+n i=1
+
+fi(zi(k)
+
+)
+
+nn
+
+= Ei(k)
+
+n i=1
+
+Fi(zi(k);
+
+i(k))
+
+-
+
+fi(zi(k))
+
+2
+
+n
+
++Ei(k)
+
+n i=1
+
+fi(zi(k))
+
+2
+.
+
+n
+
+(25)
+
+22
+
+Under review as a conference paper at ICLR 2019
+
+where in the last equality the inner product becomes zero from the fact that Ei(k) Fi(zi(k); i(k)) = fi(zi(k)).
+
+Ei(k)
+
+n i=1
+
+Fi
+
+(zi(k);
+
+i(k)
+
+)
+
+-
+
+n
+
+n i=1
+
+fi
+
+(zi(k))
+
+2
+
+1 = n2 Ei(k)
+
+n
+Fi(zi(k); i(k)) - fi(zi(k))
+i=1
+
+2
+
+1 = n2
+
+n
+Ei(k)
+
+Fi(zi(k); i(k)) - fi(zi(k)) 2
+
+i=1
+
+2 + n2
+
+Ei(k) Fi(zi(k); i(k)) - fi(zi(k)), Ej(k) Fj (zj(k); j(k)) - fj (zj(k))
+
+i=j
+
+1 = n2
+
+n
+Ei(k)
+
+Fi(zi(k); i(k)) - fi(zi(k)) 2
+
+i=1
+
+Bounded Variance
+
+
+1
+
+n2
+
+n
+
+2
+
+=
+
+2 ,
+
+n
+
+i=1
+
+(26)
+
+Before present the proof of next lemma let us define the conditional expectation E[·|Fk] = Ei(k)Di [·] = Ei(k) [·]. The expectation in this expression is with respect to the random choice i(k) for node i  [n] at the kth iteration. In other words, Fk denotes all the information generated by the stochastic gradient-push algorithm by time t, i.e., all the x(ik), zi(k), wi(k), yi(k), Fi(zi(k); i(k)) for k = 1, . . . , t. In addition, we should highlight that the choices of random variables ik  Di, jk  Dj at the step t of the algorithm, are independent for any two nodes i = j  [n]. This is also true in the case that the two nodes follow the same distribution D = Di = Dj.
+Lemma 8. Let Assumptions 1-3 hold and let
+
+D1
+
+=
+
+1 2
+
+-
+
+L2 2
+
+122C2 + 3C2 (1 - q)2D2
+
+and
+
+D2
+
+=
+
+1
+
+-
+
+ 2 12L2 C 2 (1 - q)2
+
+-
+
+ 3L2 C 2 (1 - q)2 .
+
+Here C > 0 and q  (0, 1) are the two non-negative constants defined in Lemma 3. Let {Xk}k=0 be the random sequence produced by (9) (Matrix representation of Algorithm 1). Then,
+
+1 K
+
+K -1
+D1 E
+
+f (x(k))
+
+2 1 - L K-1
+
++ 2
+
+E
+
+F (Z(k))1n n
+
+2
+
+k=0
+
+k=0
+
+ f (x(0)) - K
+
+f
+
++
+
+L2 2n
+
++
+
+4L22C22 + 12L22C22 2(1 - q)2D2
+
++
+
+L2C22 + 3L2C22 2K(1 - q)2D2
+
+L2C + 2L2C2 + 2(1 - q)2D2K
+
+n i=1
+
+xi(0)
+
+2
+.
+
+n
+
+23
+
+Under review as a conference paper at ICLR 2019
+
+Proof.
+
+f x(k+1) = f X(k+1)1n n
+
+(=9)
+(10)
+=
+L-smooth
+
+
+f X(k)[P(k)] 1n - F (Z(k), (k))[P(k)] 1n n
+
+f X(k)1n - F (Z(k), k)1n nn
+
+f X(k)1n -  f X(k)1n , F (Z(k), (k))1n n nn
+
+L2 +
+
+F (Z(k), (k))1n 2
+
+2n
+
+(27)
+
+Taking expectations of both sides with respect to Fk:
+
+Ef
+
+X(k+1)1n n
+
+|Fk
+
+ f X(k)1n -  f X(k)1n , F (Z(k))1n n nn
+
+L2 +2E
+
+F (Z(k), (k))1n n
+
+2
+|Fk
+
+Lemm=a 7[i]
+
+f X(k)1n n
+ L2 + 2 E
+
+-  f X(k)1n , F (Z(k))1n nn
+
+n i=1
+
+Fi(zi(k);
+
+i(k))
+
+-
+
+n
+
+n i=1
+
+fi
+
+(zi(k))
+
+2 |Fk 
+
+L2 + 2 E[
+
+n i=1
+
+fi(zi(k))
+
+n
+
+2
+|Fk ]
+
+Lemma 7[ii]
+
+
+f X(k)1n -  f X(k)1n , F (Z(k))1n n nn
+
+
+
+L2 L2
+
++ 2n
+
++
+
+2 E
+
+n i=1
+
+fi(zi(k)
+
+)
+
+n
+
+2 |Fk 
+
+=
+
+f X(k)1n -  f X(k)1n
+
+2- 
+
+F (Z(k))1n
+
+2
+,
+
+n 2 n 2n
+
+ +
+
+f
+
+X(k)1n
+
+- F (Z(k))1n
+
+2 L22 +
+
+2 n n 2n
+
+ L2 + 2 E
+
+n i=1
+
+fi
+
+(zi(k)
+
+)
+
+n
+
+2 |Fk 
+
+(28)
+
+where in the last step above we simply expand the inner product. Taking expectations again and using the tower property, we get
+24
+
+Under review as a conference paper at ICLR 2019
+
+Ef
+
+X(k+1)1n n
+
+
+
+Ef
+
+X(k)1n n
+
+-
+
+ 2E
+
+f X(k)1n n
+
+2
+
+-
+
+ 2E
+
+F (Z(k))1n 2 , n
+
+ + 2E
+
+f
+
+X(k)1n
+
+- F (Z(k))1n
+
+2
+
+L22 +
+
+nn
+
+2n
+
+L2 + 2 E[
+
+n i=1
+
+fi(zi(k)
+
+)
+
+2
+]
+
+n
+
+=
+
+Ef
+
+X(k)1n n
+
+-
+
+ 2E
+
+f X(k)1n n
+
+2
+
+-
+
+
+
+- L2 2
+
+E[
+
+F (Z(k))1n n
+
+2
+],
+
+ + 2E
+
+f
+
+X(k)1n
+
+- F (Z(k))1n
+
+2
+
+L22 +
+
+nn
+
+2n
+
+(29)
+
+Let us now focus on find an upper bound for the quantity E
+
+f
+
+X(k) 1n n
+
+- F (Z(k))1n
+n
+
+2
+.
+
+E
+
+f
+
+X(k)1n - F (Z(k))1n 2 nn
+
+=
+
+ E  f
+
+n i=1
+
+x(ik)
+
+n
+
+-
+
+n i=1
+
+fi
+
+(zi(k)
+
+)
+
+2
+
+
+
+n
+
+=
+
+
+
+E
+
+1 n
+
+n
+
+fi
+
+n i=1
+
+x(ik)
+
+n
+
+-
+
+n i=1
+
+fi(zi(k))
+
+2
+
+n
+
+i
+
+
+
+
+
+n i
+
+fi
+
+n i=1
+
+x(ik)
+
+n
+
+-
+
+2
+
+n i=1
+
+fi(zi(k)
+
+)
+
+
+
+=
+
+E
+
+ 
+
+
+
+n
+
+  
+
+=
+J ensen
+
+L-smooth
+ =
+
+ 1n
+E n
+i
+
+fi
+
+n i=1
+
+x(ik)
+
+n
+
+- fi(zi(k))
+
+2 
+
+ L2 n n E  fi
+i
+
+n i=1
+
+x(ik)
+
+n
+
+2 - fi(zi(k)) 
+
+ L2 n n E
+i=1
+
+n i=1
+
+x(ik)
+
+n
+
+-
+
+zi(k)
+
+2 
+
+L2 n
+
+n
+Q(ik)
+
+i=1
+
+(30)
+
+Thus we have that:
+
+Ef
+
+X(k+1)1n n
+
+
+
+Ef
+
+X(k)1n n
+
+-
+
+ 2E
+
++
+
+L2 2n
+
+n
+
+Q(ik)
+
++
+
+L22 2n
+
+i=1
+
+f X(k)1n n
+
+2  - L2 - 2E
+
+F (Z(k))1n 2 , n (31)
+
+25
+
+Under review as a conference paper at ICLR 2019
+
+By rearranging:
+
+ 2 E[
+
+f
+
+X(k)1n n
+
+2  - L2 ] + 2 E[
+
+F (Z(k))1n n
+
+2
+]
+
+
+
+E[f
+
+X(k)1n n
+
+] - E[f
+
+X(k+1)1n ] n
+
++
+
+L22 L2 +
+2n 2n
+
+n
+Q(ik)
+
+i=1
+
+(32)
+
+Let us now sum from k = 0 to k = K - 1:
+
+ K-1 2 E[
+
+f
+
+k=0
+
+X(k)1n n
+
+2  - L2 K-1
+
+]+ 2
+
+E[
+
+F (Z(k))1n n
+
+2
+]
+
+
+
+K-1
+E[f
+
+X(k)1n n
+
+] - E[f
+
+X(k+1)1n ] n
+
+k=0
+
+k=0
+
++
+
+K-1 L22 L2 K-1 +
+2n 2n
+
+n
+
+E[Q(ik)]
+
+k=0
+
+k=0 i=1
+
+
+
+E[f
+
+X(0)1n n
+
+] - E[f
+
+X(k)1n ] n
+
++
+
+LK22 L2 K-1 1 +
+2n 2 n
+
+n
+
+Qi(k)
+
+k=0 i=1
+
+ f (x(0)) - f 
+
++
+
+LK22 L2 K-1 1 +
+2n 2 n
+
+n
+
+Qi(k)
+
+k=0 i=1
+
+(33)
+
+For the last inequality above, recall that with f  we define the optimal solution of our problem.
+
+Mk
+
+Using the bound for the expression
+
+K -1 k=0
+
+Mk
+
+from
+
+Lemma
+
+6
+
+we
+
+obtain:
+
+ K-1 2 E[
+
+f
+
+k=0
+
+X(k)1n n
+
+2  - L2 K-1
+
+]+ 2
+
+E[
+
+F (Z(k))1n n
+
+2
+]
+
+k=0
+
+f (x(0)) - f  + LK22 2n
+
+L2 42C22K + C22 L2 122C22K + 3C22
+
++ 2
+
+(1 - q)2D2
+
++ 2
+
+(1 - q)2D2
+
+L2 +
+2
+
+122C2 + 3C2 (1 - q)2D2
+
+K2
+E f (x(k))
+k=0
+
+L2 C2 + 2C2
+
++ 2
+
+(1 - q)2D2
+
+n i=1
+
+xi(0)
+
+2
+.
+
+n
+
+By rearranging and dividing all terms by K we obtain:
+
+1 K
+
+1 L2 122C2 + 3C2
+
+- 22
+
+(1 - q)2D2
+
+K -1
+E
+
+f (x(k))
+
+2 1 - L K-1
+
++ 2
+
+E
+
+F (Z(k))1n n
+
+2
+
+k=0
+
+k=0
+
+ f (x(0)) - K
+
+f
+
++
+
+L2 2n
+
++
+
+4L22C22 + 12L22C22 2(1 - q)2D2
+
++
+
+L2C22 + 3L2C22 2K(1 - q)2D2
+
+L2C2 + 2L2C2 + 2(1 - q)2D2K
+
+n i=1
+
+xi(0)
+
+2
+.
+
+n
+
+By defining D1 =
+
+1 2
+
+-
+
+L2 2
+
+12 2 C 2 +3 C 2 (1-q )2 D2
+
+the proof is complete.
+
+26
+
+Under review as a conference paper at ICLR 2019
+
+C.3 PROOFS OF MAIN THEOREMS
+Having present all of the above Lemmas we are now ready to provide the proofs of main Theorems 1 and 2.
+
+C.3.1 PROOF OF THEOREM 1
+
+Let
+
+
+
+
+
+(1 - q)2 60L2C2 .
+
+Then
+
+since
+
+q
+
+
+
+(0, 1),
+
+it
+
+holds
+
+that
+
+
+
+<
+
+1
+
+and
+
+as
+
+a
+
+result:
+
+212L2C2 3L2C2 (2<)
+
+ 15L2 C 2
+
+11
+
+D2 = 1 - (1 - q)2 - (1 - q)2
+
+
+
+1-
+
+(1 - q)2
+
+1-  42
+
+and
+
+1 L2 122C2 + 3C2 (2<) 1 15C2L2 1 1 1
+
+D1 = 2 - 2
+
+(1 - q)2D2
+
+ 2 - 2(1 - q)2D2  2 - 8D2  4
+
+By substituting the above bounds into the result of Lemma 8 and by removing the second term of left hand side we obtain:
+
+1 4
+
+K -1
+k=0 E
+
+2
+f (x(k))
+
+K
+
+=
+
+1 K
+
+1 K-1 4E
+
+f (x(k))
+
+2
++
+
+1 - L 2
+
+K -1
+E
+
+F (Zk)1n n
+
+2
+
+k=0
+
+k=0
+
+
+
+f (x(0)) - f  L2 4L22C22 + 12L22C22 L2C22 + 3L2C22
+
+++ K 2n
+
+(1 - q)2
+
++ K(1 - q)2
+
+L2C + 2L2C2 + (1 - q)2K
+
+n i=1
+
+xi(0) 2
+
+n
+
+(34)
+
+Let us now substitute in the above expression  =
+
+n K
+
+.
+
+This
+
+can
+
+be
+
+done
+
+due
+
+to
+
+the
+
+lower
+
+bound
+
+(see equation 6) on the total number of iterations K where guarantees that
+
+n K
+
+
+
+(1 - q)4 60L2C2 .
+
+1
+
+K -1
+k=0 E
+
+2
+f (x(k))
+
+4K
+
+
+
+f (x(0)) - K
+
+f
+
++
+
+L2 2n
+
++ 2 4L2C22 (1
+
++ 12L2C22 - q)2
+
+L2C22 + 3L2C22 +  K(1 - q)2
+
++
+
+
+
+=
+=
+
+n K
+
+L2C (1 - q)2K
+
+n i=1
+
+xi(0) n
+
+2 2L2C2 +  (1 - q)2K
+
+n i=1
+
+xi(0)
+
+2
+
+n
+
+f (x(0)) - nK
+
+f
+
++
+
+L2 2 nK
+
++
+
+n K
+
+4L2C22 + 12L2C22 (1 - q)2
+
++
+
+n L2C22 + 3L2C22 K K(1 - q)2
+
++
+
+L2 C 2 (1 - q)2K
+
+n i=1
+
+xi(0)
+
+2
++
+
+n
+
+n 2L2C2 K (1 - q)2K
+
+n i=1
+
+xi(0) 2
+
+n
+
+=
+
+f (x(0)) - f   nK
+
++
+
+L 2
+
+2
+
++
+
+L2 C 2 K(1 - q)2
+
+(42 + 122)n +
+
+n i=1
+
+xi(0)
+
+2
+
+n
+
++
+
+ nL2C2
+
+2 + 3L2C22 + 2
+
+n i=1
+
+xi(0) 2
+
+K(1 - q)2K
+
+n
+
+(35)
+
+Using again the assumption on the lower bound (6) of the total number of iterations K, the last two terms of the above expression are bounded by the first term. Thus,
+
+1
+
+K -1
+k=0 E
+
+f (x(k))
+
+2
+
+
+
+f (x(0)) - 3
+
+f
+
++
+
+L 2
+
+2
+
+4K
+
+nK
+
+(36)
+
+27
+
+Under review as a conference paper at ICLR 2019
+
+C.3.2 PROOF OF THEOREM 2 Proof. From Lemma 6 we have that:
+
+1
+
+K-1
+M (k)
+
+K
+
+k=0
+
+
+
+
+
+2
+
+(1
+
+4C 2 - q)2D2
+
+2 +
+
+C2  (1 - q)2D2
+
+2 K
+
++
+
+
+
+2
+
+(1
+
+12C 2 - q)2D2
+
+2 +
+
+ 3C 2 (1 - q)2D2
+
+2 K
+
+C2 2C2 + (1 - q)2D2K +  (1 - q)2D2K
+
+n i=1
+
+xi(0) 2
+
+n
+
++
+
+2 (1
+
+12C 2 - q)2D2
+
++
+
+ (1
+
+3C 2 - q)2D2
+
+K -1
+k=0 E
+
+2
+f (x(k))
+
+K
+
+(37)
+
+Using the assumptions of Theorem 1 and stepsize  =
+
+n K
+
+:
+
+1
+
+K -1
+M (k)
+
+K
+
+k=0
+
+
+
+n 4C2 K (1 - q)2D2
+
+2 +
+
+n C2
+
+2
+
+K (1 - q)2D2 K
+
+n 12C2 + K (1 - q)2D2
+
+2 +
+
+n K
+
+3C
+
+2
+
+(1 - q)2D2
+
+2 K
+
+C2 n 2C2 + (1 - q)2D2K + K (1 - q)2D2K
+
+n i=1
+
+xi(0) 2
+
+n
+
+n 12C2 + K (1 - q)2D2 +
+
+n 3C2 K (1 - q)2D2
+
+12
+
+f (x(0)) - 
+
+f
+
++
+
+L 2
+
+2
+
+nK
+
+=
+
+
+
+1 K
+
+4nC 2  2  (1 - q)2D2
+
++
+
+12nC 2  2 (1 - q)2D2
+
++
+
+C2
+
+n i=1
+
+xi(0)
+
+n(1 - q)2D2
+
+2
+
++
+
+ 3 nC
+
+212
+
+f (x(0)) - f 
+
+ n(1 - q)2D2
+
++
+
+L 2
+
+2
+
+ 
+
++
+
+
+
+1 KK
+
+n 2 C 2  (1 - q)2D2
+
++
+
+n 3
+
+C
+
+2
+
+2
+
+(1 - q)2D2
+
++
+
+2C 2 (1
+
+n i=1
+
+xi(0)
+
+- q)2D2 n
+
+2
+
+ 144 nC
+
+2
+
+f (x(0))
+
+-
+
+f
+
++
+
+L 2
+
+2
+
++ (1 - q)2D2
+
+ 
+
+=O
+
+1 +
+
+1
+
+K KK
+
+(38)
+
+where the Big O notation swallows all constants of our setting
+
+n, L, , , C, q,
+
+n i=1
+
+xi(0)
+
+2 andf (x(0)) - f 
+
+.
+
+28
+
+Under review as a conference paper at ICLR 2019
+
+Now using the above upper bound equation 38 and result of Theorem 1 we obtain:
+
+1 K-1 1 Kn
+
+n
+
+E
+
+f (zik) 2
+
+k=0 i=1
+
+=
+
+=
+= L-s=mooth
+(38)+(36)
+
+
+1 K-1 1 Kn
+
+n
+
+E
+
+f (zik) + f (x(k)) - f (x(k))
+
+2
+
+k=0 i=1
+
+1 K-1 1 Kn
+
+n
+
+2E
+
+f (zik) - f (x(k))
+
+2
++ 2E
+
+f (x(k))
+
+2
+
+k=0 i=1
+
+1 K-1 1 Kn
+
+n
+
+2E
+
+f (zik) - f (x(k))
+
+2 1 K-1 1 + Kn
+
+n
+
+2E
+
+2
+f (x(k))
+
+k=0 i=1
+
+k=0 i=1
+
+1 K-1 1 2
+Kn
+
+n
+
+E
+
+f (zik) - f (x(k))
+
+21 +2 K
+
+K -1
+E
+
+2
+f (x(k))
+
+k=0 i=1
+
+k=0
+
+2L2 1 K-1 1 Kn
+
+n
+
+E
+
+zik - x(k)
+
+2 1 K-1
+
++2 K
+
+E
+
+2
+f (x(k))
+
+k=0 i=1
+
+k=0
+
+O 1
+
+1 ++
+
+1
+
+nK K K3/2
+
+(39)
+
+where again the Big O notation swallows all constants of our setting
+
+n, L, , , C, q,
+
+n i=1
+
+xi(0)
+
+2 andf (x(0)) - f 
+
+.
+
+29
+
+

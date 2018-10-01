@@ -1,0 +1,1890 @@
+Under review as a conference paper at ICLR 2019
+AN EFFICIENT AND MARGIN-APPROACHING ZERO-CONFIDENCE ADVERSARIAL ATTACK
+Anonymous authors Paper under double-blind review
+ABSTRACT
+There are two major paradigms of white-box adversarial attacks that attempt to impose input perturbations. The first paradigm, called the fix-perturbation attack, crafts adversarial samples within a given perturbation level. The second paradigm, called the zero-confidence attack, finds the smallest perturbation needed to cause misclassification, also known as the margin of an input feature. While the former paradigm is well-resolved, the latter is not. Existing zero-confidence attacks either introduce significant approximation errors, or are too time-consuming. We therefore propose MARGINATTACK, a zero-confidence attack framework that is able to compute the margin with improved accuracy and efficiency. Our experiments show that MARGINATTACK is able to compute a smaller margin than the state-ofthe-art zero-confidence attacks, and matches the state-of-the-art fix-perturbation attacks. In addition, it runs significantly faster than the Carlini-Wagner attack, currently the most accurate zero-confidence attack algorithm.
+1 INTRODUCTION
+Adversarial attack refers to the task of finding small and imperceptible input transformations that cause a neural network classifier to misclassify. White-box attacks are a subset of attacks that have access to gradient information of the target network. In this paper, we will focus on the white-box attacks. An important class of input transformations is adding small perturbations to the input. There are two major paradigms of adversarial attacks that attempt to impose input perturbations. The first paradigm, called the fix-perturbation attack, tries to find perturbations that are most likely to cause misclassification, with the constraint that the norm of the perturbations cannot exceed a given level. Since the perturbation level is fixed, fix-perturbation attacks may fail to find any adversarial samples for inputs that are far away from the decision boundary. The second paradigm, called the zero-confidence attack, tries to find the smallest perturbations that are guaranteed to cause misclassification, regardless of how large the perturbations are. Since they aim to minimize the perturbation norm, zero-confidence attacks usually find adversarial samples that ride right on the decision boundaries, and hence the name "zero-confidence". The resulting perturbation norm is also known as the margin of an input feature to the decision boundary. Both of these paradigms are essentially constrained optimization problems. The former has a simple convex constraint (perturbation norm), but a non-convex target (classification loss or logit differences). In contrast, the latter has a non-convex constraint (classification loss or logit differences), but a simple convex target (perturbation norm).
+Despite their similarity as optimization problems, the two paradigms differ significantly in terms of difficulty. The fix-perturbation attack problem is easier. The state-of-the-art algorithms, including projected gradient descent (PGD) (Madry et al., 2017) and distributional adversarial attack (Zheng et al., 2018), can achieve both high efficiency and high success rate, and often come with theoretical convergence guarantee. On the other hand, the zero-confidence attack problem is much more challenging. Existing methods are either not strong enough or too slow. For example, DeepFool (Moosavi Dezfooli et al., 2016) and fast gradient sign method (FGSM) (Goodfellow et al., 2014; Kurakin et al., 2016a;b) linearizes the constraint, and solves the simplified optimization problem with a simple convex target and a linear constraint. However, due to the linearization approximation errors, the solution can be far from optimal. As another extreme, L-BFGS (Szegedy et al., 2013) and Carlini-Wagner (CW) (Carlini & Wagner, 2017) convert the optimization problem into a Lagrangian, and the Lagrangian multiplier is determined through grid search or binary search. These attacks are generally much stronger and theoretically grounded, but can be very slow.
+1
+
+Under review as a conference paper at ICLR 2019
+
+The necessity of developing a better zero-confidence attack is evident. The zero-confidence attack paradigm is a more realistic attack setting. More importantly, it aims to measure the margin of each individual token, which lends more insight into the data distribution and adversarial robustness. Motivated by this, we propose MARGINATTACK, a zero-confidence attack framework that is able to compute the margin with improved accuracy and efficiency. Specifically, MARGINATTACK iterates between two moves. The first move, called restoration move, linearizes the constraint and solves the simplified optimization problem, just like DeepFool and FGSM; the second move, called projection move, explores even smaller perturbations without changing the constraint values significantly. By construction, MARGINATTACK inherits the efficiency in DeepFool and FGSM, and improves over them in terms of accuracy with a convergence guarantee. Our experiments show that MARGINATTACK attack is able to compute a smaller margin than the state-of-the-art zero-confidence attacks, and matches the state-of-the-art fix-perturbation attacks. In addition, it runs significantly faster than CW, and in some cases comparable to DeepFool and FGSM.
+
+2 RELATED WORKS
+In addition to the aforementioned state-of-the-art attacks, there are a couple of other works that attempt to explore the margin. Jacobian-based saliency map attack (Papernot et al., 2016) is among the earliest works that apply gradient information to guide the crafting of adversarial examples. It chooses to perturb the input features whose gradient is consistent with the adversarial goal. Onepixel attack (Su et al., 2017) finds adversarial examples by perturbing only one pixel, which can be regarded as finding the 0 margin of the inputs. Ilyas et al. (2018) converts PGD into a zeroconfidence attack by searching different perturbation levels, but this again can be time-consuming because it needs to solve multiple optimization subproblems. Weng et al. proposed a metric called CLEVER (Weng et al., 2018), which estimates an upper-bound of the margins. Unfortunately, recent work (Goodfellow, 2018) has shown that CLEVER can overestimate the margins due to gradient masking (Papernot et al., 2017). The above are a just a small subset of white-box attack algorithms that are relevant to our work. For an overview of the field, we refer readers to Akhtar & Mian (2018).
+The MARGINATTACK framework is inspired by the Rosen's algorithm (Rosen, 1961) for constraint optimization problems. However, there are several important distinctions. First, the Rosen's algorithm rests on some unrealistic assumptions for neural networks, e.g. continuously differentiable constraints, while MARGINATTACK has a convergence guarantee with a more realistic set of assumptions. Second, the Rosen's algorithm requires a step size search for each iteration, which can be time-consuming, whereas MARGINATTACK will work with a simple diminishing step size scheme. Most importantly, as will be shown later, MARGINATTACK refers to a large class of attack algorithms depending on how the two parameters, a(k) and b(k), are set, and the Rosen's algorithm only fits into one of the settings, which only works well under the 2 norm. For other norms, there exist other parameter settings that are much more effective. As another highlight, the convergence guarantee of MARGINATTACK holds for all the settings that satisfy some moderate assumptions.
+
+3 THE MARGINATTACK ALGORITHM
+
+In this section, we will formally introduce the algorithm and discuss its convergence properties. In the paper, we will denote scalars with non-bolded letters, e.g. a or A; column vectors with lowercased, bolded letters, e.g. a; matrix with upper-cased, bolded letters, e.g. A; sets with upper-cased double-stoke letters, e.g. A; gradient of a function f (x) evaluated at x = x0 as f (x0).
+
+3.1 PROBLEM FORMULATION
+
+Given a classifier whose output logits are denoted as l0(x), l1(x), · · · , lC-1(x), where C is the total
+
+number of classes, for any data token (x0, t), where x0 is an n-dimensional input feature vector,
+
+and t  {0, · · · , C - 1} is its label, MARGINATTACK computes
+
+x = arg min d(x - x0), s.t. c(x)  0,
+
+(1)
+
+x
+
+where d(·) is a norm. In this paper we only consider 2 and  norms, but the proposed method is generalizable to other norms. For non-targeted adversarial attacks, the constraint is defined as
+
+c(x) = lt(x) - max li(x) - , i=t
+
+(2)
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+where  is the offset parameter. As a common practice,  is often set to a small negative number to ensure that the adversarial sample lies on the incorrect side of the decision boundary. In this paper, we will only consider non-targeted attack, but all the discussions are applicable to targeted attacks (i.e. c(x) = maxi=a li(x) - la(x) -  for a target class a).
+
+3.2 THE MARGINATTACK PROCEDURE
+
+MARGINATTACK alternately performs the restoration move and the projection move. Specifically, denote the solution after the k-th iteration as x(k). Then the two steps are:
+
+Restoration Move: The restoration move tries to hop to the constraint boundary, i.e. c(x) = 0 with
+
+the shortest hop. Formally, it solves:
+
+z(k) = arg min d(x - x(k)), s.t. T c(x(k))(x - x(k)) = -(k)c(x(k)).
+x
+
+(3)
+
+where (k) is the step size within [0, 1]. Notice that the left hand side of the constraint in Eq. (3) is the first-order Taylor approximation of c(z(k)) - c(x(k)), so this constraint tries to move point closer to c(x) = 0 by (k). It can be shown, from the dual-norm theory,1 that the solution to (3) is
+
+z(k)
+
+=
+
+x(k)
+
+-
+
+(k)c(x(k))s(x(k)) T c(x(k))s(x(k))
+
+(4)
+
+s(x) is defined such that T c(x)s(x) = d(T c(x)), where d(·) is the dual norm of d(·). Specif-
+
+ically, noticing that the dual norm of the p norm is the (1-p-1)-1 norm, we have
+
+s(x) =
+
+c(x)/ c(x) 2 sign(c(x))
+
+if d(·) is the 2 norm if d(·) is the  norm
+
+.
+
+(5)
+
+As mentioned, Eq. (4) is similar to DeepFool under 2 norm, and to FGSM under  norm. Therefore, we can expect that the restoration move should effectively hop towards the decision boundary,
+
+but the hop direction may not be optimal. That is why we need the next move.
+
+Projection Move: The projection move tries to move closer to x0 while ensuring that c(x) will not change drastically. Formally,
+
+x(k+1) = z(k) - (k)a(k)d(z(k) - x0) - (k)b(k)s(z(k))
+
+(6)
+
+where (k) is the step size within [0, 1]; a(k) and b(k) are two scalars, which will be specified
+
+later. As an intuitive explanation on Eq. (3), notice that the second term, which we will call the
+
+distance reduction term, reduces the distance to x0, whereas the third term, which we will call the constraint reduction term, reduces the the constraint (because s(z(k)) and c(z(k)) has a positive
+
+inner product). Therefore, the projection move essentially strikes a balance between reduction in
+
+distance and reduction in constraint.
+
+a(k) and b(k) can have two designs. The first design is to ensure the constraint values are roughly the same after the move, i.e. c(z(k)) - c(x(k+1))  0. By Taylor approximation, we have
+
+T c(z(k))(x(k+1) - z(k)) = 0,
+
+(7)
+
+whose solution is
+
+b(k) = a(k)T c(z(k))d(z(k) - x0) . T c(z(k))s(z(k))
+
+(8)
+
+Another design is to ensure the perturbation norm reduces roughly by (k), i.e. d(x(k+1) - x0)  (1 - (k))d(z(k) - x0). By Taylor approximation, we have
+
+T d(z(k) - x0)(x(k+1) - z(k)) = (k)d(z(k) - x0),
+
+(9)
+
+whose solution is
+
+a(k)
+
+=
+
+1
+
+-
+
+b(k)T d(z(k) - x0)s(z(k)) T d(z(k) - x0)d(z(k) - x0)
+
+(10)
+
+It should be noted that Eqs. (8) and (10) are just two specific choices for a(k) and b(k). It turns out that MARGINATTACK will work with a convergence guarantee for a wide range of bounded a(k)s and b(k)s that satisfy some conditions, as will be shown in section 3.4. Therefore, MARGINATTACK provides a general and flexible framework for zero-confidence adversarial attack designs. In practice, we find that Eq. (8) works better for 2 norm, and Eq. (8) works better for  norm.
+1See Thm. 2 in the appendix for a detailed proof.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+3.3 HOW MARGINATTACK WORKS
+Figure 1 illustrates a typical convergence path of MARGINATTACK using 2 norm and Eq. (8) as an example. The red dots on the right denote the original inputs x0 and its closest point on the decision boundary, x. Suppose after iteration k, MARGINATTACK reaches x(k), denoted by the green dot on the left. The restoration move travels directly towards the decision boundary by finding the normal direction to the current constraint contour. Then, the projection move travels along the tangent plane of the current constraint contour to reduce the distance to x0 while preventing the constraint value from deviating much. As intuitively expected, the iteration should eventually approach x. Figure 2 plots an empirical convergence curve of the perturbation norm and constraint value of MARGINATTACK- 2 on a randomly chosen CIFAR image. Each move from a triangle to a circle dot is a restoration move, and from circle to triangle a projection move. The red line is the smoothed version. As can be seen, a restoration move reduces the constraint value while slightly increasing the constraint norm, and a projection move reduces the perturbation norm while slightly affecting the constraint value. Both curves can eventually converge.
+
+3.4 THE CONVERGENCE GUARANTEE
+
+The constraint function c(x) in Eq. (2) is nonconvex, thus the convergence analysis for MARGINATTACK is limited to the vicinity of a unique local optimum, as stated in the following theorem.
+
+Theorem 1. Denote x as one local optimum for Eq. (1). Assume c(x) exists. Define projection
+
+matrices
+
+P = I - s(x)(T c(x)s(x))-1T c(x)
+
+(11)
+
+Consider the neighborhood B = {x :
+
+P [x
+
+- x]
+
+2 2
+
+
+
+X, |c(x)|
+
+
+
+C}
+
+that
+
+satisfies
+
+the
+
+following
+
+assumptions:
+
+1. (Differentiability) x  B, c(x) exists, but can be discontinuous, i.e. all the discontinuity points of the gradient in B are jump discontinuities;
+2. (Lipschitz Continuity at x) x  B, s(x) - s(x) 2  Ls s(x) 2 x - x 2;
+3. (Bounded Gradient Norm) x  B, 0 < m  c(x) 2  M ; 4. (Bounded Gradient Difference)  > 0, x, y  B s.t. y - x = ls(x) for some l,
+T c(y)s(x)  T c(x)s(x);
+
+5. (Constraint Convexity)   (0, 1), x  B, (a(k)d(x - x0) + b(k)s(x))T P T P (x - x0)  (x - x0)T P T P (x - x0);
+
+6. (Unique Optimality) x is the only global optimum within B;
+7. (Constant Bounded Restoration Step Size) (k) =  < M;2
+8. (Shrinking Projected Step Size) (k) < /(k + k0) , where 0 <  < 1 and   M, k0 > mk;3 |a(k)| < Ma, |b(k)| < Mb;
+9. (Presence in Neighborhood) K, x(K)  int[B], i.e. the interior of B.
+Then we have the convergence guarantee limk x(k) - x 2 = 0.
+The proof will be presented in the appendix. Here are a few remarks. First, assumption 1 allows jump discontinuities in c(x) almost everywhere, which is a very practical assumption for deep neural networks. Most neural network operations, such as ReLU and max-pooling, as well as the max operation in Eq. (2), introduce nothing beyond jump discontinuities in gradient.
+2See Eq. (19) for the definition of M in the appendix. 3See Eqs. (50) and (20) for the definitions of M and mk in the appendix.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Second, assumption 3 does require the constraint gradient to be lower bounded, which may lead to concerns that MARGINATTACK may fail in the presence of gradient masking (Papernot et al., 2017). However, notice that the gradient boundedness assumption is only imposed in B, which is in the vicinity of the decision boundary, whereas gradient masking is most likely to appear away from the decision boundary and where the input features are populated. Besides, as will be discussed later, a random initialization as in PGD will be adopted to bypass regions with gradient masking. Experiments on adversarially trained models also verify the robustness of MARGINATTACK.
+Finally, assumption 5 essentially stipulates that c(x) is convex or "not too concave" in B (and thus so is the constraint set c(x)  0), so that the first order optimality condition can readily imply local minimum instead of a local maximum. In fact, it can be shown that assumption 5 can be implied if c(x) is convex in B.4
+
+3.5 ADDITIONAL IMPLEMENTATION DETAILS
+
+There are a few additional implementation details as outlined below.
+
+Box Constraint: In many applications, each dimension of the input features should be bounded, i.e. x  [xmin, xmax]n. To impose the box constraint, the restoration move problem as in Eq. (3) is
+modified as
+
+z(k) = arg min d(x - x(k)), s.t. T c(x(k))(x - x(k)) = -(k)c(x(k)),
+x[xmin ,xmax ]n
+
+(12)
+
+whose solution is
+
+z(k)
+
+= Proj[xmin,xmax]n {z~(k)},
+
+where z~(k)
+
+= x(k) -
+
+(k)c(x(k)) + iIC ic(x(k))(zi(k) - x(ik)) s(x(k)). iI ic(x(k))si(x(k))
+
+(13)
+
+Proj(·) is an operator that projects the vector in its argument onto the subset in its subscript. I is a
+
+set of indices with which the elements in z~(k) satisfy the box constraint, and IC is its complement.
+
+I is determined by running Eq. (13) iteratively and updating I after each iterations.
+
+Unlike other attack algorithms that simply project the solution onto the constraint box, MARGINATTACK incorporates the box constraint in a principled way, such that any local optimal solution x will be an invariant point of the restoration move. Thus the convergence is faster.
+
+Target Scan: According to Eq. (2), each restoration move essentially approaches the adversarial
+class with the highest logit, but the class with the highest logit may not be the closest. To mitigate
+the problem, we follow a similar approach adopted in DeepFool, which we call target scan. Target
+scan performs a target-specific restoration move towards each class, and chooses the move with the shortest distance. Formally, target scan introduces a set of target-specific constraints {ci(x) = lt(x) - li(x) - }. A restoration move with target scan solves
+
+z(k) = arg min d(z(k,i) - x0)
+iA
+
+(14)
+
+where z(k,i) is the solution to Eqs. (3) or (12) with c(x(k)) replaced with ci(x(k)), and thus is equal to Eqs. (4) or (13) with c(x(k)) replaced with ci(x(k)). A is a set of candidate adversarial calsses, which can be all the incorrect classes if the number of classes is small, or which can be a subset
+of the adversarial classes with the highest logits otherwise. Experiments show that target scan is
+necessary only in the first few restoration moves, when the closest and highest adversarial classes
+are likely to be distinct. Therefore, the computation cost will not increase too much.
+
+Initialization: The initialization of x(0) can be either deterministic or random as follows
+x(0) = x0 (Deterministic), x(0) = x0 + u, u  U {[-u, u]n} (Random) (15)
+where U{[-u, u]n} denotes the uniform random distribution in [-u, u]n. Similar to PGD, we can perform multiple trials with random initialization to find a better local optimum.
+
+Final Tuning MARGINATTACK can only cause misclassification when c(x)  . To make sure the attack is successful, the final iterations of MARGINATTACK consists of restoration moves only,
+
+4See Thm. 3 in the appendix.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+"'
+
+!
+
+"
+
+= ! "'
+! " =! !"
+
+(' =0
+
+('
+
+" ')*
+
+"%
+
+ "
+
+Restoration Projection
+
+Figure 1: A convergence path of MARGINATTACK.
+
+Figure 2: An empirical convergence curve of perturbation norm (left) and constraint value (right).
+
+Algorithm 1: MARGINATTACK Procedure
+Input : A set of logit functions l0:C-1(x); an input feature x0 and its label t;
+Output: A solution x~ to Eq. (1) Initialize x(0) according to Eq. (15); for k < number of iterations do
+if k < number of target scan iterations then Do target scan restoration move as in Eq. (14);
+else Do regular restoration move as in Eqs. (3) or (12);
+end if k < final tuning iteration then
+Do projection move as in Eqs. (6); else
+Skip projection move: x(k+1) = z(k); end
+end x~ = x(k).
+
+and no projection moves, until a misclassification is caused. This can also ensure the final solution satisfies the box constraint (because only the restoration move incorporates the box constraint).
+Summary: Alg. 1 summarizes the MARGINATTACK procedure. As for the complexity, each restoration move or projection move requires only one backward propagation, and thus the computational complexity of each move is comparable to one iteration of most attack algorithms.
+4 EXPERIMENTS
+This section compares MARGINATTACK with several state-of-the-art adversarial attack algorithms in terms of the perturbation norm and computation time on image classification benchmarks.
+4.1 ATTACKING REGULAR MODELS
+4.1.1 CONFIGURATIONS
+Three regularly trained models are evaluated on.
+· MNIST (LeCun et al., 1998): The classifier is a stack of two 5 × 5 convolutional layers with 32 and 64 filters respectively, followed by two fully-connected layers with 1,024 hidden units.
+· CIFAR10 (Krizhevsky & Hinton, 2009): The classifier is a pre-trained ResNet32 (He et al., 2016) provided by TensorFlow.5.
+· ImageNet (Russakovsky et al., 2015): The classifier is a pre-trained ResNet50 (He et al., 2016) provided by TensorFlow Keras6. Evaluation is on a validation subset containing 10,000 images.
+The range of each pixel is [0, 1] for MNIST, and [0, 255] for CIFAR10 and ImageNet. The settings of MARGINATTACK and baselines are listed below. Unless stated otherwise, the baseline algorithms are implemented by cleverhans (Nicolas Papernot, 2017). The hyperparameters are set to defaults if not specifically stated.
+· CW (Carlini & Wagner, 2017): The target and evaluation norm is 2. The learning rate is set to 0.05 for MNIST, 0.001 for CIFAR10 and 0.01 for ImageNet, which are tuned to its best performance. The number of binary steps for multiplier search is 10.
+5https://github.com/tensorflow/models/tree/master/official 6https://www.tensorflow.org/api_docs/python/tf/keras/applications/ ResNet50
+6
+
+Under review as a conference paper at ICLR 2019
+
+Success rate
+
+1.0 0.8 0.6 0.4 0.2 0.00.0
+1.0 0.8 0.6 0.4 0.2 0.00.0
+
+MNIST 2 attack
+
+1.0
+
+0.8
+
+Success rate
+
+0.6
+
+MARGIN CW DeepFool
+
+0.4 0.2
+
+0.5 1.0 1.5 2.0 2.5 Distortion ( 2 distance)
+MNIST attack
+
+3.0 0 1.0
+
+0.8
+
+Success rate
+
+0.6
+
+MARGIN FGSM
+
+0.4 0.2
+
+0.D1istort0io.2n ( d0i.s3tance0).4 0.5 0
+
+Cifar 2 attack
+
+1.0
+
+Success rate
+
+0.8
+
+MARGIN CW DeepFool
+
+0.6 0.4
+
+25 50 75 100 Distortion ( 2 distance)
+Cifar attack
+
+125 0 1.0
+
+Success rate
+
+0.8
+
+0.6
+
+MARGIN FGSM
+
+0.4
+
+D1istortion (2 distanc3e)
+
+4 0.0
+
+ImageNet 2 attack
+
+MARGIN CW DeepFool
+
+50 100 150 Distortion ( 2 distance)
+ImageNet attack
+
+200
+
+MARGIN FGSM D0.i5stortion1(.0 distan1c.e5) 2.0
+
+Success rate
+
+Figure 3: Adversarial attacks on (left) MNIST, (middle) Cifar, and (right) ImageNet dataset.
+
+· DeepFool (Moosavi Dezfooli et al., 2016): The evaluation norm is 2. · FGSM (Goodfellow et al., 2014): FGSM is implemented by authors. The step size is searched to
+achieve zero-confidence attack. The evaluation distance metric is . · PGD (Madry et al., 2017): The target and evaluation norm are . The learning rate is set to 0.01
+for MNIST, and 0.05 for CIFAR10 and 0.1 for ImageNet.
+· MARGINATTACK: Two versions of MARGINATTACK are implemented, whose target and evaluation norms are 2, and , respectively. The hyperparmeters are detailed in Table 4 in the appendix. The first 10 restoration moves are with target scan, and the last 20 moves are all restoration moves.
+The number of iterations/moves is set to 2,000 for CW, 200 with 10 random starts for PGD and MARGINATTACK (except for ImageNet where there is only one random run), and 200 for the rest.
+4.1.2 RESULTS AND ANALYSES
+Except for PGD, all the other attacks are zero-confidence attacks. For these attacks, we plot the CDF of the margins of the validation data, which can also be interpreted as the percentage success rate of these attacks as a function of perturbation level. Figure 3 plots the success rate curves, where the upper panel shows the 2 attacks, and the lower one shows  attacks. As can be observed, the MARGINATTACK curves are above all other algorithms at all perturbation levels and in all datasets. CW is very close to MARGINATTACK on MNIST and CIFAR10, but MARGINATTACK maintains a 3% advantage on MNIST and 1% on CIFAR10. It seems that CW is unable to converge well within 2,000 iterations on ImageNet, although the learning rate has been tuned to maximize its performance. MARGINATTACK, on the other hand, converges more efficiently and consistently.
+To obtain a success rate curve for PGD, we have to run the attack again and again for many different perturbation levels, which can be time-consuming for large datasets (this shows an advantage of zero-confidence attacks over fix-perturbation attacks). Instead, we choose four perturbation levels for each attack scenario to compare. The perturbation levels are chosen to roughly follow the 0.2, 0.4, 0.6 and 0.8 quantiles of the MARGINATTACK margins. Table 1 compares the success rates under the chosen quantiles among the  attacks. We can see that MARGINATTACK outperforms PGD under all the perturbation levels, and that both significantly dominate FGSM.
+4.2 ATTACKING ADVERSARIALLY TRAINED MODEL
+We also evaluate MARGINATTACK on the MNIST Adversarial Examples Challenge7, which is a challenge of attacking an MNIST model adversarially trained using PGD with 0.3 perturbation level.
+7https://github.com/MadryLab/mnist_challenge
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Table 1: Success rate (%) of adversarial attacks under given perturbation norms.
+
+Algorithm
+FGSM PGD Ours
+
+MNIST 0.06 / 0.08 / 0.10 / 0.12 7.55 / 13.9 / 24.9 / 35.4 17.1 / 42.2 / 73.7 / 91.8 18.1 / 43.0 / 74.1 / 92.1
+
+CIFAR 0.2 / 0.4 / 0.6 / 1 18.5 / 31.0 / 41.1 / 54.7 18.9 / 38.9 / 59.1 / 84.1 21.1 / 42.2 / 62.6 / 87.3
+
+IMAGENET 0.05 / 0.1 / 0.2 / 0.4 39.8 / 47.2 / 60.1 / 75.3 40.4 / 49.8 / 68.8 / 90.6 41.5 / 51.3 / 69.0 / 90.8
+
+Table 2: Success rate under 0.3 perturbation norm Table 3: Running time comparison (in secof the MNIST Adversarial Examples Challenge. onds) on a single batch of images.
+
+Algorithm Zheng et al. (2018) MARGINATTACK ( ) 1st-Order on Logit Diff PGD on Cross-Entropy Loss PGD on CW Loss
+
+Success Rate (%) 11.21 11.16 11.15 10.38 10.29
+
+Algorithm CW DeepFool PGD FSGM Ours ( 2)
+
+MNIST 16.02 1.14 0.87 0.11 3.01
+
+CIFAR 234.75 21.26 33.17 0.95 51.03
+
+IMAGENET 872.28 44.41 46.3 10.05 248.82
+
+Same as the PGD baseline listed, MARGINATTACK is run with 50 random starts, and the initialization perturbation range u = 0.3. The number of moves is 500. The target norm is . bn = 5 and an is set as in Eq. (10). The rest of the configuration is the same as in the previous experiments.
+Table 2 lists the success rates of different attacks under 0.3 perturbation level. The baseline algorithms are all fix-perturbation attacks, and their results are excerpted from the challenge white-box attack leaderboard. As can be seen, MARGINATTACK, as the only zero-confidence attack algorithm, has the second best result, which shows that it performs competitively against the state-of-the-art fix-perturbation attacks.
+
+4.3 CONVERGENCE
+We would like to revisit the convergence plot of the constraint value c(x) and perturbation norm d(x) of as in Fig. 2. We can see that MARGINATTACK converges very quickly. In the example shown in the figure, it is able to converge within 20 moves. Therefore, MARGINATTACK can be greatly accelerated. If margin accuracy is the priority, a large number of moves, e.g. 200 as in our experiment, would help. However, if efficiency is the priory, a small number of moves, e.g. 30, suffices to produce a decent attack.
+To further assess the efficiency of MARGINATTACK, Tab. 3 compares the running time (in seconds) of attacking one batch of images, implemented on a single NVIDIA TESLA P100 GPU. The batch size is 200 for MNIST and CIFAR10, and 100 for ImageNet. The settings are the same as stated in section 4.1, except that for a better comparison, the number of iterations of CW is cut down to 200, and PGD and MARGINATTACK runs one random pass, so that all the algorithms have the same iteration/moves. Only the 2 versions of MARGINATTACK are shown because the other versions have similar run times. As shown, running time of MARGINATTACK is much shorter than CW, and is comparable to DeepFool and PGD. CW is significantly slower that the other algorithms because it has to run multiple trials to search for the best Lagrange multiplier. Note that DeepFool and CW enable early stop, but MARGINATTACK does not. Considering MARGINATTACK's fast convergence rate, the running time can be further reduced by early stop.
+
+5 CONCLUSION
+We have proposed MARGINATTACK, a novel zero-confidence adversarial attack algorithm that is better able to find a smaller perturbation that results in misclassification. Both theoretical and empirical analyses have demonstrated that MARGINATTACK is an efficient, reliable and accurate adversarial attack algorithm, and establishes a new state-of-the-art among zero-confidence attacks. What is more, MARGINATTACK still has room for improvement. So far, only two settings of a(k) and b(k) are developed, but MARGINATTACK will work for many other settings, as long as assumption 5 is satisfied. Authors hereby encourage exploring novel and better settings for the MARGINATTACK framework, and promote MARGINATTACK as a new robustness evaluation measure or baseline in the field of adversarial attack and defense.
+
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Naveed Akhtar and Ajmal Mian. Threat of adversarial attacks on deep learning in computer vision: A survey. arXiv preprint arXiv:1801.00553, 2018.
+Nicholas Carlini and David Wagner. Towards evaluating the robustness of neural networks. In Security and Privacy (SP), 2017 IEEE Symposium on, pp. 39­57. IEEE, 2017.
+Ian Goodfellow. Gradient masking causes CLEVER to overestimate adversarial perturbation size. arXiv preprint arXiv:1804.07870, 2018.
+Ian J Goodfellow, Jonathon Shlens, and Christian Szegedy. Explaining and harnessing adversarial examples. arXiv preprint arXiv:1412.6572, 2014.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016.
+Andrew Ilyas, Logan Engstrom, Anish Athalye, and Jessy Lin. Black-box adversarial attacks with limited queries and information. arXiv preprint arXiv:1804.08598, 2018.
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. 2009.
+Alexey Kurakin, Ian Goodfellow, and Samy Bengio. Adversarial examples in the physical world. arXiv preprint arXiv:1607.02533, 2016a.
+Alexey Kurakin, Ian Goodfellow, and Samy Bengio. Adversarial machine learning at scale. arXiv preprint arXiv:1611.01236, 2016b.
+Yann LeCun, Le´on Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to document recognition. Proceedings of the IEEE, 86(11):2278­2324, 1998.
+Aleksander Madry, Aleksandar Makelov, Ludwig Schmidt, Dimitris Tsipras, and Adrian Vladu. Towards deep learning models resistant to adversarial attacks. arXiv preprint arXiv:1706.06083, 2017.
+Seyed Mohsen Moosavi Dezfooli, Alhussein Fawzi, and Pascal Frossard. DeepFool: a simple and accurate method to fool deep neural networks. In Proceedings of 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), number EPFL-CONF-218057, 2016.
+Ian Goodfellow Reuben Feinman Fartash Faghri Alexander Matyasko Karen Hambardzumyan YiLin Juang Alexey Kurakin Ryan Sheatsley Abhibhav Garg Yen-Chen Lin Nicolas Papernot, Nicholas Carlini. cleverhans v2.0.0: an adversarial machine learning library. arXiv preprint arXiv:1610.00768, 2017.
+Nicolas Papernot, Patrick McDaniel, Somesh Jha, Matt Fredrikson, Z Berkay Celik, and Ananthram Swami. The limitations of deep learning in adversarial settings. In Security and Privacy (EuroS&P), 2016 IEEE European Symposium on, pp. 372­387. IEEE, 2016.
+Nicolas Papernot, Patrick McDaniel, Ian Goodfellow, Somesh Jha, Z Berkay Celik, and Ananthram Swami. Practical black-box attacks against machine learning. In Proceedings of the 2017 ACM on Asia Conference on Computer and Communications Security, pp. 506­519. ACM, 2017.
+JB Rosen. The gradient projection method for nonlinear programming. part ii. nonlinear constraints. Journal of the Society for Industrial and Applied Mathematics, 9(4):514­532, 1961.
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, et al. Imagenet large scale visual recognition challenge. International Journal of Computer Vision, 115(3):211­252, 2015.
+Jiawei Su, Danilo Vasconcellos Vargas, and Sakurai Kouichi. One pixel attack for fooling deep neural networks. arXiv preprint arXiv:1710.08864, 2017.
+Christian Szegedy, Wojciech Zaremba, Ilya Sutskever, Joan Bruna, Dumitru Erhan, Ian Goodfellow, and Rob Fergus. Intriguing properties of neural networks. arXiv preprint arXiv:1312.6199, 2013.
+9
+
+Under review as a conference paper at ICLR 2019 Tsui-Wei Weng, Huan Zhang, Pin-Yu Chen, Jinfeng Yi, Dong Su, Yupeng Gao, Cho-Jui Hsieh, and
+Luca Daniel. Evaluating the robustness of neural networks: An extreme value theory approach. arXiv preprint arXiv:1801.10578, 2018. Tianhang Zheng, Changyou Chen, and Kui Ren. Distributionally adversarial attack. arXiv preprint arXiv:1808.05537, 2018.
+10
+
+Under review as a conference paper at ICLR 2019
+
+APPENDIX
+
+A PROVING THM. 1
+
+This supplementary material aims to prove Thm. 1. Without the loss of generality, K in Eq. (9) in set to 0. Before we prove the theorem, we need to introduce some lemmas.
+
+Lemma 1.1. If assumption 3 in Thm. 1 holds, then x  B
+
+T c(x)s(x)  m
+
+s(x) 2
+
+n
+
+(16)
+
+Proof. According to Eq. (5), for 2 norm,
+
+T c(x)s(x) =
+s(x) 2
+
+c(x)
+
+2
+
+m>
+
+m n
+
+for  norm,
+
+T c(x)s(x) =
+
+c(x) 1 
+
+c(x) 2  m
+
+s(x) 2
+
+s(x) 2
+
+nn
+
+(17) (18)
+
+Lemma 1.2. Given all the assumptions in Thm. 1, where
+
+T c(y)s(x) m
+
+M = min
+
+1,
+
+sup x,yB:
+l,y-x=ls(x)
+
+T
+
+, c(x)s(x)
+
+2nLs
+
+-1
+mk = A-1/2 - 1
+
+and assuming x(k), z(k)  B, k, then we have |c(x(k))|  (k)
+
+where
+
+ = max
+
+A and B are defined in Eq. (32).
+
+B A(1 -
+
+ A)
+
+,
+
+c(x(0)) (0)
+
+According to assumption 8, this implies
+
+at the rate of at least 1/n.
+
+lim |c(x(k))| = 0
+k
+
+(19) (20) (21) (22)
+(23)
+
+Proof. As a digression, the second term in Eq. (19) is well defined, because
+T c(y)s(x) T c(x)s(x)
+
+is upper bounded by Lem. 1.1 and assumptions 3.
+
+Back to proving the lemma, we will prove that each restoration move will bring c(x(k)) closer to 0, while each projection move will not change c(x(k)) much.
+
+First, for the restoration move
+
+|c(z(k))|  |c(x(k)) + T c()(z(k) - x(k))|
+
+= c(x(k)) - (k)T c() c(x(k))s(x(k)) T c(x(k))s(x(k))
+
+=
+
+T c()s(x(k)) 1 -  T c(x(k))s(x(k))
+
+|c(x(k))|
+
+ (1 - )|c(x(k))|
+
+(24)
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+The first line is from the generalization of Mean-Value Theorem with jump discontinuities, and  = tz(k) + (1 - t)x(k) and t is a real number in [0, 1]. The second line is from Eq. (4). The last line is from assumptions 4 and 7 and Eq. (19).
+
+Next, for the projection move
+
+|c(x(k+1))|  |c(z(k))| + M x(k+1) - z(k) 2 = |c(z(k))| + (k)M a(k)d(z(k) - x0) + b(k)s(z(k)) 2  |c(z(k))| + (k)M a(k) d(z(k) - x0) 2 + b(k) s(z(k)) 2
+
+(25)
+
+The first line is from the fact that assumption 3 implies that c(x) is M -Lipschitz continuous.
+
+Both d(z(k) - x0) 2 and s(z(k)) 2 is upper-bounded, i.e.
+
+d(z(k) - x0) 2 < Md,
+
+s(z(k)) 2 < Ms
+
+(26)
+
+for some Md and Ms. To see this, for 2 norm d(z(k) - x0) 2 = 2 z(k) - x0 2  2b,
+
+s(z(k)) 2 = 1
+
+(27)
+
+where b is defined as the maximum perturbation norm ( 2) within B, i.e.
+
+b = max
+xB
+
+x0 - x
+
+2
+
+(28)
+
+which is well defined because B is a tight set. For  norm,
+
+d(z(k) - x0)
+
+2
+
+  n,
+
+s(z(k))
+
+2
+
+ n
+
+(29)
+
+Note that Eq. (26) also holds for other norms. With Eq. (26) and assumption 8, Eq. (25) becomes
+
+|c(x(k+1))|  |c(z(k))| + (k)M (MaMd + MbMs)
+
+(30)
+
+Combining Eqs. (24) and (30) we have
+
+|c(x(k+1))|  A|c(x(k))| + (k)B
+
+where
+
+A = 1 -  B = M (MaMd + MbMs)
+
+(31) (32)
+
+According to assumption 7, 0 < A < 1. Also, according to Eq. (20), (k)/(k+1)  A-1/2, k,
+
+Divide Eq (31) by (k), we have
+
+|c(x(k+1))|  (k+1)
+
+
+
+|c(x(k+1))| A(k)
+
+
+
+ |c(x(k))| A (k)
+
++
+
+B A
+
+(33)
+
+and thus
+
+|c(x(k+1))| - 
+
+B
+
+ A
+
+|c(x(k))| - 
+
+B
+
+ (k+1)
+
+A(1 - A)
+
+(k) A(1 - A)
+
+If
+
+|c(x(0))| (0)
+
+-
+
+B A(1 -
+
+ A)
+
+
+
+0
+
+Then Eq. (34) implies
+
+|c(x(k))| (k)
+
+-
+
+B A(1 -
+
+ A)
+
+
+
+0, k
+
+Otherwise, Eq. (34) implies
+
+(34) (35)
+
+|c(x(k))| -  B   |c(x(0))| -  B  , k
+
+(k)
+
+A(1 - A)
+
+(0)
+
+A(1 - A)
+
+(36)
+
+This concludes the proof.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Lemma 1.3. Given all the assumptions in Thm. 1, and assuming x(k), z(k)  B, k, we have
+
+lim
+k
+
+P (x(k) - x0)
+
+2 2
+
+=
+
+0
+
+(37)
+
+Proof. First, for restoration move
+
+P [z(k) - x0]
+
+2 2
+
+=
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2[z(k)
+
+-
+
+x0]T
+
+P
+
+T
+
+P
+
+[z(k)
+
+-
+
+x(k)]
+
+-
+
+P [z(k) - x(k)]
+
+2 2
+
+
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2
+
+P [z(k) - x0]
+
+2
+
+P [z(k) - x(k)]
+
+2
+
+=
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2
+
+P [z(k) - x0]
+
+2
+
+T
+
+c(x(k)) c(x(k))s(x(k))
+
+P
+
+s(x(k)
+
+)
+
+2
+
+=
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2
+
+P [z(k) - x0]
+
+2
+
+T
+
+c(x(k)) c(x(k))s(x(k))
+
+P
+
+[s(x(k)
+
+)
+
+-
+
+s(x)]
+
+2
+
+=
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2
+
+P [z(k) - x0]
+
+2
+
+c(x(k))T T c(x(k)
+
+c(x)(s(x(k)) - s(x)) )s(x(k))T c(x)s(x)
+
+s(x
+
+)
+
+2
+
+
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2n|c(x(k))| m
+
+P [z(k) - x0] 2
+
+s(x(k)) - s(x) 2 s(x(k)) 2
+
+
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2nLs(k) m
+
+P [z(k) - x0] 2 x(k) - x 2
+
+
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2nLs(k) m
+
+P [z(k) - x0] 2
+
+P [x(k) - x0]
+
+2
+
++
+
+c(x(k))
+
++
+
+M P[x(k) m/ n
+
+-
+
+x0]
+
+2
+
+
+
+P [x(k) - x0]
+
+2 2
+
++
+
+2nLs(k)(m
+
++
+
+M
+
+ n)
+
+m2
+
+P [z(k) - x0]
+
+2
+
+P [x(k) - x0]
+
+2
+
++
+
+ 2 nLs
+
+2
+
+(k)2
+
+m2
+
+(38)
+
+Line 4 is given by Eq. (3). Line 5 is derived from Lem. 1.1. The last line is from Lem. 1.2.
+
+Eq. (38) implies
+
+(
+
+P [z(k)-x0]
+
+2-r1(k)
+
+P [x(k)-x0]
+
+2)(
+
+P [z(k)-x0]
+
+2-r2(k)
+
+P [x(k)-x0]
+
+2) 
+
+2nLs2(k)2 m2
+
+(39)
+
+where
+
+
+
+r1(k)
+
+=
+
+1 2
+
+2nLs(k) m
+
+-
+
+
+
+2nLs(k) m
+
+2
++ 4 < 0
+
+
+
+r2(k)
+
+=
+
+1 2
+
+2nLs(k) m
+
++
+
+
+
+2nLs(k)
+
+2
++ 4 > 0
+
+m
+
+(40)
+
+It can easily be shown that
+
+-r1(k) r2(k)
+
+=
+
+r1(k)2 -r1(k)r2(k)
+
+=
+
+r1(k)2 4
+
+
+
+r1(0)2 4
+
+(41)
+
+Therefore
+
+P [z(k) - x0]
+
+2 - r1(k)
+
+P [x(k) - x0]
+
+2
+
+
+
+r1(0)2 ( 4
+
+P [z(k) - x0]
+
+2 + r2(k)
+
+P [x(k) - x0]
+
+2)
+
+(42)
+
+Combining Eqs. (39) and (42), we have
+
+P [z(k) - x0]
+
+2 2
+
+
+
+r2(k)2
+
+P [x(k) - x0]
+
+2 2
+
++
+
+8nLs2(k)2 m2r1(0)2
+
+<
+
+1 + 2nLs(k) m
+
+2
+
+P [x(k) - x0]
+
+2 2
+
++
+
+ 8 nLs
+
+2
+
+
+
+(k)2
+
+m2r1(0)2
+
+(43)
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Next, for projection move
+
+P [x(k+1) - x0]
+
+2 2
+
+=
+
+P [z(k) - x0]
+
+2 2
+
++
+
+2[x(k+1)
+
+-
+
+z(k)]T
+
+P
+
+[z(k)
+
+-
+
+x0]
+
++
+
+x(k+1) - z(k)
+
+2 2
+
+=
+
+P [z(k) - x0]
+
+2 2
+
++
+
+2(k)[a(k)d(z(k)
+
+-
+
+x0)
+
++
+
+b(k)s(z(k))]T
+
+P
+
+[z(k)
+
+-
+
+x0]
+
++ (k)2
+
+a(k)d(z(k) - x0) + b(k)s(z(k))
+
+2 2
+
+ (1 - 2(k))
+
+P [z(k) - x0]
+
+2 2
+
++
+
+(k)2B2
+
+The second equality is from Eq. (6). The last line is from assumption 5 and Eq. (31).
+
+(44)
+
+Next, combining Eqs. (43) and (44), we have
+
+x(k+1) - P [x(k+1)]
+
+2 2
+
+
+
+1 + 2nLs(k) m
+
+2
+
+(1 - 2(k))
+
+x(k) - P [x(k)]
+
+2 2
+
++
+
+(k)2D
+
+ (1 - 2(k)F )
+
+x(k) - P [x(k)]
+
+2 2
+
++
+
+(k)2D
+
+(45)
+
+where
+
+D = E + B2
+
+E
+
+=
+
+8nLs2 m2r1(0)2
+
+(46)
+
+F =  - 2nLs > 0 (Assumption 7) m
+
+According to assumption 8, limk (k) = 0. Thus,  > 0, K( ), k > K( ), we have (k)  2/D. Therefore
+
+x(k+1) - P [x(k+1)]
+
+2 2
+
+-
+
+ (1 - 2F (k))(
+
+x(k) - P [x(k)]
+
+2 2
+
+-
+
+)
+
+Finally, notice that by assumption 8
+
+(47)
+
+K
+lim (1 - 2(k)F ) = 0
+K  k=1
+
+then
+
+lim
+k
+
+x(k) - P [x(k)]
+
+2 2
+
+
+
+which holds  > 0. This concludes the proof.
+
+(48) (49)
+
+Lemma 1.4. Given all the assumptions in Thm. 1, where M and mk defined in Eqs. (19) and (20), and
+
+
+ M = min 1,
+
+
+C(1 - A) 2F X 1 , ,,
+B D 2F
+
+
+
+X - r1(0)2
+
+P [x(0) - x0] E
+
+2 2
+
+,
+
+X r1(0)2D/2F
+
++
+
+E
+
+ 
+
+(50)
+
+where A, B, D and E are defined in Eqs. (32) and (46), the following inequalities hold k.
+
+|c(x(k))|  C
+
+|c(z(k))|  C
+
+P [x(k) - x0]
+
+2 2
+
+
+
+X
+
+P [z(k) - x0]
+
+2 2
+
+
+
+X
+
+(51)
+
+i.e. x(k), z(k)  B, k.
+
+Proof. We will prove it by mathematical induction.
+
+Base Case: From assumption 9, we have |c(x(0))|  C and
+
+P [x(0) - x0]
+
+2 2
+
+
+
+X.
+
+Thus
+
+Eqs.
+
+(24)
+
+and (43) hold for k = 0. From Eq. (24) and assumption 7, we have |c(z(0))|  |c(x(0))|  C. From
+
+Eqs. (43) and (50), we have
+
+P [z(0) - x0]
+
+2 2
+
+
+
+X.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Step Case: Assume Eq. (51) holds k  K, then Eqs. (31) and (45) holds k  K.
+
+· Proving |c(x(K+1))|  C:
+
+From Eq. (31),
+
+|c(x(K+1))| - (K)2B  A |c(x(K))| - (K)2B
+
+1-A
+
+1-A
+
+If Then
+
+|c(x(K))|  (K)2B 1-A
+|c(x(K+1))|  (K)2B  (0)2B  C 1-A 1-A
+
+where the last inequality is given by Eq. (50).
+
+Otherwise
+
+|c(x(K+1))|  |c(x(K))|  C
+
+· Proving
+
+P [x(K+1) - x0]
+
+2 2
+
+
+
+X:
+
+From Eq. (45)
+
+P [x(K+1) - x0]
+
+2 2
+
+-
+
+(K)D 2F
+
+ (1 - 2(K)F )
+
+P [x(K) - x0]
+
+2 2
+
+-
+
+(K)D 2F
+
+Notice that from Eq. (50), 0  (1 - 2(0)F )  (1 - 2(K)F ) < 1.
+
+If
+
+P [x(K) - x0]
+
+2 2
+
+
+
+(K)D 2F
+
+Then
+
+P [x(K+1) - x0]
+
+2 2
+
+
+
+(K)D 2F
+
+
+
+(0)D 2F
+
+X
+
+where the last inequality is given by Eq. (50).
+
+Otherwise
+
+P [x(K+1) - x0]
+
+2 2
+
+
+
+P [x(K) - x0]
+
+2 2
+
+
+
+X
+
+· Proving |c(z(K+1))|  C:
+
+Since we have established |c(x(K+1))|  C, Eq. 24 holds for k = K + 1. Therefore
+
+|c(z(K+1))| = A|c(x(K+1))|  |c(x(K+1))|  C
+
+· Proving
+
+P [z(K+1) - x0]
+
+2 2
+
+ X:
+
+Since we have established
+
+P [x(K+1) - x0]
+
+2 2
+
+ X, Eq. (43) holds for k
+
+= K + 1.
+
+From Eqs. (56) and (57), we can establish, through recursion, that
+
+P [x(k) - x0]
+
+2 2
+
+ max
+
+(0)D ,
+2F
+
+P [x(0) - x0]
+
+2 2
+
+, k  K + 1
+
+Therefore,
+
+P [z(K+1) - x0]
+
+2 2
+
+
+
+r1(K+1)2
+
+P [x(K+1) - x0]
+
+2 2
+
++
+
+(K+1)2E
+
+ r1(K+1)2 max
+
+(0)D ,
+2F
+
+P [x(0) - x0]
+
+2 2
+
++ (K+1)2E
+
+ r1(0)2 max
+
+(0)D ,
+2F
+
+P [x(0) - x0]
+
+2 2
+
++ (0)2E
+
+X
+
+The first line is given by Eq. (43). The last line is given by Eq. (50).
+
+(52) (53) (54) (55)
+(56) (57) (58)
+(59) (60)
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Lemma 1.5. Under the assumptions in Thm. 1 P [x - x0] = 0
+
+(61)
+
+Proof. From Thm. 2, a solution, denoted as x , to
+
+min
+x
+
+d(x
+
+-
+
+x0
+
+)
+
+s.t.T c(x)(x - x) = 0
+
+(62)
+
+would satisfy
+
+P [x - x0] = 0
+
+(63)
+
+If P [x - x0] = 0, there are two possibilities. The first possibility is that x is not a solution to Eq. (62), which contradicts with the first order optimality condition that x must satisfy.
+
+The second possibility is there are multiple solutions to the problem in Eq. (62), and x and x are both its solutions. This can happen if d(·) is 1 or  norm. By definition
+
+T c(x)(x - x) = 0
+
+(64)
+
+Since x is a local minimum to Eq. (1), j  I,  < 1,  < , x = x + (1 - )x , s.t.
+
+c(x) > 0, x  Bj
+
+(65)
+
+Otherwise, if c(x)  0, then x is a feasible solution to the problem in Eq. (1) and d(x - x0)  d(x - x0) + (1 - )d(x - x0) = d(x - x0)
+
+(66)
+
+which contradicts with the assumption that x is a unique local optimum in B.
+
+Eq. (65) implies
+
+Tj c(x)(x - x) = (1 - )jT c(x)(x - x) > 0
+
+(67)
+
+On the other hand, notice that Eq. (63) implies s(x) = (x0 - x ),  > 0. For 1/  cases, sj(x) takes discrete values. Therefore, to satisfy assumption 2, sj(x) = sj(x), which implies
+
+
+
+0 = d(x) - d(x)  - jT cj(x) +
+
+iT ci(x) (x - x ), i > 0, i  I (68)
+
+iI ,i=j
+
+The first inequality is because - jT cj(x) + iI,i=j iT ci(x)  Ts d(x - x0).
+
+Eqs. (67) and (68) cause a contradiction.
+
+Now we are ready to prove Thm. 1.
+
+Proof of Thm. 1. From Lems. 1.2, 1.3 and 1.4, we can established that Eqs. (21) and (37) holds under all the assumptions in Thm. 1. The only thing we need to prove is that Eqs. (21) and (37) necessarily implies limk x(k) - x0 2 = 0.
+
+First, from Lem. 1.5
+
+P [x - x0] 2 = 0
+
+(69)
+
+Then, x that c(x )
+
+ B s.t. P [x - x0] is monotonic along x
+
+2 2
+-
+
+= x
+
+0, =
+
+we have s(x ).
+
+x - x = s(x Therefore, x is
+
+). From assumption 4, we know the only point in B that satisfies
+
+P [x
+
+- x0]
+
+2 2
+
+= 0 and c(x ) = 0.
+
+Also, notice that P [x - x0] and c(x) are both continuous mappings. This concludes the proof.
+
+Theorem 2. The solution to is
+
+arg min d(x)
+x
+s.t. T c(x )x = b
+bs(x ) x = T c(x )s(x )
+
+(70) (71)
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+Proof. Decompose x = y, where d(y) = 1. Then Eq. (70) can be rewritten as
+
+arg min 
+,y:d(y)=1
+s.t. T c(x )y = b
+
+(72)
+
+Notice that the product of  and T c(x )y is constant, so if  is to be minimized, then T c(x )y needs to be maximized. Namely, y can be determined by solving
+
+max T c(x )y
+y:d(y)=1
+
+(73)
+
+which is the definition of dual norm. Therefore
+
+y = s(x )
+
+(74)
+
+Plug Eq. (74) into the constraint in Eq. (72), we can solve for . This concludes the proof.
+
+As a remark, Thm. 2 is applicable to the optimization problems in Eqs. (3) and (62) by changing the
+
+variable x~ = x - x0 and redefining b accordingly.
+
+Theorem 3. For 2 norm, if all the assumptions in Thm. 1, but assumption 5, hold, and
+
+ma > 0, s.t. a(k)  ma
+
+(75)
+
+also assuming c(x) is convex in B, then B
+
+= {x :
+
+P [x - x]
+
+2 2
+
+
+
+X
+
+, |c(x)|
+
+
+
+C
+
+}
+
+
+
+B,
+
+s.t.
+
+assumption 5 hold.
+
+Proof. Since c(x) is convex in B, we have x (T c(x) - T c(x))(x - x)  0
+
+(76)
+
+Further, assume x satisfies
+
+T c(x)(x - x) = 0
+
+(77)
+
+Then we have
+
+P T P (x - x) = P (x - x) = x - x
+
+(78)
+
+where the first equality is from the fact that P is an orthogonal projection matrix under 2 norm; the second equality is from the fact that the projection subspace of P is orthogonal to c(x) by construction.
+
+Also, from Lem. 1.5, we have
+
+P (x - x) = P (x - x0)
+
+(79)
+
+Plug Eqs. (77) to (79) into (76), we have T c(x)P T P (x - x)  0
+
+(80)
+
+On the other hand, let  = ma/2 x - x0 2, then x satisfying Eq. (77) and x = x
+
+a(k)T d(x - x0)P T P (x - x0) = 
+
+a(k) x - x0
+
+(x - x0)T P T P (x - x0)
+2
+
+ma x - x0
+
+(x - x0)T P T P (x - x0)
+2
+
+(81)
+
+> (x - x0)T P T P (x - x0)
+
+where the second line comes from Eq. (75) and the fact that x is the optimal solution to the problem
+
+in Eq. (62). Combining Eqs. (80) and (81), we know that assumption 5 holds with strict inequality for x satisfying Eq. (77) and x = x.
+
+T c(x)P T P (x - x), T d(x - x0)P T P (x - x0) and (x - x0)T P T P (x - x0) are continuous functions, and therefore B where assumption 5 also holds. This concludes the proof.
+
+B HYPERPARAMETER SETTINGS FOR MARGINATTACK Table 4 list the hyperparameter settings for MARGINATTACK.
+17
+
+Under review as a conference paper at ICLR 2019
+
+Table 4: Hyperparameter settings for MARGINATTACK.
+
+Hyperparameters a(k) b(k)  (k) u 
+
+MNIST
+Eq. (8)
+1 1 (k + 1)-0.5 0.05
+
+2
+CIFAR
+Eq. (8)
+1 1 (k + 1)-0.5 0.1
+
+IMAGENET MNIST
+
+Eq. (8)
+
+0.1
+
+1 Eq. (10)
+
+1 0.2 (k + 1)-0.5 (k + 1)-1
+
+0 0.05
+
+-0.01
+
+
+CIFAR0
+1
+Eq. (10) 0.2
+(k + 1)-1 0.1
+
+IMAGENET
+0.3
+Eq. (10) 0.2
+(k + 1)-1 0
+
+18
+
+

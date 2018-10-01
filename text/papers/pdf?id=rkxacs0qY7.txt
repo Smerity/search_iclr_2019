@@ -1,0 +1,876 @@
+Under review as a conference paper at ICLR 2019
+FUNCTIONAL VARIATIONAL BAYESIAN NEURAL NETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Variational Bayesian neural networks (BNN) perform variational inference over weights, but it is difficult to specify meaningful priors and approximating posteriors in a high-dimensional weight space. We introduce functional variational Bayesian neural networks (fBNNs), which maximize an Evidence Lower BOund (ELBO) defined directly on stochastic processes, i.e. distributions over functions. We prove that the KL divergence between stochastic processes is equal to the supremum of marginal KL divergences over all finite sets of inputs. Based on this, we introduce a practical training objective which approximates the functional ELBO using finite measurement sets and the spectral Stein gradient estimator. With fBNNs, we can specify priors which entail rich structure, including Gaussian processes and implicit stochastic processes. Empirically, we find that fBNNs extrapolate well using various structured priors, provide reliable uncertainty estimates, and can scale to large datasets.
+1 INTRODUCTION
+Bayesian neural networks (BNNs) (Hinton & Van Camp, 1993; Neal, 1995) have the potential to combine the scalability, flexibility, and predictive performance of neural networks with principled Bayesian uncertainty modeling. However, the practical effectiveness of BNNs is limited by our ability to specify meaningful prior distributions and by the intractability of posterior inference. Choosing a meaningful prior distribution over a network's weights is difficult because the weights have a complicated relationship to the function computed by the network. Stochastic variational inference is appealing because the update rules resemble ordinary backprop (Graves, 2011; Blundell et al., 2015), but fitting accurate posterior distributions is difficult due to strong and complicated posterior dependencies (Louizos & Welling, 2016; Sun et al., 2017; Zhang et al., 2017; Shi et al., 2017).
+In a classic result, Neal (1995) showed that under certain assumptions, as the width of a shallow BNN was increased, the limiting distribution is a Gaussian process (GP). Lee et al. (2017) recently extended this result to deep BNNs. However, the relationship of finite BNNs to GPs is unclear, and practical variational BNN approximations can fail to match the predictions of the corresponding GP. Furthermore, because the aforementioned analyses related specific BNN architectures to specific GP kernels, it's not clear how one would design BNN architectures to match a given kernel structure. Given the rich variety of structural assumptions that GP kernels can represent (Rasmussen & Williams, 2006; Lloyd et al., 2014; Sun et al., 2018), there remains a significant gap in expressive power between BNNs and GPs (not to mention stochastic processes more broadly).
+In this paper, we propose to perform variational inference directly on the distribution of functions. Specifically, we introduce functional variational BNNs (fBNNs), where a BNN is trained to produce a distribution of functions with small KL divergence to the true posterior over functions. We prove that the KL divergence between stochastic processes can be expressed as the supremum of marginal KL divergences at finite sets of points. Based on this, we present a novel objective functional ELBO (fELBO). Then we introduce a GAN-like minimax formulation and an VAE-like maximizing formulation for functional variational inference. To approximate the marginal KL divergence gradients, we adopt the recently proposed spectral Stein gradient estimator (SSGE) (Shi et al., 2018).
+Our fBNNs make it possible to specify stochastic process priors which encode richly structured dependencies between function values. This includes stochastic processes with explicit densities,
+1
+
+Under review as a conference paper at ICLR 2019
+
+FBNN HMC BBB
+
+1 × 100
+
+2 × 100
+
+3 × 100
+
+5 × 100
+
+Figure 1: Prediction on x3 problem. Here a × b represents a hidden layers of b units. Red dots are 20 training points. Blue line is the mean of final prediction and the shaded areas represents standard derivations. We compare fBNNs, BBB, and the golden standard Hamiltonian Monte Carlo (HMC) (Neal et al., 2011). For both BBB and HMC which perform weight-space inference, varying network sizes leads to drastically different predictions. For fBNNs which perform function-space inference, we observe consistent predictions for different networks. Because we use factorized Gaussian network for fBNNs, the 1 × 100 network is not expressive enough to generate much uncertainty as larger networks.
+
+such as Gaussian Processes which can model various structures like linearity, smoothness and periodicity (Lloyd et al., 2014; Sun et al., 2018). In addition, we can also use stochastic processes with implicit densities, such as distributions over piecewise linear or piecewise constant functions. Furthermore, in contrast with GP, fBNNs efficiently yield explicit samples of the function. This enables fBNNs to be used in settings that require explicit minimization of sampled functions, such as Thompson sampling (Thompson, 1933) or predictive entropy search (Hernández-Lobato et al., 2014; Wang & Jegelka, 2017).
+One desideratum of Bayesian models is that they behave gracefully as their capacity is increased (Rasmussen & Ghahramani, 2001). Unfortunately, ordinary BNNs don't meet this basic requirement: unless the asymptotic regime is chosen very carefully (e.g. Neal (1995)), BNN priors may have undesirable behavior as more units or layers are added. Furthermore, larger BNNs entail more difficult posterior inference and larger description length for the posterior, causing degeneracy for large networks, as shown in Figure 1. Our fBNNs do not have this problem, since the prior is defined directly over the space of functions, and therefore the BNN can be made arbitrarily large without changing the functional variational inference problem. Hence, their predictions behave well as the capacity is increased, as shown in Figure 1.
+Empirically, we demonstrate fBNNs generate reasonable extrapolations for both explicit periodic priors and implicit piecewise priors. Furthermore, we show fBNNs outperform competing approaches on both small scale and large scale regression datasets. Finally, we manifest fBNNs output reliable uncertainty estimations by obtaining state of the art performance on the contextual bandits benchmarks (Riquelme et al., 2018).
+
+2 BACKGROUND
+
+2.1 VARIATIONAL INFERENCE FOR BAYESIAN NEURAL NETWORKS
+
+Given a dataset D = {(xi, yi)in=1}, a Bayesian neural network (BNN) is defined in terms of a prior p(w) on the weights, as well as the likelihood p(D|w). Variational Bayesian methods (Hinton & Van Camp, 1993; Graves, 2011; Blundell et al., 2015) attempt to fit an approximate posterior q(w) to maximize the evidence lower bound (ELBO):
+
+Lq = Eq[log p(D|w)] - KL[q(w) p(w)].
+
+(1)
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+The most commonly used variational BNN training method is Bayes By Backprop (BBB) (Blundell et al., 2015), which uses a fully factorized Gaussian approximation to the posterior, i.e. q(w) = N (w; µ, diag(2)). Using the reparameterization trick (Kingma & Welling, 2013), the gradients of ELBO towards µ,  can be computed by backpropagation, and then be used for updates.
+Most commonly, the prior p(w) is chosen for computational convenience; common choices include independent Gaussian or Gaussian mixture distributions. Other weight priors, including log-uniform priors (Kingma et al., 2015; Louizos et al., 2017) and horseshoe priors (Ghosh et al., 2018; Louizos et al., 2017), have been proposed for particular purposes such as model compression and model selection. However, the relationships of weight space priors to the functions computed by networks are difficult to characterize.
+
+2.2 STOCHASTIC PROCESSES
+A stochastic process is defined as a random function F : X  Y. For any finite subset x1:n, F can compute its marginal joint distribution over the function values F (x1:n). For example, the Gaussian Process has its marginal distributions as multivariate Gaussians, and the Student-t Process (Shah et al., 2014) has its marginal distribution as multivariate Student-t distributions.
+However, directly representing a stochastic process is difficult because X is typically infinite. Kolmogorov Extension Theorem (Øksendal, 2003) provides an alternative using finite dimensional marginal distributions. Specifically, for a collection of joint distributions x1:n , Kolmogorov Extension Theorem states that,  defines a random process F such that x1:n is the marginal distribution of F (x1:n) if  satisfies the following two conditions:
+Exchangeability For any permutation  of {1, · · · , n}, (x1:n)((y1:n)) = x1:n (y1:n).
+Consistency For any 1  m  n, x1:m (y1:m) = x1:n (y1:n)dym+1:n.
+Bayesian neural networks satisfy both exchangeablility and consistency, therefore it defines a stochastic process.
+
+2.3 SPECTRAL STEIN GRADIENT ESTIMATOR (SSGE)
+
+When applying Bayesian methods to modern probabilistic models, especially those with neural networks as components (e.g., BNNs and deep generative models), it is often the case that we have to deal with intractable densities. Examples include the marginal distribution of a non-conjugate model (e.g., the output distribution of a BNN), and neural samplers such as Generative Adversarial Networks (Goodfellow et al., 2014). A shared property of these distributions is that they are defined by a easy sampling process, despite the density is intractable. This kind of distribution is called implicit distributions (Huszár, 2017).
+
+Spectral Stein Gradient Estimator (SSGE) (Shi et al., 2018) is a recently proposed method for estimating the log density derivative function of an implicit distribution, only requiring samples from the distribution. Specifically, given a continuous differentiable density q(x), and a positive definite kernel k(x, x ) in the Stein class (Liu et al., 2016) of q, they show
+
+
+
+xi log q(x) = -
+
+Eqxi j (x) j (x),
+
+j=1
+
+(2)
+
+where {j}j1 is a series of eigenfunctions of k described by the Mercer's theorem: k(x, x ) = j µjj(x)j(x ). Then the Nyström method (Baker, 1997; Williams & Seeger, 2001) is used to
+approximate the eigenfunctions j(x) and their derivatives. The final estimator is given by truncating the sum in eq. (2) and replacing the expectation by Monte Carlo estimates.
+
+3 FUNCTIONAL VARIATIONAL BAYESIAN NEURAL NETWORKS
+3.1 FUNCTIONAL EVIDENCE LOWER BOUND (fELBO) Given dataset D = (XD, yD), variational inference in weight space is based on the equivalence between maximizing the ELBO and minimizing the KL divergence from the true posterior. Now
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+we introduce functional variational inference, where the functional ELBO (fELBO) is defined with respect to a variational posterior over functions (f : X  Y) rather than over weights.
+
+L(q) := Eq[log p(yD|f )] - KL[q(f )||p(f )].
+
+(3)
+
+Specifically, we assume a stochastic process prior p(f ) over functions. This could be a Gaussian Process, but one could also use stochastic processes without closed-form marginal densities, such as distributions over piecewise linear functions. We consider a variational posterior q(f )  Q defined in terms of a neural network with stochastic weights and/or stochastic inputs. Specifically, we sample a function from q by sampling a random noise  and reparameterize f (x) = g(x, ). For example, the standard Bayesian neural networks with Gaussian weight distributions allow this reparameterization trick (Kingma & Welling, 2013). Note that because a single vector  is shared among all input locations, it corresponds to randomness in the function, rather than observation variance; hence, the sampling of  corresponds to epistemic, rather than aleatoric, uncertainty (Depeweg et al., 2017).
+
+In theorem 1, we prove that the functional KL divergence is equal to the supremum of marginal KL divergences over all finite sets of input locations X = x1:n, which we term measurement points. Intuitively, this follows from the Kolmogorov Extension Theorem in section 2.2 which guarantees that we only need finite marginal distributions to define the stochastic process. A full proof is given in Appendix A.
+
+Theorem 1 (Functional KL Divergence). For two stochastic processes P, Q, the KL divergence is the supremum of marginal KL divergences over all finite subset of inputs x1:n:
+
+KL[P Q] = sup KL[Px1:n Qx1:n ].
+n, x1:n
+
+(4)
+
+fELBO Using this characterization of the functional KL divergence, we rewrite the fELBO:
+
+L(q) = Eq[log p(yD|f )] - sup KL[q(f X)||p(f X)]
+X
+
+= inf
+
+Eq[log p(yD|f (xD))] - KL[q(f X)||p(f X)]
+
+X
+
+(xD ,yD )D
+
+(5)
+
+:= inf LX(q).
+X
+Hence, maximizing L(q) can be viewed as a two-player game analogous to a GAN (Goodfellow et al., 2014): the generator is maximizing LX(q) with respect to q, and the discriminator is minimizing LX(q) with respect to X.
+
+Interestingly, we can show that if measurement points contains all training examples, L(q) is a lower bound of the log marginal likelihood log p(D). A proof is in Appendix B.2. Theorem 2 (Lower Bound). If X contains all training input locations XD, then
+LX(q) = log p(D) - KL[q(f X) p(f X|D)]  log p(D).
+
+3.2 FUNCTIONAL VARIATIONAL INFERENCE Now we present practical algorithms for functional variational inference.
+
+Adversarial Functional Variational Inference Analogously to GANs1, L(q) is likely to be infinite if the discriminator is completely unrestricted, because most stochastic process priors assign measure zero to the set of functions representable by a neural network (Arjovsky & Bottou, 2017). However, by limiting the capacity of the discriminator, we obtain a meaningful minimax objective which forces the generator to produce samples which resemble the true posterior. Most obviously, we can restrict the discriminator to choose measurement points of size M . Then we have the adversarial functional variational inference:
+
+max
+qQ
+
+min LX(q).
+|X|=M
+
+(6)
+
+To solve this minimax problem, we can adopt the similar inner and outer loop optimization like did in
+GANs (Goodfellow et al., 2014). In the inner loop, we minimize LX(q) with respect to X; in the outer loop, we maximize LX(q) with respect to the generator q.
+
+1The ordinary GAN objective is typically infinite for an unrestricted discriminator because the generator typically generates from a submanifold of data space.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Sampling-Based Functional Variational Inference Adversarial functional variational inference plays a minimax game, which is difficult to optimize and takes longer time for convergence (Goodfellow et al., 2014). Here we present sampling-based functional variational inference as an alternative, which only jointly optimizes a same objective like VAE (Kingma & Welling, 2013). Specifically, we replace the minimization in eq. (6) with a sampling distribution c, and then maximize the expected LX(q) under this distribution.
+
+However, without the minimization, the objective will be inclined to overfit on training locations
+because of the log likelihood term. We therefore let the measurement points X include random subset XDs of training data and denote XM = X\XDs . Then the sampling-based functional variational
+inference becomes,
+
+max
+qQ
+
+EXM c
+
+LXM ,XDs (q).
+
+(7)
+
+where XM are M points independently drawn from c. Denote f M , f D as the function values for XM , XD, respectively. By theorem 2, if X contains all of XD,
+
+LXM ,XD (q) = log p(D) - KL[q(f M , f D) p(f M , f D|D)].
+
+(8)
+
+Maximizing LXM ,XD (q) is equivalent to minimizing the KL divergence from the true posterior on points XM , XD. Therefore, another interpretation of sampling-based functional variational inference
+is that we want better posterior approximation on more "interesting" locations weighted by c.
+
+3.3 KL DIVERGENCE GRADIENTS
+
+Computing fELBO requires to compute the likelihood term and the KL divergence. Although the
+likelihood term is tractable, the KL divergence term remains intractable because we don't have the explicit formula for variational posterior q(f X|X). Note KL[q(f X) p(f X)] is given by
+
+Eq  log q(f X) + E f X(f log q(f X) - f log p(f X)) .
+
+(9)
+
+It is easy to check that the first term in eq. (9) is zero (Roeder et al., 2017). Besides that, using parametric variational posterior, the gradients f X can be computed easily by backpropagation. All we left are the log-density derivatives f log q(f X) and f log p(f X). As introduced in Sec 2.3, SSGE offers us an principled way to estimate the score function at both in-distribution samples and
+out-of-distribution samples. Therefore, we can apply SSGE to estimate the two derivatives above.
+Additionally, for priors with explicit densities like Gaussian Processes (Rasmussen, 2004), Student-t process (Shah et al., 2014) and Wishart Process (Dawid, 1981), f log p(f X) is analytic.
+
+3.4 THE ALGORITHM
+
+Throughout this paper, we mainly investigate sampling-based functional variational inference.
+
+Now we present the whole algorithm for fBNNs in Algorithm 1. Because the log likelihood term has unbiased mini-batch estimations, we estimate LX(q) with mini-batch Ds for fast computation. Specifically, we are optimizing
+
+Eq [log p(y|f (x))] - KL[q(f M , f Ds ) p(f Ds , f M )]
+(x,y)Ds
+which is also a proper lower bound of log p(Ds).
+
+(10)
+
+Algorithm 1 Functional Variational Bayesian Neural Networks (fBNNs)
+
+Require: Dataset D, sampling distribution c, variational posterior g(·), prior p (explicit or implicit).
+
+1: while  not converged do
+
+2: XM  c; DS  D
+
+3: fi = g({XM , XDS }, i; ), i = 1 · · · k.
+
+4:
+
+g1
+
+=
+
+1 k
+
+i
+
+(x,y)  log p(y|fi(x))
+
+sample measurement points sample k function values
+compute log likelihood gradients
+
+5: g2 = SSGE(p, f1:k) 6:   Optimizer(, g1 - g2)
+
+estimate KL gradients update the parameters
+
+7: end while
+
+5
+
+Under review as a conference paper at ICLR 2019
+4 RELATED WORK
+Bayesian neural networks Variational inference was first applied to neural networks by Peterson (1987) and Hinton & Van Camp (1993). More recently, Graves (2011) proposed a practical method for variational inference with fully factorized Gaussian posteriors which used a simple (but biased) gradient estimator. Improving on that work, Blundell et al. (2015) proposed an unbiased gradient estimator using the reparameterization trick of Kingma & Welling (2013). There has also been much work (Louizos & Welling, 2016; Sun et al., 2017; Zhang et al., 2017) on modeling the correlations between weights using more complex Gaussian variational posteriors. Some non-Gaussian variational posteriors have been proposed, such as Multiplicative Normalizing Flows (Louizos & Welling, 2017) and implicit distributions (Shi et al., 2017). However, all these methods place priors over the network parameters. Often, identical independent Gaussian priors are placed over the weights for convenience and the prior assumptions are not well-understood.
+Structured Priors There have been other recent attempts to train BNNs with structured priors. Flam-Shepherd et al. (2017) trained a BNN prior to mimic a GP prior, but their method still required variational inference in weight space. Noise Contrastive Priors (Hafner et al., 2018) are somewhat similar in spirit to our work in that they use a random noise prior in the function space. However, instead of doing proper Bayesian inference, the prior is incorporated by adding a regularization term to the weight-space ELBO, and is not rich enough to encourage extrapolation and pattern discovery. Neural Processes (Garnelo et al., 2018) introduces a global variable to model the dependence between data points, but their algorithm reaches optimum when the global variable is totally uninformative and the network remembers all training points. Variational Implicit Process specifies BNN priors and approximately fit a Gaussian Process for the posterior.
+Scalable Gaussian Process Gaussian processes are difficult to apply exactly to large datasets since the computational requirements scale as O(N 3) time, and as O(N 2) memory, where N is the number of training cases. Multiple approaches have been proposed to reduce the computational complexity. However, sparse GP methods (Lázaro-Gredilla et al., 2010; Snelson & Ghahramani, 2006; Titsias, 2009; Hensman et al., 2013; 2015) still suffer for very big dataset, while random feature method (Rahimi & Recht, 2008; Le et al., 2013) and KISS-GP (Wilson & Nickisch, 2015) are only applicable to specific kernels. Furthermore, these methods don't solve the problem of obtaining explicit samples of the function.
+5 EXPERIMENTS
+In this section, we present some experiments testing fBNNs' ability to extrapolate using a variety of structural motifs. We also evaluate their predictive performance on regression benchmarks and their ability to guide exploration in the contextual bandit setting.
+In all of our experiments, the variational posterior is represented as a stochastic neural network with independent Gaussian distributions over the weights, i.e. q(w) = N (w; µ, diag(2)).2 We always used the ReLU activation function unless otherwise specified. Denote xmin, xmax as dimensionwise minimal and maximal input locations, xd = xmax - xmin. We set the sampling distribution c = U[xmin - xd/2, xmax + xd/2] unless specific notice. For experiments where we used GP priors, we first fit the GP hyperparameters to maximize the marginal likelihood on subsets of the training examples, and then fixed those hyperparameters to obtain the prior for the fBNNs.
+5.1 EXTRAPOLATION USING STRUCTURED PRIORS
+Making sensible predictions outside the range of the observed data requires exploiting the underlying structure. In this section, we consider some toy datasets where fBNNs are able to use structured priors to make sensible extrapolations.
+2We note that other choices are possible, since functional variational inference imposes no requirement that epistemic uncertainty be represented in terms of a distribution over the weights of a network. (E.g., in principle, a distribution over functions could be represented with a deterministic network with stochastic inputs.) However, we stick with Gaussian distributions on the weights because it worked as well as anything else we've tried.
+6
+
+Under review as a conference paper at ICLR 2019
+
+3 2 1 0 1 2 3
+4
+
+20
+
+2
+
+(a) BBB
+
+33 22 11 00 11 22 33 4 4 20 2 4
+(b) FBNN Figure 2: Prediction on periodic structures.
+
+4
+
+20
+
+2
+
+(c) GP
+
+4
+
+5.1.1 LEARNING PERIODIC STRUCTURES
+
+Gaussian processes can model periodic structure using a periodic kernel plus a RBF kernel:
+
+k(x, x ) = 12 exp
+
+2 sin2(|x - x |/p) - l12
+
++
+
+12
+
+exp(-
+
+(x
+
+-x 2l22
+
+)2
+
+)
+
+(11)
+
+where p determines the period. In this experiment, we consider 20 inputs randomly sampled from the interval [-2, -0.5]  [0.5, 2], and targets y which are noisy observations of a periodic function: y = 2  sin(4x) + with  N (0, 0.04). We use a BNN with five hidden layers, each with 500 units. The inputs and targets were normalized to have zero mean and unit variance. For all methods, the observation noise variance was set to the true value. We compared our method with Bayes By Backprop (BBB) (Blundell et al., 2015) (with a spherical Gaussian prior on w) and Gaussian Processs. We used the trained GP as the prior of our fBNN. In each iteration, measurement points included all training examples, plus 40 points randomly sampled from [-5, 5]. We used a training budget of 20,000 iterations, and annealed the weight of the KL term from 0 to 1 linearly.
+
+As shown in Fig. 2, BBB fails to fit the training data, let alone recover the periodic pattern (as we would expect, since its prior does not encode periodic structure). The GP (as usual) fit the data well and extrapolated the period structure beyond the range of the data; we can view the GP predictions as a sort of gold standard. The fBNN was able to extrapolate similarly to the GP, although it predicted slightly smaller uncertainty. Interestingly, despite the ReLU activation functions, the fBNN made smooth predictions.
+
+5.1.2 IMPLICIT PRIORS
+Since the fBNN is based on implicit variational inference, the priors need not have convenient expressions for the marginal densities, i.e. we need not limit ourselves to GPs. In this section, we consider two implicit priors: a distribution over piecewise constant functions, and a distribution over piecewise linear functions. Appendix D.2 provides the detailed explanation on the sampling process. Some samples from these priors are shown in Figure 3.
+In each run of the experiment, we first sampled a random function from the prior, and then sampled 20 locations from [0, 0.2] and 20 locations from [0.8, 1], giving a training set of 40 data points. The standard deviation of observation noise is 0.02. In each iteration, measurement points included all training examples, plus 40 points randomly sampled from [0, 1]. We used a fully connected network with 2 hidden layers of 100 units, and tanh activations. (For this experiment, we used tanh rather than ReLU because ReLU would have been unfairly well-suited to the non-smooth priors.) The network was trained for 20,000 iterations. We show the predictive samples and variances of three different runs in Figure 3.
+As shown in Figure 3, the fBNN captured the basic structures for both piecewise constant priors and piecewise linear priors, although the posterior samples did not seem to capture the full diversity of possible explanations of the data. Interestingly, even though the tanh activation function encourages smoothness, the network learned to generate functions with sharp transitions.
+
+5.2 PREDICTIVE PERFORMANCE
+To compare with previous work on predictive performance, we next evaluated fBNN in regression experiments with publicly available datasets.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Constant
+
+Linear
+
+1.0 0.8 0.6 0.4 0.2 0.0 -0.2
+1.0 0.8 0.6 0.4 0.2 0.0 -0.2
+0.0 0.2 0.4 0.6 0.8 1.0 0.0 0.2 0.4 0.6 0.8 1.0 0.0 0.2 0.4 0.6 0.8 1.0 0.0 0.2 0.4 0.6 0.8 1.0
+Figure 3: Implicit function priors and variational posteriors. The leftmost column shows 3 prior samples. The other columns are different runs. Red dots are 40 training samples. We plot 4 posterior samples and plot the standard derivation as shaded areas.
+
+5.2.1 SMALL SCALE DATASETS
+
+Following previous work (Zhang et al., 2017), we first experiment with standard regression benchmark datasets from the UCI collection (Asuncion & Newman, 2007). In particular, we only used the datasets with less than 2000 data points so that we can fit GP hyperparameters using marginal likelihood. The datasets were randomly split into training and validation sets, comprising 90% and 10% of the data respectively. This splitting process was repeated 10 times to reduce randomness.
+Table 1: Averaged validation RMSE and log-likelihood for the regression benchmarks.
+
+Dataset
+Boston Concrete Energy Wine Yacht
+
+Validation RMSE
+
+BBB
+
+NNG
+
+Ours
+
+3.171±0.149 5.678±0.087 0.565±0.018 0.643±0.012 1.174±0.086
+
+2.742±0.125 5.019±0.127 0.485±0.023 0.637±0.011 0.979±0.077
+
+2.378±0.104 4.935±0.180 0.412±0.017 0.673±0.014 0.607±0.068
+
+Validation log-likelihood
+
+BBB
+
+NNG
+
+Ours
+
+-2.602±0.031 -3.149±0.018 -1.500±0.006 -0.977±0.017 -2.408±0.007
+
+-2.446±0.029 -3.039±0.025 -1.421±0.005 -0.969±0.014 -2.316±0.006
+
+-2.301±0.038 -3.096±0.016 -0.684±0.020 -1.040±0.013 -1.033±0.033
+
+For all datasets, we used networks with one hidden layer of 50 hidden units. For all experiments, we first fit GP hyper-parameters using marginal likelihood with a budget of 10,000 iterations. In each experiment, the fBNN was trained for 2,000 epochs. And in each iteration, measurement points included 20 training examples, plus 5 points randomly sampled from the data range.
+We compared our method with Bayes By Backprop (BBB) (Blundell et al., 2015) and Noisy Natural Gradient (NNG) (Zhang et al., 2017). In accordance with (Zhang et al., 2017), we report the standard metrics including root mean square error (RMSE) and validation log-likelihood. The results are summarized in Table 1. On most datasets, our fBNNs outperformed both BBB and NNG, sometimes by a significant margin.
+
+5.2.2 LARGE SCALE DATASETS Table 2: Averaged validation RMSE and log-likelihood for the regression benchmarks.
+
+Dataset
+Naval Protein Video Memory Video Time GPU
+
+N
+11934 45730 68784 68784 241600
+
+Test RMSE
+
+BBB
+
+FBNN
+
+1.6E-4±0.000 4.331±0.033 1.879±0.265 3.632±1.974 21.886±0.673
+
+1.2E-4±0.000 4.326±0.019 1.858±0.036 3.007±0.127 19.50±0.171
+
+Test log-likelihood
+
+BBB
+
+FBNN
+
+6.950±0.052 -2.892±0.007 -1.999±0.054 -2.390±0.040 -4.505±0.031
+
+7.130±0.024 -2.892±0.004 -2.038±0.021 -2.471±0.018 -4.400±0.009
+
+Observe that fBNNs are naturally scalable to large datasets because they access the data only through the expected log-likelihood term, which can be estimated stochastically. In this section, we verify this experimentally. We compared fBNNs and BBB with large scale UCI datasets, including Naval, Protein Structures, Video Transcoding (Memory, Time) and GPU kernel performance. We randomly split the datasets into 80% training, 10% validation, and 10% test. We used the validating set to select the hyperparameters and perform early stopping.
+
+8
+
+Under review as a conference paper at ICLR 2019
+
+Both methods were trained for 80,000 iterations.3 We used 1 hidden layer with 100 hidden units for all datasets. For the prior of the fBNNs, we use a GP with Neural Kernel Network (NKN) kernels as used in Sun et al. (2018). We note that the GP hyperparameters are fitted using minibatches of size 1000 with 10000 iterations. In each iteration, measurement sets consist of 500 training samples and 5 or 50 points from the sampling distribution c, tuned by validation performacne. We ran each experiment 5 times, and report the mean and standard deviation in Table 2.
+
+5.3 CONTEXTUAL BANDITS
+
+Table 3: Contextual bandits regret. Results are relative to the cumulative regret of the Uniform algorithm. Numbers after the algorithm correspond to the network size. We report the mean and standard derivation of the mean over 10 trials.
+
+FBNN 1 × 50 FBNN 2 × 50 FBNN 3 × 50 FBNN 1 × 500 FBNN 2 × 500 FBNN 3 × 500 MULTITASKGP BBB 1 × 50 BBB 1 × 500 BBALPHADIV PARAMNOISE NEURALLINEAR LINFULLPOST DROPOUT RMS BOOTRMS UNIFORM
+
+M. RANK 5.875 7.125 8.125 4.875 5.0 4.75 5.875 11.5 13.375 16.0 10.125 10.375 9.25 7.625 8.875 7.5 16.75
+
+M. VALUE 46.0 47.0 48.9 45.3 44.2 44.6 46.5 56.6 68.1 87.4 53.0 52.3
+NAN
+48.3 53.0 51.9 100
+
+MUSHROOM
+21.38 ± 7.00 24.57 ± 10.81 34.03 ± 13.95 21.90 ± 9.95 23.93 ± 11.59 19.07 ± 4.97 20.75 ± 2.08 24.41 ± 6.70 26.41 ± 8.71 61.00 ± 6.47 20.33 ± 13.12 16.56 ± 11.60 14.71 ± 0.67 12.53 ± 1.82 15.29 ± 3.06 18.05 ± 11.20 100.0 ± 0.0
+
+STATLOG
+8.85 ± 4.55 10.08 ± 5.66 7.73 ± 4.37 6.50 ± 2.97 7.98 ± 3.08 10.04 ± 5.09 7.25 ± 1.80 25.67 ± 3.46 51.29 ± 11.27 70.91 ± 10.22 13.27 ± 2.85 13.96 ± 1.51 19.24 ± 0.77 12.01 ± 6.11 11.38 ± 5.63 6.13 ± 1.03 100.0 ± 0.0
+
+COVERTYPE
+47.16 ± 2.39 49.04 ± 3.75 50.14 ± 3.13 47.45 ± 1.86 46.00 ± 2.01 45.24 ± 2.11 48.37 ± 3.50 58.25 ± 5.00 83.91 ± 4.62 97.63 ± 3.21 65.07 ± 3.47 64.96 ± 2.54 58.69 ± 1.17 48.95 ± 2.19 58.96 ± 4.97 53.63 ± 2.15 100.0 ± 0.0
+
+FINANCIAL
+9.90 ± 2.40 11.83 ± 2.95 14.14 ± 1.99 7.83 ± 0.77 10.67 ± 3.52 11.48 ± 2.20 8.07 ± 1.13 37.69 ± 15.34 57.20 ± 7.19 85.94 ± 4.88 17.63 ± 4.27 18.57 ± 2.02 10.69 ± 0.92 14.64 ± 3.95 10.46 ± 1.61 8.69 ± 1.30 100.0 ± 0.0
+
+JESTER
+75.55 ± 5.51 73.85 ± 6.82 74.27 ± 6.54 74.81 ± 5.57 68.88 ± 7.09 69.42 ± 7.56 76.99 ± 6.01 75.39 ± 6.32 78.94 ± 4.98 87.80 ± 5.08 74.94 ± 7.24 82.14 ± 3.64 77.76 ± 5.67 71.38 ± 7.11 72.09 ± 6.98 74.71 ± 6.00 100.0 ± 0.0
+
+ADULT
+88.43 ± 1.95 88.81 ± 3.29 89.68 ± 1.66 89.03 ± 1.78 89.70 ± 2.01 90.01 ± 1.70 88.64 ± 3.20 95.07 ± 1.57 99.21 ± 0.79 99.60 ± 1.06 95.90 ± 2.20 96.87 ± 0.92 95.00 ± 1.26 90.62 ± 2.21 95.29 ± 1.50 94.18 ± 1.94 100.0 ± 0.0
+
+CENSUS
+51.43 ± 2.34 50.09 ± 2.74 52.37 ± 3.03 50.73 ± 1.53 51.87 ± 2.38 49.73 ± 1.35 57.86 ± 8.19 63.96 ± 3.95 92.73 ± 9.13 100.41 ± 1.54 82.67 ± 3.86 78.94 ± 1.87 NAN ± NAN 58.53 ± 2.35 85.29 ± 5.85 82.27 ± 1.84 100.0 ± 0.0
+
+WHEEL
+65.05 ± 20.10 67.76 ± 25.74 68.60 ± 22.24 63.77 ± 25.80 54.57 ± 32.92 61.57 ± 21.73 64.15 ± 27.08 72.37 ± 16.87 55.09 ± 13.82 95.75 ± 12.31 54.38 ± 16.20 46.26 ± 8.40 33.88 ± 15.15 77.46 ± 27.58 75.62 ± 30.43 77.80 ± 29.55 100.0 ± 0.0
+
+One of the most important applications of uncertainty modeling is to guide exploration in settings such as bandits, Bayesian optimization (BO), and reinforcement learning. In this section, we evaluate fBNNs on a recently introduced contextual bandits benchmark (Riquelme et al., 2018). In contextual bandits problems, the agent tries to select the action with highest reward given some input context. Because the agent learns about the model gradually, it should balance between exploration and exploitation to maximize the cumulative reward. Thomposon sampling (Thompson, 1933) has shown to be extremly promising by keeping a posterior of the model and selecting the action in proportion to the posterior distribution. Therefore, the key problem of Thompson sampling is to learn a reliable Bayesian uncertainty model.
+We compared our fBNNs with the algorithms benchmarked in (Riquelme et al., 2018). We used the multi-task GP of Riquelme et al. (2018) as the prior for the fBNNs. We run the experiments for all algorithms and tasks using the default settings open sourced by Riquelme et al. (2018). For fBNNs, we also kept the same setting, including batchsize, training epochs and training frequency. Measurement sets consisted of training batches, combined with 10 points sampled from c. We ran each experiment 10 times and report the mean and standard derivation in Table 3. Similarly to Riquelme et al. (2018), we also report the mean rank and mean regret.
+As shown in Table 3, fBNNs outperformed other methods by a wide margin. Additionally, the fBNNs maintained consistent performance with various network sizes. By comparison, BBB suffered significant performance degeneration when the hidden size was increased from 50 to 500. This is consistent with our hypothesis that functional variational inference can gracefully handle networks with high capacity. We also show a BO experiment in App C.2, which also needs reliable uncertainty.
+
+6 CONCLUSIONS
+In this paper we investigate the variational inference between stochastic processes, i.e., distributions of functions. We prove the KL divergence between stochastic processes equals to the supremum of KL divergence for marginal distribution over all finite input subsets. Then we present functional variational Bayesian neural networks (fBNNs). We show our fBNNs enable to specify priors entailing rich structures, including both explicit stochastic process like GP and implicit stochastic process like piecewise constant functions. Empirically, we demonstrates fBNNs extrapolate well over various structures, estimates reliable uncertainties and scales to large datasets.
+3We tune the learning rate from [0.001, 0.01]. We tune between not annealing the learning rate or annealing it by 0.1 at 40000 iterations. We evaluate the validating set in each epoch, and select the epoch for testing based on the validation performance.
+
+9
+
+Under review as a conference paper at ICLR 2019
+ACKNOWLEDGEMENTS
+REFERENCES
+Martin Arjovsky and Léon Bottou. Towards principled methods for training generative adversarial networks. arXiv preprint arXiv:1701.04862, 2017.
+Arthur Asuncion and David Newman. Uci machine learning repository, 2007.
+Christopher T. Baker. The Numerical Treatment of Integral Equations. Clarendon Press, Oxford, 1997.
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra. Weight uncertainty in neural networks. arXiv preprint arXiv:1505.05424, 2015.
+A Philip Dawid. Some matrix-variate distribution theory: notational considerations and a bayesian application. Biometrika, 68(1):265­274, 1981.
+Stefan Depeweg, José Miguel Hernández-Lobato, Finale Doshi-Velez, and Steffen Udluft. Uncertainty decomposition in bayesian neural networks with latent variables. arXiv preprint arXiv:1706.08495, 2017.
+Daniel Flam-Shepherd, James Requeima, and David Duvenaud. Mapping gaussian process priors to bayesian neural networks. In NIPS Bayesian deep learning workshop, 2017.
+M. Garnelo, J. Schwarz, D. Rosenbaum, F. Viola, D. J. Rezende, S. M. A. Eslami, and Y. Whye Teh. Neural Processes. ArXiv e-prints, July 2018.
+Soumya Ghosh, Jiayu Yao, and Finale Doshi-Velez. Structured variational learning of bayesian neural networks with horseshoe priors. arXiv preprint arXiv:1806.05975, 2018.
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural information processing systems, pp. 2672­2680, 2014.
+Alex Graves. Practical variational inference for neural networks. In Advances in Neural Information Processing Systems, pp. 2348­2356, 2011.
+Robert M. Gray. Entropy and Infomation Theory. Springer, 2011.
+Danijar Hafner, Dustin Tran, Alex Irpan, Timothy Lillicrap, and James Davidson. Reliable uncertainty estimates in deep neural networks using noise contrastive priors. arXiv preprint arXiv:1807.09289, 2018.
+James Hensman, Nicolo Fusi, and Neil D Lawrence. Gaussian processes for big data. arXiv preprint arXiv:1309.6835, 2013.
+James Hensman, Alexander G de G Matthews, and Zoubin Ghahramani. Scalable variational Gaussian process classification. 2015.
+José Miguel Hernández-Lobato, Matthew W Hoffman, and Zoubin Ghahramani. Predictive entropy search for efficient global optimization of black-box functions. In Advances in neural information processing systems, pp. 918­926, 2014.
+Geoffrey E Hinton and Drew Van Camp. Keeping the neural networks simple by minimizing the description length of the weights. In Proceedings of the sixth annual conference on Computational learning theory, pp. 5­13. ACM, 1993.
+Ferenc Huszár. Variational inference using implicit distributions. arXiv preprint arXiv:1702.08235, 2017.
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. arXiv preprint arXiv:1312.6114, 2013.
+10
+
+Under review as a conference paper at ICLR 2019
+Diederik P Kingma, Tim Salimans, and Max Welling. Variational dropout and the local reparameterization trick. In Advances in Neural Information Processing Systems, pp. 2575­2583, 2015.
+Miguel Lázaro-Gredilla, Joaquin Quiñonero Candela, Carl Edward Rasmussen, and Aníbal R Figueiras-Vidal. Sparse spectrum Gaussian process regression. Journal of Machine Learning Research, 11(Jun):1865­1881, 2010.
+Quoc Le, Tamás Sarlós, and Alex Smola. Fastfood -- approximating kernel expansions in loglinear time. In Proceedings of the international conference on machine learning, volume 85, 2013.
+Jaehoon Lee, Yasaman Bahri, Roman Novak, Samuel S Schoenholz, Jeffrey Pennington, and Jascha Sohl-Dickstein. Deep neural networks as gaussian processes. arXiv preprint arXiv:1711.00165, 2017.
+Qiang Liu, Jason Lee, and Michael Jordan. A kernelized stein discrepancy for goodness-of-fit tests. In International Conference on Machine Learning, pp. 276­284, 2016.
+James Robert Lloyd, David K Duvenaud, Roger B Grosse, Joshua B Tenenbaum, and Zoubin Ghahramani. Automatic construction and natural-language description of nonparametric regression models. In AAAI, pp. 1242­1250, 2014.
+Christos Louizos and Max Welling. Structured and efficient variational deep learning with matrix gaussian posteriors. In International Conference on Machine Learning, pp. 1708­1716, 2016.
+Christos Louizos and Max Welling. Multiplicative normalizing flows for variational bayesian neural networks. arXiv preprint arXiv:1703.01961, 2017.
+Christos Louizos, Karen Ullrich, and Max Welling. Bayesian compression for deep learning. In Advances in Neural Information Processing Systems, pp. 3288­3298, 2017.
+Anton Mallasto and Aasa Feragen. Learning from uncertain curves: The 2-wasserstein metric for gaussian processes. In Advances in Neural Information Processing Systems, pp. 5660­5670, 2017.
+Radford M Neal. BAYESIAN LEARNING FOR NEURAL NETWORKS. PhD thesis, University of Toronto, 1995.
+Radford M Neal et al. Mcmc using hamiltonian dynamics. Handbook of Markov Chain Monte Carlo, 2(11), 2011.
+Bernt Øksendal. Stochastic differential equations. In Stochastic differential equations, pp. 65­84. Springer, 2003.
+Carsten Peterson. A mean field theory learning algorithm for neural networks. Complex systems, 1: 995­1019, 1987.
+Ali Rahimi and Benjamin Recht. Random features for large-scale kernel machines. In Advances in neural information processing systems, pp. 1177­1184, 2008.
+Carl Edward Rasmussen. Gaussian processes in machine learning. In Advanced lectures on machine learning, pp. 63­71. Springer, 2004.
+Carl Edward Rasmussen and Zoubin Ghahramani. Occam's razor. In Advances in neural information processing systems, pp. 294­300, 2001.
+Carl Edward Rasmussen and Christopher KI Williams. Gaussian processes for machine learning. 2006.
+Carlos Riquelme, George Tucker, and Jasper Snoek. Deep bayesian bandits showdown: An empirical comparison of bayesian deep networks for thompson sampling. arXiv preprint arXiv:1802.09127, 2018.
+Geoffrey Roeder, Yuhuai Wu, and David Duvenaud. Sticking the landing: An asymptotically zero-variance gradient estimator for variational inference. arXiv preprint arXiv:1703.09194, 2017.
+11
+
+Under review as a conference paper at ICLR 2019
+Amar Shah, Andrew Wilson, and Zoubin Ghahramani. Student-t processes as alternatives to gaussian processes. In Artificial Intelligence and Statistics, pp. 877­885, 2014.
+Jiaxin Shi, Shengyang Sun, and Jun Zhu. Kernel implicit variational inference. arXiv preprint arXiv:1705.10119, 2017.
+Jiaxin Shi, Shengyang Sun, and Jun Zhu. A spectral approach to gradient estimation for implicit distributions. International Conference on Machine Learning, 2018.
+Edward Snelson and Zoubin Ghahramani. Sparse Gaussian processes using pseudo-inputs. In Advances in neural information processing systems, pp. 1257­1264, 2006.
+Casper Kaae Sønderby, Jose Caballero, Lucas Theis, Wenzhe Shi, and Ferenc Huszár. Amortised map inference for image super-resolution. arXiv preprint arXiv:1610.04490, 2016.
+Shengyang Sun, Changyou Chen, and Lawrence Carin. Learning structured weight uncertainty in bayesian neural networks. In Artificial Intelligence and Statistics, pp. 1283­1292, 2017.
+Shengyang Sun, Guodong Zhang, Chaoqi Wang, Wenyuan Zeng, Jiaman Li, and Roger Grosse. Differentiable compositional kernel learning for gaussian processes. arXiv preprint arXiv:1806.04326, 2018.
+William R Thompson. On the likelihood that one unknown probability exceeds another in view of the evidence of two samples. Biometrika, 25(3/4):285­294, 1933.
+Michalis Titsias. Variational learning of inducing variables in sparse Gaussian processes. In Artificial Intelligence and Statistics, pp. 567­574, 2009.
+Zi Wang and Stefanie Jegelka. Max-value entropy search for efficient bayesian optimization. arXiv preprint arXiv:1703.01968, 2017.
+Christopher KI Williams and Matthias Seeger. Using the Nyström method to speed up kernel machines. In Advances in Neural Information Processing Systems, pp. 682­688, 2001.
+Andrew Wilson and Hannes Nickisch. Kernel interpolation for scalable structured gaussian processes (kiss-gp). In International Conference on Machine Learning, pp. 1775­1784, 2015.
+Andrew G Wilson, Elad Gilboa, Arye Nehorai, and John P Cunningham. Fast kernel learning for multidimensional pattern extrapolation. In Advances in Neural Information Processing Systems, pp. 3626­3634, 2014.
+Guodong Zhang, Shengyang Sun, David Duvenaud, and Roger Grosse. Noisy natural gradient as variational inference. arXiv preprint arXiv:1712.02390, 2017.
+12
+
+Under review as a conference paper at ICLR 2019
+
+A STOCHASTIC PROCESSES
+
+A.1 BASIC MEASURE THEORY NOTATIONS
+
+-system A -system is a collection of subsets that is closed under finitely many intersections. -algebra generated by cylinder sets Suppose
+
+X  RT = {f : f (t)  R, t  T}
+
+is a set of real-valued functions. Let B(R) denote the Borel subsets of R. A cylinder subset of X is a finitely restricted set defined as
+
+Ct1,··· ,tn (B1, · · · , Bn) = {f  X : f (ti)  Bi, 1  i  n}
+
+Each
+
+Gt1,··· ,tn = {Ct1,··· ,tn (B1, · · · , Bn) : Bi  B(R), 1  i  n}
+
+is a -system that generates a -algebra t1,··· ,tn . Then the family of subsets
+
+
+
+FX
+
+=
+
+
+n=1
+
+
+ti T,in
+
+t1,···
+
+,tn
+
+is an algebra that generates the cylinder -algebra for X.
+
+Definition 1 (KL divergence (Gray, 2011)). Given two probability measures q and p on measure space (, B), the KL divergence of q with respect to p is defined as
+
+KL[q p] = sup KLQ[q p].
+Q
+
+(12)
+
+where the supremum is over all finite measurable partitions Q of .
+
+A.2 PUSHFORWARD AND KOLOMOGROV EXTENSION THEOREM
+
+Definition 2 (Pushforward measure). Given probability spaces (X, X , µ) and (Y, Y , ), we say that measure  is a pushforward of µ if (A) = µ(T -1(A)) for a measurable T : X  Y and any A  Y , denoted by  = µ  T -1.
+Definition 3 (Canonical projection map). Let T be an arbitrary index set, and {(t, Ft)}tT be some collection of measurable spaces. For each subset J  I  T , define J = tJ t. We call IJ the canonical projection map from I to J if
+
+IJ (w) = w|J  J , w  I .
+
+(13)
+
+Theorem 3 (Kolmogorov extension theorem). Let T be an arbitrary index set. (, F) is a standard
+
+measure space, whose product space on T is (T , F T ). For each finite subset I  T , suppose we
+
+have a probability measure µI on I that satisfies the following compatibility relation: For each
+
+finite subset J  I  T , we have
+
+µJ = µI  I-1 J .
+
+(14)
+
+Then there exists a unique probability measure µ on T such that  finite subset I  T ,
+
+µI = µ  T-1 I .
+
+(15)
+
+In Gaussian processes, µ is a Borel measure on a separable Hilbert space (H, B(H)). µI is a marginal Gaussian measure at any finite set (i.e., I) of input positions (Mallasto & Feragen, 2017).
+
+A.3 PROOF
+
+We first introduce several lemmas for proving the theorem.
+
+Lemma 4.
+
+
+
+GX
+
+=
+
+
+n=1
+
+
+ti T,in
+
+Gt1,···
+
+,tn
+
+is a -system. And (GX ) generates the same cylinder -algebra of X as FX .
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Definition 4. Let H be a set of functions, define its T-set  (H) as
+ (H) = T\{t|t  T, ST\{t}, s.t. ST\{t} × Rt = H}
+Here × represents product-algebra. Intuitively,  (H) represents all timesteps that restricts the functions in H. Or we can say if some t doesn't belong to  (H), then function values of t can be any number in real line R. Lemma 5. For any set G  (GX ), its T-set  (G) is countable.
+
+Proof. We build the sigma-algebra (GX ) through an iterative process. We begin by H0 = GX , in each iteration, let
+
+Hi+1 = Hi  {Hc|H  Hi}, Hi+1 = Hi+1  {Hj |H1, H2, · · ·  Hi}.
+j
+
+(16)
+
+Recursively applying this extension, we can generate (GX ) = H.
+Because  (Hc) =  (H), and countable union of countable sets is still countable. We know the two updates above keep the countablility of its T-set. Therefore, G  (GX ),  (G) is countable.
+
+Theorem 6. For two stochastic processes P, M on functional measure space (T, F T), the KL divergence between P and M ,
+KL[P M ] = sup KL[PTf MTf ],
+Tf
+Where the supremum is over all finite subsets, and PTf , MTf represent the marginal distribution of P, M on Tf , respectively.
+
+Proof. Sketches
+
+1. The cylinder -algebra defines a -algebra (GX ) on the function space. By Lemma 4.
+2. Each set in the (GX ) is only related to countable number of timesteps. By Lemma 5.
+3. Any finite measurable partitions are related to countable number of timesteps, thus correspond to the marginal distribution over a countable subset by an inclusion map. Therefore the KL between stochastic processes reduces to the KL over marginal distributions of countable subsets.
+4. KL over marginal distributions of countable subsets can be represented as supremum of KL over marginal distributions over its finite subsets.
+
+By Definition 1,
+
+KL[P
+
+M]
+
+=
+
+sup
+QT
+
+KLQT
+
+[P
+
+M ],
+
+where the sup is over all finite measurable partitions of the function space, denoted by QT :
+
+k
+QT = {Q(1T), . . . , Q(kT)| Q(iT) = T, Q(iT)  F T are disjoint sets, k  N+}
+i=1
+
+k
+By Lemma 5,  (Q(iT) ) is countable. Therefore, Tc :=  (Q(iT) ) is countable.
+i=1
+
+Consider the canonical projection mapping TTc , which induces a partition on Tc , denoted by QTc :
+Q(iT)c = TTc (Q(iT) ).
+The pushforward measure defined by this mapping is
+
+PTc = P  T-1 Tc , MTc = M  T-1 Tc .
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Then we have
+
+KL[P
+
+M]
+
+=
+
+sup
+QT
+
+KLQT
+
+[P
+
+M]
+
+= sup
+QT
+
+i
+
+P
+
+(Q(iT) )
+
+log
+
+P (Q(iT) ) M (Q(iT) )
+
+= sup sup
+Tc QTc
+
+i
+
+PTc (Q(iT)c
+
+)
+
+log
+
+PTc (Q(iT)c ) MTc (Q(iT)c )
+
+= sup KL[PTc MTc ]
+Tc
+
+(17) (18) (19) (20)
+
+Denote F (Tc) as the collection of all finite subsets of Tc. For any finite set Tj  F (Tc), we
+denote PTj as the pushforward of P on finite set Tj. According to Kolmogorov Extension Theorem (Theorem 3), PTj is the marginal distribution of P at Tj. Because Tc is countable, we have
+
+KL[P M ] = sup KL[PTc MTc ]
+Tc
+= sup sup KL[PTc MTc ]
+Tc Tj F (Tc)
+
+(21) (22)
+
+Note for any finite subset Tj, we can build a finite measurable partition QT such that its Tc equals to Tj. Let 1, 2 be any two-element partition of . In fact, we can let QT be a partition with 2|Tj| subsets, that each subset is a cylinder subset with timesteps in Tj and for each timestep, the function values belong to 1 or 2. Therefore, we have shown the set {Tj|Tj  F (Tc), Tc} contains all finite subsets.
+On the other hand, every element in {Tj|Tj  F (Tc), Tc} is a finite subset, we know {Tj|Tj  F (Tc), Tc} equals to the collection of all finite subsets.
+Therefore we have proven the theorem.
+
+B ADDITIONAL THEORECTICAL RESULTS
+
+B.1 OPTIMIZE GP HYPERPARAMETERS USING MINI-BATCH
+
+Consider multivariate Gaussian distribution,
+
+1 log p(y|0, K) = - 2 (y
+
+K- 1y + log |K|) + const
+
+Its
+
+derivative
+
+towards
+
+K
+
+is
+
+-
+
+1 2
+
+K- 1(K
+
+-
+
+yy
+
+)K- 1, which attains zero only at K
+
+= yy .
+
+Therefore we have
+
+log p(y|0, K)  log p(y|0, K )
+
+(23)
+
+Gaussian Process optimization maximizes data likelihood log p(y|0, K). According to eq. (23), its maximum is obtained at K = yy . In contrast, mini-batch GP optimization maximimzes expected subset likelihood ES log p(yS|0, KS) , with S being a subset. According to eq. (23), log p(yS|0, KS )  log p(yS|0, ySyS ). Therefore, its maximum is also obtained at K = yy .
+Based on the results above, for expressive enough kernels, mini-batch optimized GP reaches the same maximum as full-batch optimized GP, which justifies using mini-batch MLE for hyperparameter optimization.
+
+B.2 PROOF FOR EVIDENCE LOWER BOUND
+This section provides proof for theorem 2. Let XM = X\XD be measurement points which aren't in the training data.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+(a) BBB
+
+(b) FBNN
+
+(c) GP
+
+Figure 4: Prediction on Mauna datasets. We compare BBB, FBNN and GP.
+
+Proof.
+
+KL[q(f D, f M ) p(f D, f M |D)] = Eq
+
+log
+
+q(f D, f M ) p(f D, f M |D)
+
+= Eq
+
+log
+
+q(f D, f M )p(D) p(yD|f D)p(f D, f M )
+
+= log p(D) - LX(q)
+
+(24) (25)
+
+C ADDITIONAL EXPERIMENTS
+
+C.1 TIME-SERIES EXTRAPOLATION
+Besides the toy experiments, we would like to examine the extrapolation behavior of our method on real-world datasets. Here we consider a classic time-series prediction problem concerning the concentration of CO2 in the atmosphere at the Mauna Loa Observatory, Hawaii (Rasmussen & Williams, 2006). The training data is given from 1958 to 2003 (with some missing values). Our goal is to model the prediction for an equally long period after 2003 (2004-2048). In Figure 4 we draw the prediction results given by BBB, fBNN, and GP. We used the same BNN architecture for BBB and fBNN: an ReLU network with 2 hidden layers, each with 100 units, and the input is a normalized year number augmented by its sin transformation, whose period is set to be one year. This special design allows both BBB and fBNN to fit the periodic structure more easily. Both models are trained for 30k iterations by the Adam optimizer, with learning rate 0.01 and batch size 20. For fBNN the prior is the same as the GP experiment, whose kernel is a combination of RBF, RBF×PER (period set to one year), and RQ kernels, as suggested in Rasmussen & Williams (2006). Measurement points include 20 training samples and 10 points sampled from U[1958, 2048], and we jointly train the prior GP hyperparameters with fBNN.
+In Figure 4 we could see that the performance of fBNN closely match the exact prediction by GP. Both of them give visually good extrapolation results that successfully model the long-term trend, local variations, and periodic structures. In constrast, weight-space prior and inference (BBB) neither captures the right periodic structure, nor does it give meaningful uncertainty estimates.
+
+C.2 BAYESIAN OPTIMIZATION
+
+In this section, we adopt Bayesian Optimization to explore the advantage of coherent posteriors. Specifically, we use Max Value Entropy Search (MES) (Wang & Jegelka, 2017), which trys to maximize the information gain about the minimum value y ,
+
+1 t(x) = H(p(y|Dt, x)) - H(p(y|Dt, x, y ))  K
+y
+
+[ y
+
+(x)(y (x)) (y (x))
+
+- log((y
+
+(x)))]
+
+Where  and  are probability density function and cumulative density function of a standard normal
+
+distribution, respectively. The y is randomly sampled from the posterior of function minimas and
+
+y
+
+(x)
+
+=
+
+µt (x)-y t (x)
+
+.
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+(a) RBF
+
+(b) ArcCosine
+
+(c) Matern12
+
+Figure 5: Bayesian Optmization. We plot the minimal value found along iterations. We compare fBNN, BBB and Random Feature methods for three kinds of functions corresponding to RBF, ArcCosine and Matern12 GP kernels. We plot mean and 0.2 standard derivation as shaded areas.
+
+With a probabilistic model, we can compute or estimate the mean µt(x) and standard deviation t(x). However, to compute the MES acquisition funtion, samples y of function minimas are required as well, which leads to bigger difficulties. Typically when we model the data with a GP, we can get the posterior on a specific set of points but we don't have access to the extremes of the underlying function. In comparison, if the function posterior is represented parameterically, we can perform gradient decent easily and optimize for approximating function minimas.
+We use 3-dim functions sampled from some Gaussian Process prior for bayesian optimization. Concretely, we experiment with samples from RBF, ArcCosine and Matern12 kernels. We compare three parametric approaches: fBNN, BBB and Random Feature (Rahimi & Recht, 2008). For fBNN, we use the true kernel as functional priors. In contrast, ArcCosine and Matern12 kernels do not have simple explicit random feature expressions, therefore we use RBF random features for all three kernels. When looking for minimas, we sample 10 optimals y . For each minima, we perform gradient descent along the parametric function posterior with 30 different starting points. We use 500 dimensions for random feature. We use network with 5 × 100 for fBNN. For BBB, we select the network within 1 × 100, 3 × 100. Because of the similar issue in Figure 1, using larger networks won't help for BBB. We use batch size 30 for both fBNN and BBB. The measurement points contain 30 training points and 30 points uniformly sampled from the known input domain of functions. We train fBNN and BBB for 20000 iterations and anneal the coefficient of log likelihood term linearly from 0 to 1 for the first 10000 iterations. The results with 10 runs are shown in Figure 5.
+As seen from Figure 5, fBNN and Random feature outperform BBB by a large margin on all three functions. We also observe fBNN performs slightly worse than random feature in terms of RBF priors. Because random feature method is exacly a GP with RBF kernel asympotically, it sets a high standard for the parametric approaches. In contrast, fBNN outperforms random feature for both ArcCosine and Matern12 functions. This is because of the big discrepency between such kernels and RBF random features. Because fBNN uses true kernels, it models the function structures better. This experiment hightlights a key advantage of fBNN, that fBNN can learn parametric function posteriors for various priors.
+C.3 TEXTURE EXTRAPOLATION
+In this section we perform a texture extrapolation experiment.
+With a texture image, texutre extrapolation tries to recover the missing region based on the observed region in some image. We use a image of 224 × 224, and the central 60 × 80 region is removed from the image. Treating each pixel as a data point, this forms 45376 training examples and 4800 test examples. Because the training size is too big to be afforded by a standard Gaussian Process. Previous GP methods (Wilson et al., 2014; Sun et al., 2018) investigate the additive structure of such patterns and take advantage of the Kronecker structure of the kernel matrix. However, such kronecker structure is only applicable to limited structures. This experiment adopts fBNN with a GAN-like generator to perform the recovery.
+We use a GP prior with the kernel used in (Sun et al., 2018). We firstly train the prior hyperparameters with GP regression with batch size 300. For the variational network, we use a GAN-like generator to generate the whole image starting from a 40 dimensional U[0, 1] noise. The network arranges as
+17
+
+Under review as a conference paper at ICLR 2019
+
+(a) Training
+
+(b) FBNN w.o. missing
+
+(c) FBNN w. missing
+
+Figure 6: Texture Extrapolation for FBNN. For FBNN w.o. missing, the measurement points does not contain the missing region; for FBNN w. missing, the measurement points contain the missing region.
+
+40-(64*7*7)-(32*28*28)-(16*112*112)-(8*224*224)-(1*224*224). We use filter size 5 and leaky ReLU activation. Measurement points include 800 training points and 200 points sampled from the missing region (FBNN w. missing). We use learning rate 0.003 to train fBNN for 40000 iterations and anneal the kl coefficient from 0 to 1 linearly for the first 20000 iterations. We also evalute a setting where measurement points only contain training regions (FBNN w.o. missing). The results are shown in Figure 6.
+As shown in Figure 6, fBNN correctly recovers the underlying structure and extrapolates to the missing region. However, if measurement points do not contain missing regions, fBNN fits training set perfectly but fails to extrapolate. This highlights the extrapolation effect of measurement points.
+D IMPLEMENTATION DETAILS
+D.1 INJECTED NOISES FOR GAUSSIAN PROCESS PRIORS
+For Gaussian Process prior, p(f X) is multivariate Gaussian distribution, which has an explicit formula. Therefore, we can compute the gradients f log p(f X) analytically.
+In practice, we found that the GP kernel matrix suffers from statbility issues. To stabilize the gradients computation, we propose to inject a small amount of Gaussian noise on the function values, i.e., to instead estimate the gradients of KL[q p pp], where p = N (0, 2) is the noise distribution. This is like the instance-noise trick that is commonly used for stabilizing GAN training (Sønderby et al., 2016). Note that injecting the noise on the GP prior is equivalent to have a kernel matrix K + 2I, which have more stable properties. Beyond that, injecting the noise on the parametric variational posterior doesn't affect the reparameterization trick either. Therefore all the previous estimation formulas still applies.
+D.2 IMPLICIT PRIORS
+Our method is applicable implicit priors. We experiment with piecewise constant prior and piecewise linear prior. Concretely, we randomly generate a function f : [0, 1]  R with the specific structure. To sample piecewise functions, we first sample n  Poisson(3.), then we have n + 1 pieces within [0, 1]. We uniformly sample n locations from [0, 1] as the changing points. For piecewise constant functions, we uniformly sample n + 1 values from [0, 1] as the function values in each piece; For piecewise linear functions, we uniformaly sample n + 1 values for the values at first n + 1 locations, we force f (1) = 0.. Then we connect together each piece by a straight line.
+
+18
+
+

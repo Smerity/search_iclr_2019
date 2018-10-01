@@ -1,0 +1,408 @@
+Under review as a conference paper at ICLR 2019
+META-LEARNING NEURAL BLOOM FILTERS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+There has been a recent trend in training neural networks to replace data structures that have been crafted by hand, with an aim for faster execution, better accuracy, or greater compression. In this setting, a neural data structure is instantiated by training a network over many epochs of its inputs until convergence. In many applications this expensive initialization is not practical, for example streaming algorithms -- where inputs are ephemeral and can only be inspected a small number of times. In this paper we explore the learning of approximate set membership over a stream of data in one-shot via meta-learning. We propose a novel memory architecture, the Neural Bloom Filter, which we show can be more compressive than Bloom Filters and several existing memory-augmented neural networks.
+1 INTRODUCTION
+One of the simplest questions one can ask of a set of data is whether or not a given query is contained within it. Is q, our query, a member of S, our chosen set of observations? This set membership query arises across many computing domains; from databases, network routing, and firewalls. One could query set membership by storing S in its entirety and comparing q against each element. However, more space-efficient solutions exist.
+The original and most widely implemented approximate set membership data-structure is the Bloom Filter (Bloom, 1970). It works by storing sparse distributed codes, produced from randomized hash functions, within a binary vector. The Bloom-filter trades off space for an allowed false positive rate, which arises due to hash collisions. However its error is one-sided; if an element q is contained in S then it will always be recognized. It never emits false negatives.
+One can find Bloom Filters embedded within a wide range of production systems; from network security (Geravand & Ahmadi, 2013), to block malicious IP addresses; databases, such as Google's Bigtable (Chang et al., 2008), to avoid unnecessary disk lookups; cryptocurrency (Hearn & Corallo, 2012), to allow clients to filter irrelevant transactions; search, such as Facebook's typeahead search (Adams, 2010), to filter pages which do not contain query prefixes; and program verification (Dillinger & Manolios, 2004), to avoid recomputation over previously observed states.
+While the main appeal of Bloom Filters is favourable compression, another important quality is the support for dynamic updates. New elements can be inserted in O(1) time. This is not the case for all approximate set membership data structures. For example, perfect hashing saves  40% space over Bloom Filters but requires a pre-processing stage that is polynomial-time in the number of elements to store (Dietzfelbinger & Pagh, 2008). Whilst the static set membership problem is interesting, it limits the applicability of the algorithm. For example, in a database application that is serving a high throughput of write operations, it may be intractable to regenerate the full data-structure upon each batch of writes.
+We thus focus on the data stream computation model (Muthukrishnan et al., 2005), where input observations are assumed to be ephemeral and can only be inspected a constant number of times -- usually once. This captures many real-world applications: network traffic analysis, database query serving, and reinforcement learning in complex domains. Devising an approximate set membership data structure that is not only more compressive than Bloom Filters, but can be applied to either dynamic or static sets, could have a significant performance impact on modern computing applications. In this paper we investigate this problem using memory-augmented neural networks and meta-learning.
+1
+
+Under review as a conference paper at ICLR 2019
+
+We build upon the recently growing literature on using neural networks to replace algorithms that are configured by heuristics, or do not take advantage of the data distribution. For example, Bloom Filters are indifferent to the data distribution. They have near-optimal space efficiency when data is drawn uniformly from a universe set (Carter et al., 1978) (maximal-entropy case) but (as we shall show) are sub-optimal when there is more structure. Prior studies on this theme have investigated compiler optimization (Cummins et al., 2017), computation graph placement (Mirhoseini et al., 2017), and data index structures such as b-trees (Kraska et al., 2018).
+In the latter work, Kraska et al. (2018) explicitly consider the problem of static set membership. By training a neural network over a fixed S (URLs from Google's Transparency Report) with negative examples in the form of held-out URLs, they observe 36% space reduction over a conventional Bloom Filter1. Crucially this requires iterating over the storage set S a large number of times to embed its salient information into the weights of a neural network classifier. For a new S this process would have to be repeated from scratch.
+Instead of learning from scratch, we draw inspiration from the few-shot learning advances obtained by meta-learning memory-augmented neural networks (Santoro et al., 2016; Vinyals et al., 2016). In this setup, tasks are sampled from a common distribution and a network learns to specialize to (learn) a given task with few examples. This matches very well to applications where many Bloom Filters are instantiated over different subsets of a common data distribution. For example, a Bigtable database usually contains one Bloom Filter per SSTable file. For a large table that contains Petabytes of data, say, there can be over 100, 000 separate instantiated data-structures which share a common row key format and query distribution. Meta-learning allows us to exploit this common redundancy.
+The main contributions of this paper are (1) A new sparse memory-augmented neural network architecture, the Neural Bloom Filter, which learns to write to memory using a distributed write scheme, and (2) An empirical evaluation of the Neural Bloom Filter meta-learned on one-shot approximate set membership problems of varying structure.
+We compare with the classical Bloom Filter alongside other memory-augmented neural networks such as the Differentiable Neural Computer (Graves et al., 2016) and Memory Networks (Sukhbaatar et al., 2015). We find when there is no structure, that differentiates the query set elements and queries, the Neural Bloom Filter learns a solution similar to a Bloom Filter derivative (a Bloom-g filter (Qiao et al., 2011)), but when there is a lot of structure the solution can be considerably more space-efficient.
+
+2 BACKGROUND
+
+2.1 APPROXIMATE SET MEMBERSHIP
+
+The problem of exact set membership is to state whether or not a given query q belongs to a set of
+
+n distinct observations S = {x1, . . . , xn} where xi are drawn from a universe set U . By counting
+
+the number of distinct subsets of size n it can be shown that any such exact set membership tester
+
+requires at least log2
+
+|U | n
+
+bits of space. To mitigate the space dependency on |U |, which can be
+
+prohibitively large, one can relax the constraint on perfect correctness. Approximate set membership
+
+allows for a false positive rate of at most . Specifically we answer q  A(S) where A(S)  S and
+
+p(q  A(S) - S)  . It can be shown2 the space requirement for approximate set membership of uniformly sampled observations is at least n log2( 1 ) bits (Carter et al., 1978) which can be achieved
+with perfect hashing. So for a false positive rate of 1%, say, this amounts to 6.6 bits per element.
+
+In contrast to storing raw or compressed elements this can be a huge space saving, for example
+
+ImageNet images require 108 KB per image on average when compressed with JPEG, an increase
+
+of over four orders of magnitude.
+
+1The space saving increases to 41% when an additional trick is incorporated, in discretizing and re-scaling the classifier outputs and treating the resulting function as a hash function to a bit-map.
+2By counting the minimal number of A(S) sets required to cover all S  U .
+2
+
+Under review as a conference paper at ICLR 2019
+2.2 BLOOM FILTER
+The Bloom Filter (Bloom, 1970) is a data structure which solves the dynamic approximate set membership problem with near-optimal space complexity. It assumes access to k uniform hash functions hi : U  {1, . . . , m}, i = 1, . . . , k such that p(hi(x) = j) = 1/m independent of prior hash values or input x. The Bloom Filter's memory M  [0, 1]m is a binary string of length m which is initialized to zero. Writes are performed by hashing an input x to k locations in M and setting the corresponding bits to 1, M [hi(x)]  1; i = 1, . . . , k. For a given query q the Bloom Filter returns true if all corresponding hashed locations are set to 1 and returns false otherwise: Query(M, q) := M [h1(q)]  M [h2(q)]  . . .  M [hk(q)]. This incurs zero false negatives, as any previously observed input must have enabled the corresponding bits in M , however there can be false positives due to hash collisions. To achieve a false positive rate of with minimal space one can set k = log2 (1/ ) and m = n log2 (1/ ) log2 e, where e is Euler's number. The resulting space is a factor of log2 e  1.44 from the optimal static lower bound given by Carter et al. (1978).
+2.3 MEMORY-AUGMENTED NEURAL NETWORKS
+Recurrent neural networks such as LSTMs retain a small amount of memory via the recurrent state. However this is usually tied to the number of trainable parameters in the model. There has been recent interest in augmenting neural networks with a larger external memory. The method for doing so, via a differentiable write and read interface, was first popularized by the Neural Turing Machine (NTM) (Graves et al., 2014) and its successor the Differentiable Neural Computer (DNC) (Graves et al., 2016) in the context of learning algorithms, and by Memory Networks (Sukhbaatar et al., 2015) in the context of question answering.
+Memory Networks store embeddings of the input in separate rows of a memory matrix M . Reads are performed via a differentiable content-based addressing operation. Given a query embedding q we take some similarity measure D (e.g. cosine similarity, or negative euclidean distance) against each row in memory and apply a softmax to obtain a soft address vector a  eD(q,M). A read is then a weighted sum over memory r  aT M . The NTM and DNC use the same content-based read mechanism, but also learns to write. These models can arbitrate whether to write to slots in memory with similar content (content-based writes), temporally ordered locations, or unused memory.
+When it comes to capacity, there has been consideration to scaling both the DNC and Memory Networks to very large sizes using sparse read and write operations (Rae et al., 2016; Chandar et al., 2016). However another way to increase the capacity is to increase the amount of compression which occurs in memory. Memory Nets can create compressive representations of each input, but cannot compress jointly over multiple inputs because they are hard-wired to write one slot per timestep. The NTM and DNC can compress over multiple slots in memory because they can arbitrate writes across multiple locations, but in practice seem not to be well designed for this as they choose very sharp read and write addresses.
+The Kanerva Machine (Wu et al., 2018) tackles memory-wide compression using a distributed write scheme to jointly compose and compress its memory contents. The model uses content-based addressing over a separate learnable addressing matrix A, instead of the memory M . The network therefore learns where inputs should be stored in memory, independent of its contents, however because A contains the same number of rows as the memory M , the memory capacity is tied to the number of trainable parameters.
+3 MODEL
+The Neural Bloom Filter (NBF) is a memory-augmented neural network which takes inspiration from the Kanerva Machine and the Bloom Filter. It uses a differentiable hashing scheme to address memory, and incorporates differentiable read and write mechanisms. The neural network can briefly be described as a purely additive memory architecture, that sparsely addresses memory with a feedforward network, with two necessary modifications. The first is that we force the final layer of the addressing network that maps from d (small) to m (no. memory slots) to be non-trainable, to ensure the number of trainable model parameters is independent of memory size, and thus the memory can be resized post-training. The second is that we (try to) prevent the network from fixating on some addresses in memory and ignoring others, by sphering (or, whitening) the addressing queries.
+3
+
+Under review as a conference paper at ICLR 2019
+
+xz
+
+zca q
+
+A N(0,I)
+
+M
+a w
+
+r w z
+
+o
+
+Figure 1: Overview of the Neural Bloom Filter architecture.
+
+The full architecture depicted in Figure 1 consists of a controller network which encodes the input to an embedding z  fenc(x) and transforms this to a write word w  fw(z) and a query s  fq(z). An addressing network takes s and performs a sphering transformation to produce a query q with decorrelated dimensions, via a moving average ZCA transformation. We choose ZCA over other decorrelation approaches as this worked well in practice, e.g. over PCA. We describe the exact moving zca transformation in full in Supplementary A.1. The address a  k(qT A) is computed over memory via content-based attention between q and a non-learnable address matrix A. Here, k denotes a sparse softmax where the top k similarities are retained. The sparse softmax is not uniformly differentiable but the network can learn to optimize it in practice, alike to the ReLU activation function. The addressing matrix A  N (0, I) is chosen to be a fixed sample of Gaussian random variables. It simply represents a linear map from queries to memory addresses; we keep it non-trainable to avoid the coupling of model parameters and memory capacity.
+A write is performed by running the controller and addressing network, and then additively writing w to the top k addresses in a, Mt+1  Mt + waT . This scheme is inspired by the Bloom Filter, replacing a logical OR for an addition, and it ensures that we do not have to backpropagatethrough-time (BPTT) over sequential writes. A read is performed by also running the controller and addressing network and retrieving the top k addresses from M . These rows in memory are multiplied element-wise with the address weight r  M a and are fed through an MLP with the residual inputs w and z. We found this to be more powerful than the conventional read operation r  aT M used by the DNC and Memory Networks, as it allows for non-linear interactions between rows in memory at the time of read. An overview of the operations is described below.
+
+Controller network
+
+Write
+
+z  fenc(x)
+
+Encoder network
+
+w  fw(z)
+
+Write word
+
+s  fq(z)
+
+Raw query
+
+Addressing network
+
+(1) Run controller & address network (2) Mt+1  Mt + waT Additive write
+Read (1) Run controller & address network
+
+q  moving zca(s) De-correlated query (2) r  M a
+
+a  k(qT A)
+
+Sparse address (3) o  fout([r, w, z])
+
+Read operation Output network
+
+We further discuss the motivation for decorrelation in the addressing network, and the model's relation to uniform hashing in Appendix A.2. We also discuss how the model could be implemented for O(log m) time reads and writes, where m is the size of memory, and with an O(1) network space overhead by avoiding the storage of A, the addressing matrix, in Appendix A.3.
+
+4 SPACE COMPLEXITY
+In this section we discuss space lower bounds for the approximate set membership problem when there is some structure to the storage or query set. This can help us formalize why and where neural networks may be able to beat classical lower bounds to this problem.
+The n log2 (1/ ) lower bound from Carter et al. (1978) assumes that all subsets S  U of size n, and all queries q  U have equal probability. Whilst it is instructive to bound this maximum-entropy scenario, which we can think of as `worst case', most applications of approximate set membership e.g. web cache sharing, querying databases, or spell-checking, involve sets and queries that are not
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+Class-Based Familiarity
+-- Memory Network -- Bloom Filter -- DNC -- LSTM -- Neural Bloom Filter
+
+Non-Uniform Instance-Based Familiarity
+
+Uniform Instance-Based Familiarity
+
+Failed at task for larger no. items
+
+(a) (b)
+
+(c)
+
+Figure 2: Sampling strategies on MNIST. Space consumption at 1% FPR.
+
+sampled uniformly. For example, the elements within a given set may be highly dependent, there may be a power-law distribution over queries, or the queries and sets themselves may not be sampled independently.
+A more general space lower bound can be defined by an information theoretic argument from communication complexity (Yao, 1979). Namely, approximate set membership can be framed as a two-party communication problem between Alice, who observes the set S and Bob, who observes a query q. They can agree on a shared policy  in which to communicate. For given inputs S, q they can produce a transcript AS,q = (S, q)  Z which can be processed g : Z  0, 1 such that P (g(AS,q) = 1|q  S)  . Bar-Yossef et al. (2004) shows that the maximum transcript size is greater than the mutual information between the inputs and transcript: maxS,q |AS,q|  I(S, q; AS,q) = H(S, q) - H(S, q|AS,q). Thus we note problems where we may be able to use less space than the classical lower bound are cases where the entropy H(S, q) is small, e.g. our sets are highly non-uniform, or cases where H(S, q|AS,q) is large, which signifies that many query and set pairs can be solved with the same transcript.
+5 EXPERIMENTS
+Our experiments aim to explore scenarios inspired by real-world scenarios where there are varying levels of structure in the storage sets S and queries q. We consider four neural architectures, the LSTM, DNC, Memory Network, and Neural Bloom Filter. The meta-learning training setup consits of sampling n unique items to store (via one of several sampling schemes, discussed in the next section) and performing a succession of insertion operation and query operations. For the RNNs (LSTM and DNC) insertion corresponds to unrolling the network over the inputs and outputting a state. For the Memory Network and Neural Bloom Filter, insertions are performed in parallel. After insertion there is a query operation; elements from the set are queried, and sampled queries from outside of the set are queried -- with target labels of 1 and 0 respectively. The specific query mechanism for each baseline is described in Appendix B.1. We employ a cross-entropy loss on the binary classification target and then backpropagate jointly through the query and insertion operations. We compared the space (in bits) of the model's state to a Bloom Filter at a given false positive rate. In the style of Kraska et al. (2018) we also include a (smaller) `backup Bloom Filter' which stores any false negatives the network makes, the space of this is also accounted for -- see Appendix B for full details. We use a convnet encoder for image inputs, and a character LSTM for test inputs, for all models. We sweep over hyper-parameters relating to model size to obtain their smallest operating size, see Appendix B.2 for further details on the encoder and hyper-parameters .
+5.1 SAMPLING STRATEGIES ON MNIST
+We chose three simple set membership tasks that have a graded level of structure and use images as an input type, namely images from MNIST. The input modality is not of principle importance, one could have designed similar tasks with textual input for example, but it is interesting to see how the model operate on images before moving to text. We experiment with three different levels of inherent structure to the sampling of sets and queries, however crucially all problems are approxi-
+5
+
+Under review as a conference paper at ICLR 2019
+
+Address
+
+Full Model
+
+Constant write words:
+
+Memory Contents
+(a) (b) (c)
+Figure 3: Memory access visualization. Three different learned solutions to class-based familiarity. We train three Neural Bloom Filter variants with 10 memory slots and visualize memory addressing a and contents M¯ , broken down by class. Solutions share broad correspondence to known algorithms: (a) Bloom-g filters, (b) Bloom Filters, (c) Perfect hashing.
+mate set membership tasks that can be solved by a Bloom Filter. They do not require generalization or familiarity to the sensitivity of a particular precision. (1) Class-based familiarity, each set of images is sampled with the constraint that they arise from the same randomly-sampled class. (2) Non-uniform instance-based familiarity, the images are sampled without replacement from an exponential distribution. (3) Uniform instance-based familiarity, where each subset contains images sampled uniformly without replacement. See Appendix C for further details on the task setup.
+In the class-based sampling task we see in Figure 2a we see that the DNC, LSTM and Neural Bloom Filter are able to significantly outperform the classical Bloom Filter when images are sampled by class. The Memory Network is able to solve the task with a word size of only 2, however this corresponds to a far greater number of bits per element, 64 versus the Bloom Filter's 9.8 (to a total size of 4.8kb), and so the overall size was prohibitive. The DNC, LSTM, and Neural Bloom Filter are able to solve the task with 500 elements at 1.1kb , 217b, and 382b; a 4.3×, 22×, and 12× saving respectively. For the non-uniform sampling task in Figure 2b we see the Bloom Filter is preferable for less than 500 stored elements, but is overtaken thereafter. At 1000 elements the DNC, LSTM, and Neural Bloom Filter consume 7.9kb, 7.7kb, and 6.8kb respectively which corresponds to a 17.6%, 19.7%, and 28.6% reduction over the 9.6kb Bloom Filter. In the uniform sampling task shown in Figure 2c, there is no structure to the sampling of S. The two architectures which rely on BPTT essentially fail to solve the task at some threshold of storage size. The Neural Bloom Filter solves it with 6.8kb (using a memory size of 50 and word size of 2). If the Neural Bloom Filter were trained at low precision -- say 5 bits per element which is a demonstrated capacity of RNN activations (Collins et al., 2016) -- the overall space would be 5.8kb; still 20% larger than the Bloom Filter.
+The overall conclusion from these sets of experiments is that the classical Bloom Filter is unlikely to be matched (or beaten) by a meta-learned memory-augmented neural network when there is no structure to the data, however in the case of imbalanced data, or highly dependent sets that share common attributes, we do see space savings.
+5.2 MEMORY ACCESS ANALYSIS
+We wanted to understand whether the Neural Bloom Filter is able to learn `where' to store inputs in memory, as well as what to store. In other memory-augmented neural networks, such as the DNC and Memory Networks, there is no direct correspondence between the contents of an input and where it should be organized in memory. The Neural Bloom Filter has the ability do this, but it may not choose to in practice. We investigated this for the MNIST class-based familiarity task, giving the model 10 memory slots, each with a word size of 2 and a top k addressing of k = 3. We train three models to near-perfect accuracy; (1) the full model, (2) an ablated model where the write
+6
+
+Under review as a conference paper at ICLR 2019
+
+Storage Size (kb)
+
+5% FPR
+
+1.4 1.2
+
+model
+LSTM Neural Bloom Filter
+
+1.0 Bloom Filter
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+50 10#0 Items1s5to0red 200
+
+2.0 1.5 1.0 0.5 250 50
+
+1% FPR 10#0 Items1s5to0red 200
+
+3.5 3.0 2.5 2.0 1.5 1.0 0.5 250
+
+50
+
+0.1% FPR 10#0 Items1s5to0red 200
+
+Figure 4: Database task. Models are trained up to sets of size 200 (dashed line).
+
+250
+
+words are fixed to be a constant w  1, and (3) an ablated model with w  1 and a simpler linear read operator r  aT M . We visualize the average write address and memory contents broken down by class. The full model, shown in Figure 3a learns to place some classes in particular slots, e.g. images from class 1 are mostly placed in slot 5, however most are very distributed. Inspecting the memory contents it is clear the write word encodes a unique 2D token for each class. This solution bears resemblance with Bloom-g Filters (Qiao et al., 2011) where elements are spread across a smaller memory with the same hashing scheme as Bloom Filters, but a unique token is stored in each slot instead of a constant 1-bit value. With the model ablated to store only 1s in Figure 3b we see it chooses to allocate semantic addressing codes for some classes (e.g. 0 and 1) however for other classes it uses a distributed address. E.g. for class 3 the model prefers to uniformly spread its writes across memory slot 1, 4, and 8. The model solution is similar to that of Bloom Filters, with distributed addressing codes as a solution -- but no information in the written words themselves. By inspecting the determinant of the average addresses, we find they are not linearly separable. Thus the output MLP fout computes a non-linearly separation. When we force the read operation to be linear in Figure 3c, this is no longer possible and the network learns to produce linearly separable addresses for each class. This solution has a correspondence with perfect hashing as now each (unobserved) input class will map to a unique slot in memory.
+5.3 DATABASE QUERIES
+We look at a task inspired by database interactions. NoSQL databases, such as Bigtable and Cassandra, use a single string-valued row key, which is used to index the data. The database is comprised of a union of files (e.g. SSTables) storing contiguous row key chunks. Bloom Filters are used to determine whether a given query q lies within the stored set. We emulate this setup by constructing a universe of strings, that is alphabetically ordered, and by sampling contiguous ranges (to represent a given SSTable). We choose unique tokens in GigaWord v5 news corpus to comprise as a universe, which consists of 2.5M words. We train models with up to 200 unique strings in a set, and extrapolate to larger sizes. We evaluate the models on a held-out test set.
+We see in Figure 4 that the neural architectures perform best for larger false positive rates. For a storage size of 200 we observe a 6× space reduction (200b vs 1.2kb) when using the Neural Bloom Filter over the classical Bloom Filter. For smaller false positive rates, e.g. 0.1% this gap reduces to a 20% reduction (2.5kb vs 3kb) which decreases during the extrapolation phase. Interestingly the performance degradation of the LSTM is quite smooth between in-sample set sizes (< 200) and out-of-sample sizes (> 200). We hypothesize the LSTM is smoothly forgetting earlier inputs. We also train the Neural Bloom Filter up to a storage size of 5000 and compare to Bloom Filters and Cuckoo Filters in Table 1, where we see 3 - 40× space reduction. Although 5000 is still small, it is relevant to the NOSQL database-scenario where SSTables (say) are typically kept small, e.g < 50MB. We would expect 5000 unique keys in an average Bigtable SSTable if the stored values were 100kB per row.
+6 RELATED WORK
+There have been a large number of Bloom Filter variants published; from Counting Bloom Filters which support deletions (Fan et al., 2000), Bloomier Filters which store functions vs sets (Chazelle et al., 2004), Compressed Bloom Filters which use arithmetic encoding to compress the storage set (Mitzenmacher, 2002), and Cuckoo Filters which use cuckoo hashing to reduce redundancy within
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+5% FPR 1% FPR 0.1% FPR
+
+Neural Bloom Filter 871b 1.5kb 24.5kb
+
+Bloom Filter 31.2kb 47.9kb 72.2kb
+
+Cuckoo Filter 33.1kb 45.3kb 62.6kb
+
+Table 1: Database task. Storing 5000 elements.
+
+the storage vector (Fan et al., 2014). Although some of these variants focus on better compression, they do not achieve this by specializing to the data distribution.
+One of the few works which do address data-dependence are Weighted Bloom Filters (Bruck et al., 2006; Wang et al., 2015). They work by modulating the number of hash functions used to store or query each input, dependent on its storage and query frequency. This requires estimating a large number of separate storage and query frequencies. The Neural Bloom Filter in contrast is a more general solution to non-uniform S sets. The encoder may be able to learn the statistics of the data distribution during the meta-learning phase and represent these in its parametric weights. However it can also take advantage of dependent sets where the entropy H(S) may be low but the frequency of each element is uniform (e.g. such as row keys in a database).
+Sterne (2012) proposes a neurally-inspired set membership data-structure that works by replacing the randomized hash functions with a randomly-wired computation graph of OR and AND gates. The false positive rate is controlled analytically by modulating the number of gates and the overall memory size. However there is no learning or specialization to the data with this setup. Bogacz & Brown (2003) investigates a learnable neural familiarity module, which serves as a biologically plausible model of familiarity mechanisms in the brain, namely within the perirhinal cortex. However this has not shown to be empirically effective at exact matching.
+Kraska et al. (2018) consider the use of a neural network to classify the membership of queries to a fixed set S. Here the network itself is more akin to a perfect hashing setup where multiple epochs are required to find a succinct holistic representation of the set, which is embedded into the weights of the network. In their case this search is performed by gradient-based optimization. We emulate their experimental comparison approach but instead propose a memory architecture that represents the set as activations in memory, versus weights in a network.
+7 CONCLUSION
+In many situations neural networks are not a suitable replacement to Bloom Filters and their variants. The Bloom Filter is robust to changes in data distribution, and adversarial attacks, because it delivers a bounded false positive rate for any sampled subset, unlike a neural network. However in this paper we consider the questions, "When might a neural network provide better compression than a Bloom Filter?" and "What kind of neural architecture is practical?". We see that a model which uses an external memory with an adaptable capacity, avoids BPTT with a feed-forward write scheme, and learns to address its memory, is the most promising option in contrast to popular memory models such as DNCs and LSTMs. We term this model the Neural Bloom Filter due to the analogous incorporation of a hashing scheme, commutative write scheme, and multiplicative read mechanism.
+The Neural Bloom Filter relies on settings where cost of learning to query is possible and will be a net benefit to a population of existing bloom filters. That is, because we rely on meta-learning, we need situations where we have an off-line dataset (both of stored elements and queries) that is similar enough to future data that we wish to store. In the case of a large database we think this is warranted, a database with 100, 000 separate set membership data structures will benefit from a single (or periodic) meta-learning training routine that can run on a single machine and sample from the currently stored data, generating a large number of efficient data-structures. We envisage the space cost of the network to be amortized by sharing it across many neural bloom filters, and the time-cost of executing the network to be offset by the continuous acceleration of dense linear algebra on modern hardware, and the ability to batch writes and queries efficiently. A promising future direction would be to investigate the feasibility of this approach in a production system.
+
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Keith Adams. The life of a typeahead query, 2010. URL https://www.facebook.com/ Engineering/videos/432864835468/. [Online, accessed 01-August-2018].
+Ziv Bar-Yossef, Thathachar S Jayram, Ravi Kumar, and D Sivakumar. An information statistics approach to data stream and communication complexity. Journal of Computer and System Sciences, 68(4):702­732, 2004.
+Burton H Bloom. Space/time trade-offs in hash coding with allowable errors. Communications of the ACM, 13(7):422­426, 1970.
+Rafal Bogacz and Malcolm W Brown. Comparison of computational models of familiarity discrimination in the perirhinal cortex. Hippocampus, 13(4):494­524, 2003.
+Jehoshua Bruck, Jie Gao, and Anxiao Jiang. Weighted bloom filter. In Information Theory, 2006 IEEE International Symposium on, pp. 2304­2308. IEEE, 2006.
+Larry Carter, Robert Floyd, John Gill, George Markowsky, and Mark Wegman. Exact and approximate membership testers. In Proceedings of the tenth annual ACM symposium on Theory of computing, pp. 59­65. ACM, 1978.
+Sarath Chandar, Sungjin Ahn, Hugo Larochelle, Pascal Vincent, Gerald Tesauro, and Yoshua Bengio. Hierarchical memory networks. arXiv preprint arXiv:1605.07427, 2016.
+Fay Chang, Jeffrey Dean, Sanjay Ghemawat, Wilson C Hsieh, Deborah A Wallach, Mike Burrows, Tushar Chandra, Andrew Fikes, and Robert E Gruber. Bigtable: A distributed storage system for structured data. ACM Transactions on Computer Systems (TOCS), 26(2):4, 2008.
+Bernard Chazelle, Joe Kilian, Ronitt Rubinfeld, and Ayellet Tal. The bloomier filter: an efficient data structure for static support lookup tables. In Proceedings of the fifteenth annual ACM-SIAM symposium on Discrete algorithms, pp. 30­39. Society for Industrial and Applied Mathematics, 2004.
+Jasmine Collins, Jascha Sohl-Dickstein, and David Sussillo. Capacity and trainability in recurrent neural networks. arXiv preprint arXiv:1611.09913, 2016.
+Chris Cummins, Pavlos Petoumenos, Zheng Wang, and Hugh Leather. End-to-end deep learning of optimization heuristics. In Parallel Architectures and Compilation Techniques (PACT), 2017 26th International Conference on, pp. 219­232. IEEE, 2017.
+Martin Dietzfelbinger and Rasmus Pagh. Succinct data structures for retrieval and approximate membership. In International Colloquium on Automata, Languages, and Programming, pp. 385­ 396. Springer, 2008.
+Peter C Dillinger and Panagiotis Manolios. Bloom filters in probabilistic verification. In International Conference on Formal Methods in Computer-Aided Design, pp. 367­381. Springer, 2004.
+Bin Fan, Dave G Andersen, Michael Kaminsky, and Michael D Mitzenmacher. Cuckoo filter: Practically better than bloom. In Proceedings of the 10th ACM International on Conference on emerging Networking Experiments and Technologies, pp. 75­88. ACM, 2014.
+Li Fan, Pei Cao, Jussara Almeida, and Andrei Z Broder. Summary cache: a scalable wide-area web cache sharing protocol. IEEE/ACM Transactions on Networking (TON), 8(3):281­293, 2000.
+Shahabeddin Geravand and Mahmood Ahmadi. Bloom filter applications in network security: A state-of-the-art survey. Computer Networks, 57(18):4047­4064, 2013.
+Alex Graves, Greg Wayne, and Ivo Danihelka. Neural turing machines. arXiv preprint arXiv:1410.5401, 2014.
+Alex Graves, Greg Wayne, Malcolm Reynolds, Tim Harley, Ivo Danihelka, Agnieszka GrabskaBarwin´ska, Sergio Go´mez Colmenarejo, Edward Grefenstette, Tiago Ramalho, John Agapiou, et al. Hybrid computing using a neural network with dynamic external memory. Nature, 538 (7626):471, 2016.
+9
+
+Under review as a conference paper at ICLR 2019
+Mike Hearn and Matt Corallo. BIPS: Connection Bloom filtering, 2012. URL https://github. com/bitcoin/bips/blob/master/bip-0037.mediawiki. [Online; accessed 01August-2018].
+Norman P Jouppi, Cliff Young, Nishant Patil, David Patterson, Gaurav Agrawal, Raminder Bajwa, Sarah Bates, Suresh Bhatia, Nan Boden, Al Borchers, et al. In-datacenter performance analysis of a tensor processing unit. In Computer Architecture (ISCA), 2017 ACM/IEEE 44th Annual International Symposium on, pp. 1­12. IEEE, 2017.
+Lukasz Kaiser, Ofir Nachum, Aurko Roy, and Samy Bengio. Learning to remember rare events. In International Conference on Learning Representations, 2017.
+Tim Kraska, Alex Beutel, Ed H Chi, Jeffrey Dean, and Neoklis Polyzotis. The case for learned index structures. In Proceedings of the 2018 International Conference on Management of Data, pp. 489­504. ACM, 2018.
+Azalia Mirhoseini, Hieu Pham, Quoc V. Le, Benoit Steiner, Rasmus Larsen, Yuefeng Zhou, Naveen Kumar, Mohammad Norouzi, Samy Bengio, and Jeff Dean. Device placement optimization with reinforcement learning. In Proceedings of the 34th International Conference on Machine Learning, volume 70, pp. 2430­2439. PMLR, 2017.
+Michael Mitzenmacher. Compressed bloom filters. IEEE/ACM Transactions on Networking (TON), 10(5):604­612, 2002.
+Shanmugavelayutham Muthukrishnan et al. Data streams: Algorithms and applications. Foundations and Trends in Theoretical Computer Science, 1(2):117­236, 2005.
+Yan Qiao, Tao Li, and Shigang Chen. One memory access bloom filters and their generalization. In INFOCOM, 2011 Proceedings IEEE, pp. 1745­1753. IEEE, 2011.
+Jack W Rae, Jonathan J Hunt, Ivo Danihelka, Timothy Harley, Andrew W Senior, Gregory Wayne, Alex Graves, and Tim P Lillicrap. Scaling memory-augmented neural networks with sparse reads and writes. In Advances in Neural Information Processing Systems, pp. 3621­3629, 2016.
+Adam Santoro, Sergey Bartunov, Matthew Botvinick, Daan Wierstra, and Timothy Lillicrap. Metalearning with memory-augmented neural networks. In Proceedings of the 33rd International Conference on Machine Learning, pp. 1842­1850, 2016.
+Philip Sterne. Efficient and robust associative memory from a generalized bloom filter. Biological cybernetics, 106(4-5):271­281, 2012.
+Sainbayar Sukhbaatar, Arthur Szlam, Jason Weston, and Rob Fergus. End-to-end memory networks. In Proceedings of the 28th International Conference on Neural Information Processing SystemsVolume 2, pp. 2440­2448. MIT Press, 2015.
+Oriol Vinyals, Charles Blundell, Timothy Lillicrap, Koray Kavukcuoglu, and Daan Wierstra. Matching networks for one shot learning. In Proceedings of the 30th International Conference on Neural Information Processing Systems, pp. 3637­3645. Curran Associates Inc., 2016.
+Xiujun Wang, Yusheng Ji, Zhe Dang, Xiao Zheng, and Baohua Zhao. Improved weighted bloom filter and space lower bound analysis of algorithms for approximated membership querying. In International Conference on Database Systems for Advanced Applications, pp. 346­362. Springer, 2015.
+Yan Wu, Greg Wayne, Alex Graves, and Timothy Lillicrap. The kanerva machine: A generative distributed memory. In International Conference on Learning Representations, 2018.
+Andrew Chi-Chih Yao. Some complexity questions related to distributive computing (preliminary report). In Proceedings of the eleventh annual ACM symposium on Theory of computing, pp. 209­213. ACM, 1979.
+10
+
+Under review as a conference paper at ICLR 2019
+
+A FURTHER MODEL DETAILS
+
+A.1 MOVING ZCA
+
+The moving ZCA was computed by taking moving averages of the first and second moment, cal-
+culating the ZCA matrix and updating a moving average projection matrix zca. This is only done during training, at evaluation time zca is fixed. We describe the update below for completeness.
+
+Input: s  fq(z) µt+1  µt + (1 - )s¯ t+1  t + (1 - ) sT s U, s,  svd( - µ2)
+W  U U T / (s) zca  zca + (1 - )W q  s zca
+
+First moment Second moment Calculate singular values Calculate full ZCA matrix ZCA moving average
+
+(1) (2) (3) (4)
+(5) (6) (7)
+
+In practice we do not compute the singular value decomposition at each time step to save computational resources, but instead calculate it and update  every T steps. We scale the discount in this case  = /T .
+
+A.2 RELATION TO UNIFORM HASHING
+We can think of the decorrelation of s, along with the sparse content-based attention with A, as a hash function that maps s to several indices in M . For moderate dimension sizes of s (256, say) we note that the Gaussian samples in A lie close to the surface of a sphere, uniformly scattered across it. If q, the decorrelated query, were to be Gaussian then the marginal distribution of nearest neighbours rows in A will be uniform. If we chose the number of nearest neighbours k = 1 then this implies the slots in M are selected independently with uniform probability. This is the exact hash function specification that Bloom Filters assume. Instead we use a continuous (as we choose k > 1) approximation (as we decorrelate s  q vs Gaussianize) to this uniform hashing scheme, so it is differentiable and the network can learn to shape query representations.
+
+A.3 EFFICIENT ADDRESSING
+We discuss some implementation tricks that could be employed for a production system. One can avoid the linear-time addressing operation k(qT A) by using an approximate k-nearest neighbour index, such as locality-sensitive hashing, to extract the nearest neighbours in A. The use of an approximate nearest neighbour index has been empirically considered for scaling memory-augmented neural networks (Rae et al., 2016; Kaiser et al., 2017) however this was used for attention on M directly. As M is dynamic the knn requires frequent re-building as memories are stored or modified. This architecture is simpler -- A is fixed and so the approximate knn can be built once.
+To ensure the size of the network (which can be shared across many memory instantiations) is independent of the number of slots in memory m we can avoid storing A. Because it is a fixed sample of random variables that are generated from a deterministic random number generator we can instead store a set of integer seeds that can be used to re-generate the rows of A. We can let the i-th seed ci, say represented as a 16-bit integer, correspond to the set of 16 rows with indices 16i, 16i + 1, . . . , 16i + 15. If these rows need to be accessed, they can be regenerated on-the-fly by ci. The total memory cost of A is thus m bits, where m is the number of memory slots3.
+Putting these two together it is possible to query and write to a Neural Bloom Filter with m memory slots in O(log m) time, where the network consumes O(1) space. It is worth noting, however, the Neural Bloom Filter's memory is often much smaller than the corresponding classical Bloom Filter's memory, and in many of our experiments is even smaller than the number of unique elements to store. Thus dense matrix multiplication can still be preferable - especially due to its acceleration on GPUs and TPUs (Jouppi et al., 2017) - and a dense representation of A is not inhibitory. As model
+3One can replace 16 with 32 if there are more than one million slots
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+optimization can become application-specific, we do not focus on these implementation details and use the model in its simplest setting with dense matrix operations.
+
+B SPACE COMPARISON
+
+For each task we compare the model's memory size, in bits, at a given false positive rate -- usually chosen to be 1%. For our neural networks which output a probability p = f (x) one could select an operating point  such that the false positive rate is . In all of our experiments the neural network outputs a memory (state) s which characterizes the storage set. Let us say SPACE(f, ) is the minimum size of s, in bits, for the network to achieve an average false positive rate of . We could compare SPACE(f, ) with SPACE(Bloom Filter, ) directly, but this would not be a fair comparison as our network f can emit false negatives.
+
+To remedy this, we employ the same scheme as Kraska et al. (2018) where we use a `backup' Bloom
+
+Filter with false positive rate  to store all false negatives. When f (x) <  we query the backup
+
+Bloom Filter. Because the overall false positive rate is + (1 - ), to achieve a false positive rate
+
+of at most  (say 1%) we can set =  = /2. The number of elements stored in the backup bloom
+
+filter is equal to the number of false negatives, denoted nfn. Thus the total space can be calcu-
+
+lated, TOTAL SPACE(f,)
+
+=
+
+SPACE(f,
+
+ 2
+
+)
+
++
+
+nf n
+
+*
+
+SPACE(Bloom
+
+Filter,
+
+ 2
+
+).
+
+We
+
+compare this quantity for different storage set sizes.
+
+B.1 QUERY ARCHITECTURE
+For the MemNet and DNC the query operation is a content-based attention, and then the value of the maximum similarity is fed through an MLP. We tried passing the full attention vector through an MLP, however we found this to be slow to learn (in terms of sample efficiency as well as wall time). The DNC is trained with a feed-forward controller, so we do not need to account for the state of an LSTM (say) controller, alongside the external memory.
+For the DNC we choose to query the memory directly, versus performing a read operation with the DNC, because the DNC read requires the maintenance of a link matrix L  Rm×m which grows quadratically with the memory size m.
+For the LSTM we feed the state and embedded query directly through an MLP, and for the neural bloom filter we feed the read words r, and embeddings of the query z, w (as shown in Figure 1) through an MLP.
+
+B.2 ENCODER ARCHITECTURE
+For the MNIST experiments we used a 3-layer convolutional neural network with 64 filters followed by a two-layer feed-forward network with 64&128 hidden-layers respectively. The number of trainable parameters in the Neural Bloom Filter (including the encoder) is 243, 437 which amounts to 7.8Mb at 32-bit precision. We did not optimize the encoder architecture to be lean, as we consider it part of the library in a sense. For example, we do not count the size of the hashing library that an implemented Bloom Filter relies on, which may have a chain of dependencies, or the package size of TensorFlow used for our experiments. Nevertheless we can reason that when the Neural Bloom Filter is 4kb smaller than the classical, such as for the non-uniform instance-based familiarity in Figure 2b, we would expect to see a net gain if we have a collection of at least 1, 950 data-structures. We imagine this could be optimized quite significantly, by using 16-bit precision and perhaps using more convolution layers or smaller feed-forward linear operations.
+For the database experiments we used an LSTM character encoder with 256 hidden units followed by another 256 feed-forward layer. The number of trainable parameters in the Neural Bloom Filter 419, 339 which amounts to 13Mb. One could imagine optimizing this by switching to a GRU or investigating temporal convolutions as encoders.
+
+B.3 HYPER-PARAMETERS
+We swept over the following hyper-parameters, over the range of memory sizes displayed for each task. We computed the best model parameters by selecting those which resulted in a model consum-
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+ing the least space as defined in Appendix B. This depends on model performance as well as state size.
+The Memory Networks memory size was fixed to equal the input size (as the model does not arbitrate what inputs to avoid writing).
+
+Memory Size (DNC, NBF) Word Size (MemNets, DNC, NBF) Hidden Size (LSTM) Sphering Decay  (NBF) Learning Rate (all)
+
+{2, 4, 8, 16, 32, 64, 96, 128} {2, 4, 6, 8, 10}
+{2, 4, 8, 16, 32, 64, 96, 128} {0.9, 0.95, 0.99} {1e-4, 5e-5}
+
+Table 2: Hyper-parameters considered
+
+C EXPERIMENT DETAILS
+For the class-based familiarity task, and uniform sampling task, the model was trained on the training set and evaluated on the test set. For the class-based task sampling, a class is sampled at random and S is formed from a random subset of images from that class. The queries q are chosen uniformly from either S or from images of a different class.
+For the non-uniform instance-based familiarity task we sampled images from an exponential distribution. Specifically we used a fix permutation of the training images, and from that ordering chose p(ith image)  0.999i for the images to store. The query images were selected uniformly. We used a fixed permutation (or shuffle) of the images to ensure most probability mass was not placed on images of a certain class. I.e. by the natural ordering of the dataset we would have otherwise almost always sampled 0 images. This would be confounding task non-uniformity for other latent structure to the sets. Because the network needed to relate the image to its frequency of occurence for task, the models were evaluated on the training set. This is reasonable as we are not wishing for the model to visually generalize to unseen elements in the setting of this exact-familiarity task. We specifically want the network weights to compress a map of image to probability of storage.
+For the database task a universe of 2.5M unique tokens were extracted from GigaWord v5. We shuffled the tokens and placed 2.3M in a training set and 250K in a test set. These sets were then sorted alphabetically. A random subset, representing an SSTable, was sampled by choosing a random start index and selecting the next n elements, which form our set S. Queries are sampled uniformly at random from the universe set. Models are trained on the training set and evaluated on the test set.
+
+D EFFECT OF SPHERING
+
+We see the benefit of sphering in Figure 5 where the converged validation performance ends up at a higher state. Investigating the memory fill rate, we see this is because the model is ignoring many more rows than is necessary. This is likely due to the tunnel vision effect of sparse addressing, where the model finds a local minima in continually storing and accessing the same rows in memory.
+
+Validation AUC % Memory used
+
+1.0 0.9 0.8 0.7
+
+50 45 Sphering enabled 40 Sphering disabled 35 30
+
+0.6 0.5 0.40
+
+Sphering enabled Sphering disabled 200000 Tr4a0i0n0in0g0 St6e0p0s000 800000
+
+25 20 15
+0
+
+200000 Tr4a0i0n0in0g0 St6e0p0s000 800000
+
+(a) (b)
+
+Figure 5: The effect of sphering the query vector on performance in the uniform MNIST sampling task.
+
+13
+
+

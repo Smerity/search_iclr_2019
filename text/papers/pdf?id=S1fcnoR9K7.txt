@@ -1,0 +1,909 @@
+Under review as a conference paper at ICLR 2019
+LEARNING WITH RANDOM LEARNING RATES
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Hyperparameter tuning is a bothersome step in the training of deep learning models. One of the most sensitive hyperparameters is the learning rate of the gradient descent. We present the All Learning Rates At Once (Alrao) optimization method for neural networks: each unit or feature in the network gets its own learning rate sampled from a random distribution spanning several orders of magnitude. This comes at practically no computational cost. Perhaps surprisingly, stochastic gradient descent (SGD) with Alrao performs close to SGD with an optimally tuned learning rate, for various architectures and problems. Alrao could save time when testing deep learning models: a range of models could be quickly assessed with Alrao, and the most promising models could then be trained more extensively. This text comes with a PyTorch implementation of the method, which can be plugged on an existing PyTorch model.
+1 INTRODUCTION
+Hyperparameter tuning is a notable source of computational cost with deep learning models (Zoph and Le, 2016). One of the most critical hyperparameters is the learning rate of the gradient descent (Theodoridis, 2015, p. 892). With too large learning rates, the model does not learn; with too small learning rates, optimization is slow and can lead to local minima and poor generalization (Jastrzebski et al., 2017; Kurita, 2018; Mack, 2016; Surmenok, 2017). Although popular optimizers like Adam (Kingma and Ba, 2015) come with default hyperparameters, fine-tuning and scheduling of the Adam learning rate is still frequent (Denkowski and Neubig, 2017), and we suspect the default setting might be somewhat specific to current problems and architecture sizes. Such hyperparameter tuning takes up a lot of engineering time. These and other issues largely prevent deep learning models from working out-of-the-box on new problems, or on a wide range of problems, without human intervention (AutoML setup, (Guyon et al., 2016)).
+We propose All Learning Rates At Once (Alrao), an alteration of standard optimization methods for deep learning models. Alrao uses multiple learning rates at the same time in the same network. By sampling one learning rate per feature, Alrao reaches performance close to the performance of the optimal learning rate, without having to try multiple learning rates. Alrao can be used on top of various optimization algorithms; we tested SGD and Adam (Kingma and Ba, 2015). Alrao with Adam typically led to strong overfit with good train but poor test performance (see Sec. 4), and our experimental results are obtained with Alrao on top of SGD.
+Alrao could be useful when testing architectures: an architecture could first be trained with Alrao to obtain an approximation of the performance it would have with an optimal learning rate. Then it would be possible to select a subset of promising architectures based on Alrao, and search for the best learning rate on those architectures, fine-tuning with any optimizer.
+Alrao increases the size of a model on the output layer, but not on the internal layers: this usually adds little computational cost unless most parameters occur on the output layer. This text comes along with a Pytorch implementation usable on a wide set of architectures.
+Related Work. Automatically using the "right" learning rate for each parameter was one motivation behind "adaptive" methods such as RMSProp (Tieleman and Hinton, 2012), AdaGrad (Duchi et al., 2011) or Adam (Kingma and Ba, 2015). Adam with its default setting is currently considered the default go-to method in many works (Wilson et al., 2017), and we use it as a baseline. However, further global adjustement of the learning rate in Adam is common (Liu et al., 2017). Many other
+1
+
+Under review as a conference paper at ICLR 2019
+
+heuristics for setting the learning rate have been proposed, e.g., (Schaul et al., 2013); most start with the idea of approximating a second-order Newton step to define an optimal learning rate (LeCun et al., 1998).
+Methods that directly set per-parameter learning rates are equivalent to preconditioning the gradient descent with a diagonal matrix. Asymptotically, an arguably optimal preconditioner is either the Hessian of the loss (Newton method) or the Fisher information matrix (Amari, 1998). These can be viewed as setting a per-direction learning rate after redefining directions in parameter space. From this viewpoint, Alrao just replaces these preconditioners with a random diagonal matrix whose entries span several orders of magnitude.
+Another approach to optimize the learning rate is to perform a gradient descent on the learning rate itself through the whole training procedure (for instance (Maclaurin et al., 2015)). This can be applied online to avoid backpropagating through multiple training rounds (Masse´ and Ollivier, 2015). This idea has a long history, see, e.g., (Schraudolph, 1999) or (Mahmood et al., 2012) and the references therein.
+The learning rate can also be treated within the framework of architecture search, which can explore both the architecture and learning rate at the same time (e.g., (Real et al., 2017)). Existing methods range from reinforcement learning (Zoph and Le, 2016; Baker et al., 2016) to bandits (Li et al., 2017), evolutionary algorithms (e.g., (Stanley and Miikkulainen, 2002; Jozefowicz et al., 2015; Real et al., 2017)), Bayesian optimization (Bergstra et al., 2013) or differentiable architecture search (Liu et al., 2018). These powerful methods are resource-intensive and do not allow for finding a good learning rate in a single run.
+Motivation. Alrao was inspired by the intuition that not all units in a neural network end up being useful. Hopefully, in a large enough network, a sub-network made of units with a good learning rate could learn well, and hopefully the units with a wrong learning rate will just be ignored. (Units with a too large learning rate may produce large activation values, so this assumes the model has some form of protection against those, such as BatchNorm or sigmoid/tanh activations.)
+Several lines of work support the idea that not all units of a network are useful or need to be trained. First, it is possible to prune a trained network without reducing the performance too much (e.g., (LeCun et al., 1990; Han et al., 2015a;b; See et al., 2016)). Li et al. (2018) even show that performance is reasonable if learning only within a very small-dimensional affine subspace of the parameters, chosen in advance at random rather than post-selected.
+Second, training only some of the weights in a neural network while leaving the others at their initial values performs reasonably well (see experiments in Appendix F). So in Alrao, units with a very small learning rate should not hinder training.
+Alrao is consistent with the lottery ticket hypothesis, which posits that "large networks that train successfully contain subnetworks that--when trained in isolation--converge in a comparable number of iterations to comparable accuracy" (Frankle and Carbin, 2018). This subnetwork is the lottery ticket winner: the one which had the best initial values. Arguably, given the combinatorial number of subnetworks in a large network, with high probability one of them is able to learn alone, and will make the whole network converge.
+Viewing the per-feature learning rates of Alrao as part of the initialization, this hypothesis suggests there might be enough sub-networks whose initialization leads to good convergence.
+
+2 ALL LEARNING RATES AT ONCE: DESCRIPTION
+
+Alrao: principle. Alrao starts with a standard optimization method such as SGD, and a range of
+possible learning rates (min, max). Instead of using a single learning rate, we sample once and for all one learning rate for each feature, randomly sampled log-uniformly in (min, max). Then these learning rates are used in the usual optimization update:
+
+l,i  l,i - l,i · l,i ((x), y)
+
+(1)
+
+where l,i is the set of parameters used to compute the feature i of layer l from the activations of layer l - 1 (the incoming weights of feature i). Thus we build "slow-learning" and "fast-learning"
+
+features, in the hope to get enough features in the "Goldilocks zone".
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+What constitutes a feature depends on the type of layers in the model. For example, in a fully connected layer, each component of a layer is considered as a feature: all incoming weights of the same unit share the same learning rate. On the other hand, in a convolutional layer we consider each convolution filter as constituting a feature: there is one learning rate per filter (or channel), thus keeping translation-invariance over the input image. In LSTMs, we apply the same learning rate to all components in each LSTM unit (thus in the implementation, the vector of learning rates is the same for input gates, for forget gates, etc.).
+However, the update (1) cannot be used directly in the last layer. For instance, for regression there may be only one output feature. For classification, each feature in the final classification layer represents a single category, and so using different learning rates for these features would favor some categories during learning. Instead, on the output layer we chose to duplicate the layer using several learning rate values, and use a (Bayesian) model averaging method to obtain the overall network output (Fig. 1).
+We set a learning rate per feature, rather than per parameter. Otherwise, every feature would have some parameters with large learning rates, and we would expect even a few large incoming weights to be able to derail a feature. So having diverging parameters within a feature is hurtful, while having diverging features in a layer is not necessarily hurtful since the next layer can choose to disregard them. Still, we tested this option; the results are compatible with this intuition (Appendix E).
+
+Definitions and notation. We now describe Alrao more precisely for deep learning models with softmax output, on classification tasks (the case of regression is similar).
+
+Let D = {(x1, y1), ..., (xN , yN )}, with yi  {1, ..., K}, be a classification dataset. The goal is to
+
+predict the yi given the xi, using a deep learning model . For each input x, (x) is a probability
+
+distribution over {1, ..., K}, and we want to minimize the categorical cross-entropy loss over the
+
+dataset:
+
+1 N
+
+i ((xi), yi).
+
+A deep learning model for classification  is made of two parts: a pre-classifier pc which com-
+putes some quantities fed to a final classifier layer Cc , namely, (x) = Ccl (pc (x)). The classifier layer Cc with K categories is defined by Cc = softmax  W T x + b with cl = (W, b), and softmax(x1, ..., xK )k = exk /( i exi ) .The pre-classifier is a computational graph composed of any number of layers, and each layer is made of multiple features.
+
+We denote log-U (·; min, max) the log-uniform probability distribution on an interval (min, max): namely, if   log-U (·; min, max), then log  is uniformly distributed between log min and
+log max. Its density function is
+
+log-U (; min, max) =
+
+1min  max
+max - min
+
+×
+
+1 
+
+(2)
+
+Alrao for the pre-classifier: A random learning rate for each feature. In the pre-classifier,
+for each feature i in each layer l, a learning rate l,i is sampled from the probability distribution log-U (.; min, max), once and for all at the beginning of training.1 Then the incoming parameters of each feature in the preclassifier are updated in the usual way with this learning rate (Eq. 4).
+
+Alrao for the classifier layer: Model averaging from classifiers with different learning rates. In the classifier layer, we build multiple clones of the original classifier layer, set a different learning rate for each, and then use a model averaging method from among them. The averaged classifier and the overall Alrao model are:
+
+Ncl
+
+CAcllrao(z) :=
+
+aj Cjcl (z),
+
+j=1
+
+Alrao(x) := CAcllrao(pc (x))
+
+(3)
+
+where the Cjcl are copies of the original classifier layer, with non-tied parameters, and cl := (1cl, ..., Nclcl ). The aj are the parameters of the model averaging, and are such that for all j,
+
+1With learning rates resampled at each time, each step would be, in expectation, an ordinary SGD step with learning rate El,i, thus just yielding an ordinary SGD trajectory with more noise.
+
+3
+
+Classifier
+
+Under review as a conference paper at ICLR 2019
+
+Output Softmax
+... ...
+
+Classifier
+
+Softmax
+
+Output
+
+Model Averaging
+
+Softmax
+
+...
+
+Softmax
+
+... ...
+
+Pre-classifier model
+
+Pre-classifier model
+
+Input
+
+Input
+
+Figure 1: Left: a standard fully connected neural network for a classification task with three classes, made of a pre-classifier and a classifier layer. Right: Alrao version of the same network. The single classifier layer is replaced with a set of parallel copies of the original classifier, averaged with a model averaging method. Each unit uses its own learning rate for its incoming weights (represented by different styles of arrows).
+
+0  aj  1, and j aj = 1. These are not updated by gradient descent, but via a model averaging method from the literature (see below).
+
+For
+
+each
+
+classifier
+
+Cjcl ,
+
+we
+
+set
+
+a
+
+learning
+
+rate
+
+log j
+
+=
+
+log min
+
++
+
+j-1 Ncl -1
+
+log(max/min),
+
+so
+
+that
+
+the classifiers' learning rates are log-uniformly spread on the interval (min, max).
+
+Thus, the original model (x) leads to the Alrao model Alrao(x). Only the classifier layer is modified, the pre-classifier architecture being unchanged.
+
+Algorithm 1 Alrao-SGD for model  = Ccl  pc with Ncl classifiers and learning rates in [min, max]
+
+1: aj  1/Ncl for each 1  j  Ncl
+
+2: A lrao(x) :=
+
+Ncl j=1
+
+aj
+
+Cjcl (pc (x))
+
+3: for all layers l, for all feature i in layer l do
+
+4: Sample l,i  log-U (.; min, max).
+
+5: for all Classifiers j, 1  j  Ncl do
+
+6:
+
+Define
+
+log j
+
+=
+
+log min
+
++
+
+j-1 Ncl -1
+
+log
+
+.max
+min
+
+7: while Convergence ? do
+
+8: zt  pc (xt)
+9: for all layers l, for all feature i in layer l do 10: l,i  l,i - l,i · l,i (Alrao(xt), yt)
+
+11: for all Classifier j do 12: jcl  jcl - j · jcl (Cjcl (zt), yt)
+
+13: a  ModelAveraging(a, (Cicl (zt))i, yt) 14: t  t + 1 mod N
+
+Initialize the Ncl model averaging weights aj Define the Alrao architecture
+Sample a learning rate for each feature
+Set a learning rate for each classifier j
+Store the pre-classifier output Update the pre-classifier weights
+Update the classifiers' weights Update the model averaging weights.
+
+The Alrao update. Alg. 1 presents the full Alrao algorithm for use with SGD (other optimizers like Adam are treated similarly). The updates for the pre-classifier, classifier, and model averaging weights are as follows.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+· The update rule for the pre-classifier is the usual SGD one, with per-feature learning rates. For each feature i in each layer l, its incoming parameters are updated as:
+
+l,i  l,i - l,i · l,i (A lrao(x), y)
+
+(4)
+
+· The parameters jcl of each classifier clone j on the classifier layer are updated as if this classifier alone was the only output of the model:
+
+jcl  jcl - j · jcl (Cjcl (pc (x)), y)
+
+(5)
+
+(still sharing the same pre-classifier pc ). This ensures classifiers with low weights aj still learn, and is consistent with model averaging philosophy. Algorithmically this requires differentiating the loss Ncl times with respect to the last layer (but no additional backpropagations through the preclassifier).
+· To set the weights aj, several model averaging techniques are available, such as Bayesian Model Averaging (Wasserman, 2000). We decided to use the Switch model averaging (Van Erven et al., 2012), a Bayesian method which is both simple, principled and very responsive to changes in performance of the various models. After each sample or mini-batch, the switch computes a modified posterior distribution (aj) over the classifiers. This computation is directly taken from (Van Erven et al., 2012) and explained in Appendix A. The observed evolution of this posterior during training is commented in Appendix B.
+
+Implementation. We release along with this paper a Pytorch (Paszke et al., 2017) implementation of this method. It can be used on an existing model with little modification. A short tutorial is given in Appendix H. The features (sets of weights which will share the same learning rate) need to be defined for each layer type: for now we have done this for linear, convolutional, and LSTMs layers.
+
+3 EXPERIMENTS
+We tested Alrao on various convolutional networks for image classification (CIFAR10), and on LSTMs for text prediction. The baselines are SGD with an optimal learning rate, and Adam with its default setting, arguably the current default method (Wilson et al., 2017).
+Image classification on CIFAR10. For image classification, we used the CIFAR10 dataset (Krizhevsky, 2009). It is made of 50,000 training and 10,000 testing data; we split the training set into a smaller training set with 40,000 samples, and a validation set with 10,000 samples. For each architecture, training on the smaller training set was stopped when the validation loss had not improved for 20 epochs. The epoch with best validation loss was selected and the corresponding model tested on the test set. The inputs are normalized. Training used data augmentation (random cropping and random horizontal flipping). The batch size is always 32. Each setting was run 10 times: the confidence intervals presented are the standard deviation over these runs.
+We tested Alrao on three architectures known to perform well on this task: GoogLeNet (Szegedy et al., 2015), VGG19 (Simonyan and Zisserman, 2014) and MobileNet (Howard et al., 2017). The exact implementation for each can be found in our code.
+The Alrao learning rates were sampled log-uniformly from min = 10-5 to max = 10. For the output layer we used 10 classifiers with switch model averaging (Appendix A); the learning rates of the output classifiers are deterministic and log-uniformly spread in [min, max].
+In addition, each model was trained with SGD for every learning rate in the set {10-5, 10-4, 10-3, 10-2, 10-1, 1., 10.}. The best SGD learning rate is selected on the validation set, then reported in Table 1. We also compare to Adam with its default hyperparameters ( = 10-3, 1 = 0.9, 2 = 0.999).
+The results are presented in Table 1. Learning curves with various SGD learning rates, with Adam, and with Alrao are presented in Fig. 2. Fig. 3 tests the influence of min and max.
+Recurrent learning on Penn Treebank. To test Alrao on a different kind of architecture, we used a recurrent neural network for text prediction on the Penn Treebank (Marcus et al., 1993) dataset.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Loss train
+
+Loss test
+
+Adam default
+
+2.0
+
+alrao lr=1e-05
+
+2.0
+
+lr=1e-04
+
+lr=1e-03
+
+1.5
+
+lr=1e-02
+
+1.5
+
+lr=1e-01
+
+lr=1e+00
+
+1.0
+
+lr=1e+01
+
+1.0
+
+lr=1e+02
+
+0.5 0.5
+
+loss loss loss loss
+
+0.0 0 10 20 30 40 epochs
+
+0.0 0 10 20 30 40 epochs
+
+(a) GoogLeNet
+
+Loss train
+
+Loss test
+
+Adam default
+
+2.0
+
+alrao lr=1e-06
+
+2.0
+
+lr=1e-05
+
+lr=1e-04
+
+1.5
+
+lr=1e-03
+
+1.5
+
+lr=1e-02
+
+lr=1e-01
+
+1.0
+
+lr=1e+00
+
+1.0
+
+lr=1e+01
+
+0.5 0.5
+
+0.0 0 10 20 30 40 epochs
+
+0.0 0 10 20 30 40 epochs
+
+(b) MobileNetV2
+
+Figure 2: Learning curves for SGD with various learning rates, Alrao-SGD, and Adam with its default setting, with the GoogLeNet and MobileNetV2 architecture. Left: training loss; right: test loss. While Alrao-SGD uses learning rates from the entire range, its performance is comparable to the optimal learning rate.
+
+Table 1: Performance of Alrao-SGD, of SGD with optimal learning rate from {10-5, 10-4, 10-3, 10-2, 10-1, 1., 10.}, and of Adam with its default setting. Three convolutional models are reported for image classifaction (CIFAR10) and one recurrent model for character prediction (Penn Treebank). For Alrao the learning rates lie in [min; max] = [10-5; 10] (CIFAR10) or [10-3; 102] (PTB). Each experiment is run 10 times (CIFAR10) or 5 times (PTB); the confidence intervals report the standard deviation over these runs.
+
+MODEL
+MOBILENET GOOGLENET VGG19 LSTM (PTB)
+
+LR
+1e-1 1e-2 1e-1
+1
+
+SGD WITH OPTIMAL LR
+
+LOSS
+
+ACC (%)
+
+0.37 ± 0.01 0.45 ± 0.05 0.42 ± 0.02
+
+90.2 ± 0.3 89.6 ± 1.0 89.5 ± 0.2
+
+1.566 ± 0.003 66.1 ± 0.1
+
+ADAM - DEFAULT
+
+LOSS
+
+ACC (%)
+
+1.01 ± 0.95 0.47 ± 0.04 0.43 ± 0.02
+
+78 ± 11 89.8 ± 0.4 88.9 ± 0.4
+
+1.587 ± 0.005 65.6 ± 0.1
+
+ALRAO-SGD
+
+LOSS
+
+ACC (%)
+
+0.42 ± 0.02 0.47 ± 0.03 0.45 ± 0.03
+
+88.1 ± 0.6 88.9 ± 0.8 87.5 ± 0.4
+
+1.67 ± 0.01 64.1 ± 0.2
+
+The experimental procedure is the same, with (min, max) = (0.001, 100) and 6 output classifiers for Alrao. The results appear in Table 1, where the loss is given in bits per character and the accuracy is the proportion of correct character predictions. The model was trained for character prediction rather than word prediction. This is technically easier for Alrao implementation: since Alrao uses copies of the output layer, memory issues arise
+6
+
+Under review as a conference paper at ICLR 2019
+
+Minimum learning rate min 1111111eeeeeee-------2543671 1e0 1e1 1e2
+Minimum learning rate min 1111111eeeeeee-------3741265 1e0 1e1 1e2
+
+Maximum learning rate max
+1e-7 1e-6 1e-5 1e-4 1e-3 1e-2 1e-1 1e0 1e1 1e2
+
+1e-7
+
+2.0
+
+1e-6 1e-5
+
+1e-4 1.5 1e-3
+
+1e-2 1.0 1e-1
+
+1e0 0.5 1e1
+
+1e2
+
+Maximum learning rate max
+
+3.0 2.5 2.0 1.5 1.0 0.5
+
+Figure 3: Performance of Alrao with a GoogLeNet model, depending on the interval (min, max). Left: loss on the train set; right: on the test set. Each point with coordinates (min, max) above the diagonal represents the loss after 30 epochs for Alrao with this interval. Points (, ) on the diagonal represent standard SGD with learning rate  after 50 epochs. Standard SGD with  = 102 is left
+blank to due numerical divergence (NaN). Alrao works as soon as (min, max) contains at least one suitable learning rate.
+
+for models with most parameters on the output layer. Word prediction (10,000 classes on PTB) requires more output parameters than character prediction; see Section 4 and Appendix D.
+The model is a two-layer LSTM (Hochreiter and Schmidhuber, 1997) with an embedding size of 100 and with 100 hidden features. A dropout layer with rate 0.2 is included before the decoder. The training set is divided into 20 minibatchs. Gradients are computed via truncated backprop through time (Werbos, 1990) with truncation every 70 characters.
+Comments. As expected, Alrao performs slightly worse than the best learning rate. Still, even with wide intervals (min, max), Alrao comes reasonably close to the best learning rate, across all setups; hence Alrao's possible use as a quick assessment method. Although Adam with its default parameters almost matches optimal SGD, this is not always the case, for example with the MobileNet model (Fig.2b). This confirms a known risk of overfit with Adam (Wilson et al., 2017). In our setup, Alrao seems to be a more stable default method.
+Our results, with either SGD, Adam, or SGD-Alrao, are somewhat below the art: in part this is because we train on only 40,000 CIFAR samples, and do not use stepsize schedules.
+4 LIMITATIONS, FURTHER REMARKS, AND FUTURE DIRECTIONS
+Increased number of parameters for the classification layer. Alrao modifies the output layer of the optimized model. The number of parameters for the classification layer is multiplied by the number of classifier copies used (the number of parameters in the pre-classifier is unchanged). On CIFAR10 (10 classes), the number of parameters increased by less than 5% for the models used. On Penn Treebank, the number of parameters increased by 15% in our setup (working at the character level); working at word level it would have increased threefold (Appendix D).
+This is clearly a limitation for models with most parameters in the classifier layer. For output-layerheavy models, this can be mitigated by handling the copies of the classifiers on distinct computing units: in Alrao these copies work in parallel given the pre-classifier.
+Still, models dealing with a very large number of output classes usually rely on other parameterizations than a direct softmax, such as a hierarchical softmax (see references in (Jozefowicz et al., 2016)); Alrao could be used in conjunction with such methods.
+Adding two hyperparameters. We claim to remove a hyperparameter, the learning rate, but replace it with two hyperparameters min and max.
+7
+
+Under review as a conference paper at ICLR 2019
+Formally, this is true. But a systematic study of the impact of these two hyperparameters (Fig. 3) shows that the sensitivity to min and max is much lower than the original sensitivity to the learning rate. In our experiments, convergence happens as soon as (min; max) contains a reasonable learning rate (Fig. 3).
+A wide range of values of (min; max) will contain one good learning rate and achieve close-tooptimal performance (Fig. 3). Typically, we recommend to just use an interval containing all the learning rates that would have been tested in a grid search, e.g., 10-5 to 10.
+So, even if the choice of min and max is important, the results are much more stable to varying these two hyperparameters than to the learning rate. For instance, standard SGD fails due to numerical issues for  = 100 while Alrao with max = 100 works with any min  1 (Fig. 3), and is thus stable to relatively large learning rates. We would still expect numerical issues with very large max, but this has not been observed in our experiments.
+Alrao with Adam. Alrao is much less reliable with Adam than with SGD. Surprisingly, this occurs mostly for test performance, which can even diverge, while training curves mostly look good (Appendix C). We have no definitive explanation for this at present. It might be that changing the learning rate in Adam also requires changing the momentum parameters in a correlated way. It might be that Alrao does not work on Adam because Adam is more sensitive to its hyperparameters. The stark train/test discrepancy might also suggest that Alrao-Adam performs well as a pure optimization method but exacerbates the underlying risk of overfit of Adam (Wilson et al., 2017; Keskar and Socher, 2017).
+Increasing network size. With Alrao, neurons with unsuitable learning rates will not learn: those with a too large learning rate might learn nothing, while those with too small learning rates will learn too slowly to be used. Thus, Alrao may reduce the effective size of the network to only a fraction of the actual architecture size, depending on (min, max).
+Our first intuition was that increasing the width of the network was going to be necessary with Alrao, to avoid wasting too many units. In a fully connected network, the number of weights is quadratic in the width, so increasing width (beyond a factor three in our experiments) can be bothersome. Comparisons of Alrao with increased width are reported in Appendix G. Width is indeed a limiting factor for the models considered, even without Alrao (Appendix G). But to our surprise, Alrao worked well even without width augmentation.
+Other optimization algorithms, other hyperparameters, learning rate schedulers... Using a learning rate schedule instead of a fixed learning rate is often effective (Bengio, 2012). We did not use learning rate schedulers here; this may partially explain why the results in Table 1 are worse than the state-of-the-art. Nothing prevents using such a scheduler within Alrao, e.g., by dividing all Alrao learning rates by a time-dependent constant; we did not experiment with this yet.
+The idea behind Alrao could be used on other hyperparameters as well, such as momentum. However, if more hyperparameters are initialized randomly for each feature, the fraction of features having all their hyperparameters in the "Goldilocks zone" will quickly decrease.
+5 CONCLUSION
+Applying stochastic gradient descent with random learning rates for different features is surprisingly resilient in our experiments, and provides performance close enough to SGD with an optimal learning rate, as soon as the range of random learning rates contains a suitable one. This could save time when testing deep learning models, opening the door to more out-of-the-box uses of deep learning.
+REFERENCES
+Shun-ichi Amari. Natural gradient works efficiently in learning. Neural Comput., 10:251­276, February 1998. ISSN 0899-7667. doi: 10.1162/089976698300017746.
+Bowen Baker, Otkrist Gupta, Nikhil Naik, and Ramesh Raskar. Designing neural network architectures using reinforcement learning. arXiv preprint arXiv:1611.02167, 2016.
+8
+
+Under review as a conference paper at ICLR 2019
+Yoshua Bengio. Practical recommendations for gradient-based training of deep architectures. In Neural networks: Tricks of the trade, pages 437­478. Springer, 2012.
+James Bergstra, Daniel Yamins, and David Daniel Cox. Making a science of model search: Hyperparameter optimization in hundreds of dimensions for vision architectures. 2013.
+Michael Denkowski and Graham Neubig. Stronger baselines for trustable results in neural machine translation. arXiv preprint arXiv:1706.09733, 2017.
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and stochastic optimization. The Journal of Machine Learning Research, 12:2121­2159, 2011.
+Jonathan Frankle and Michael Carbin. The Lottery Ticket Hypothesis: Finding Small, Trainable Neural Networks. arXiv preprint arXiv:1704.04861, mar 2018.
+Isabelle Guyon, Imad Chaabane, Hugo Jair Escalante, Sergio Escalera, Damir Jajetic, James Robert Lloyd, Nu´ria Macia`, Bisakha Ray, Lukasz Romaszko, Miche`le Sebag, et al. A brief review of the ChaLearn AutoML challenge: any-time any-dataset learning without human intervention. In Workshop on Automatic Machine Learning, pages 21­30, 2016.
+Song Han, Huizi Mao, and William J. Dally. Deep Compression: Compressing Deep Neural Networks with Pruning, Trained Quantization and Huffman Coding. arXiv preprint arXiv:1510.00149, 2015a.
+Song Han, Jeff Pool, John Tran, and William J. Dally. Learning both Weights and Connections for Efficient Neural Networks. In Advances in Neural Information Processing Systems, 2015b.
+Mark Herbster and Manfred K Warmuth. Tracking the best expert. Machine learning, 32(2):151­ 178, 1998.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry Kalenichenko, Weijun Wang, Tobias Weyand, Marco Andreetto, and Hartwig Adam. Mobilenets: Efficient convolutional neural networks for mobile vision applications. arXiv preprint arXiv:1704.04861, 2017.
+Stanislaw Jastrzebski, Zachary Kenton, Devansh Arpit, Nicolas Ballas, Asja Fischer, Yoshua Bengio, and Amos Storkey. Three factors influencing minima in sgd. arXiv preprint arXiv:1711.04623, 2017.
+Rafal Jozefowicz, Wojciech Zaremba, and Ilya Sutskever. An empirical exploration of recurrent network architectures. In International Conference on Machine Learning, pages 2342­2350, 2015.
+Rafal Jozefowicz, Oriol Vinyals, Mike Schuster, Noam Shazeer, and Yonghui Wu. Exploring the limits of language modeling. arXiv preprint arXiv:1602.02410, 2016.
+Nitish Shirish Keskar and Richard Socher. Improving generalization performance by switching from Adam to SGD. arXiv preprint arXiv:1712.07628, 2017.
+Diederik P. Kingma and Jimmy Ba. Adam: A Method for Stochastic Optimization. In International Conference on Learning Representations, 2015.
+Wouter Koolen and Steven De Rooij. Combining expert advice efficiently. arXiv preprint arXiv:0802.2015, 2008.
+Alex Krizhevsky. Learning Multiple Layers of Features from Tiny Images. 2009.
+Keita Kurita. Learning Rate Tuning in Deep Learning: A Practical Guide -- Machine Learning Explained, 2018. URL http://mlexplained.com/2018/01/29/learning-ratetuning-in-deep-learning-a-practical-guide/.
+Yann LeCun, John S. Denker, and Sara A. Solla. Optimal brain damage. In D. S. Touretzky, editor, Advances in Neural Information Processing Systems 2, pages 598­605. Morgan-Kaufmann, 1990.
+9
+
+Under review as a conference paper at ICLR 2019
+Yann LeCun, Leon Bottou, Genevieve B Orr, and Klaus-Robert Mu¨ller. Efficient backprop. In Neural Networks: Tricks of the Trade, pages 9­50. Springer, 1998.
+Chunyuan Li, Heerad Farkhoor, Rosanne Liu, and Jason Yosinski. Measuring the Intrinsic Dimension of Objective Landscapes. arXiv preprint arXiv:1804.08838, apr 2018.
+Lisha Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, and Ameet Talwalkar. Hyperband: A novel bandit-based approach to hyperparameter optimization. The Journal of Machine Learning Research, 18(1):6765­6816, 2017.
+Chenxi Liu, Barret Zoph, Jonathon Shlens, Wei Hua, Li-Jia Li, Li Fei-Fei, Alan Yuille, Jonathan Huang, and Kevin Murphy. Progressive neural architecture search. arXiv preprint arXiv:1712.00559, 2017.
+Hanxiao Liu, Karen Simonyan, and Yiming Yang. Darts: Differentiable architecture search. arXiv preprint arXiv:1806.09055, 2018.
+David Mack. How to pick the best learning rate for your machine learning project, 2016. URL https://medium.freecodecamp.org/how-to-pick-the-bestlearning-rate-for-your-machine-learning-project-9c28865039a8.
+Dougal Maclaurin, David Duvenaud, and Ryan Adams. Gradient-based hyperparameter optimization through reversible learning. In International Conference on Machine Learning, pages 2113­ 2122, 2015.
+Ashique Rupam Mahmood, Richard S Sutton, Thomas Degris, and Patrick M Pilarski. Tuningfree step-size adaptation. In Acoustics, Speech and Signal Processing (ICASSP), 2012 IEEE International Conference on, pages 2121­2124. IEEE, 2012.
+Mitchell P. Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated corpus of english: The penn treebank. Comput. Linguist., 19(2):313­330, June 1993. ISSN 0891-2017.
+Pierre-Yves Masse´ and Yann Ollivier. Speed learning on the fly. arXiv preprint arXiv:1511.02540, 2015.
+Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic differentiation in pytorch. In NIPS-W, 2017.
+Esteban Real, Sherry Moore, Andrew Selle, Saurabh Saxena, Yutaka Leon Suematsu, Jie Tan, Quoc Le, and Alex Kurakin. Large-scale evolution of image classifiers. arXiv preprint arXiv:1703.01041, 2017.
+Tom Schaul, Sixin Zhang, and Yann LeCun. No more pesky learning rates. In International Conference on Machine Learning, pages 343­351, 2013.
+Nicol N Schraudolph. Local gain adaptation in stochastic gradient descent. 1999.
+Abigail See, Minh-Thang Luong, and Christopher D Manning. Compression of Neural Machine Translation Models via Pruning. arXiv preprint arXiv:1606.09274, 2016.
+K. Simonyan and A. Zisserman. Very deep convolutional networks for large-scale image recognition. CoRR, abs/1409.1556, 2014.
+Kenneth O Stanley and Risto Miikkulainen. Evolving neural networks through augmenting topologies. Evolutionary computation, 10(2):99­127, 2002.
+Pavel Surmenok. Estimating an Optimal Learning Rate For a Deep Neural Network, 2017. URL https://towardsdatascience.com/estimating-optimallearning-rate-for-a-deep-neural-network-ce32f2556ce0.
+Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet, Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent Vanhoucke, and Andrew Rabinovich. Going deeper with convolutions. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 1­9, 2015.
+10
+
+Under review as a conference paper at ICLR 2019
+Sergios Theodoridis. Machine learning: a Bayesian and optimization perspective. Academic Press, 2015.
+Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural networks for machine learning, 4(2):26­ 31, 2012.
+Tim Van Erven, Steven D. Rooij, and Peter Gru¨nwald. Catching up faster in Bayesian model selection and model averaging. In J. C. Platt, D. Koller, Y. Singer, and S. T. Roweis, editors, Advances in Neural Information Processing Systems 20, pages 417­424. Curran Associates, Inc., 2008.
+Tim Van Erven, Peter Gru¨nwald, and Steven De Rooij. Catching up faster by switching sooner: A predictive approach to adaptive estimation with an application to the AIC-BIC dilemma. Journal of the Royal Statistical Society: Series B (Statistical Methodology), 74(3):361­417, 2012.
+Paul AJ Volf and Frans MJ Willems. Switching between two universal source coding algorithms. In Data Compression Conference, 1998. DCC'98. Proceedings, pages 491­500. IEEE, 1998.
+Larry Wasserman. Bayesian Model Selection and Model Averaging. Journal of Mathematical Psychology, 44, 2000.
+Paul J Werbos. Backpropagation through time: what it does and how to do it. Proceedings of the IEEE, 78(10):1550­1560, 1990.
+Ashia C Wilson, Rebecca Roelofs, Mitchell Stern, Nati Srebro, and Benjamin Recht. The marginal value of adaptive gradient methods in machine learning. In Advances in Neural Information Processing Systems, pages 4148­4158, 2017.
+Barret Zoph and Quoc V Le. Neural architecture search with reinforcement learning. arXiv preprint arXiv:1611.01578, 2016.
+11
+
+Under review as a conference paper at ICLR 2019
+
+A MODEL AVERAGING WITH THE SWITCH
+
+As explained is Section 2, we use a model averaging method on the classifiers of the output layer. We could have used the Bayesian Model Averaging method (Wasserman, 2000). But one of its main weaknesses is the catch-up phenomenon (Van Erven et al., 2012): plain Bayesian posteriors are slow to react when the relative performance of models changes over time. Typically, for instance, some larger-dimensional models need more training data to reach good performance: at the time they become better than lower-dimensional models for predicting current data, their Bayesian posterior is so bad that they are not used right away (their posterior needs to "catch up" on their bad initial performance). This leads to very conservative model averaging methods.
+
+The solution from (Van Erven et al., 2012) against the catch-up phenomenon is to switch between models. It is based on previous methods for prediction with expert advice (see for instance (Herbster and Warmuth, 1998; Volf and Willems, 1998) and the references in (Koolen and De Rooij, 2008; Van Erven et al., 2012)), and is well rooted in information theory. The switch method maintains a Bayesian posterior distribution, not over the set of models, but over the set of switching strategies between models. Intuitively, the model selected can be adapted online to the number of samples seen.
+
+We now give a quick overview of the switch method from Van Erven et al. (2012): this is how the model averaging weights aj are chosen in Alrao.
+Assume that we have a set of prediction strategies M = {pj, j  I}. We define the set of switch sequences, S = {((t1, j1), ..., (tL, jL)), 1 = t1 < t2 < ... < tL , j  I}. Let s = ((t1, j1), ..., (tL, jL)) be a switch sequence. The associated prediction strategy ps(y1:n|x1:n) uses model pji on the time interval [ti; ti+1), namely
+
+ps(y1:i+1|x1:i+1, y1:i) = pKi (yi+1|x1:i+1, y1:i)
+
+(6)
+
+where Ki is such that Ki = jl for tl  i < tl+1. We fix a prior distribution  over switching sequences. In this work, I = {1, ..., NC } the prior is, for a switch sequence s = ((t1, j1), ..., (tL, jL)):
+
+L
+(s) = L(L)K (j1) T (ti|ti > ti-1)K (ji)
+i=2
+
+(7)
+
+with L(L)
+
+=
+
+L 1-
+
+a geometric distribution over the switch sequences lengths, K(j)
+
+=
+
+1 NC
+
+the
+
+uniform
+
+distribution
+
+over
+
+the
+
+models
+
+(here
+
+the
+
+classifiers)
+
+and
+
+T (t)
+
+=
+
+1 t(t+1)
+
+.
+
+This defines a Bayesian mixture distribution:
+
+psw(y1:T |x1:T ) = (s)ps(y1:T |x1:T )
+sS
+
+(8)
+
+Then, the model averaging weight aj for the classifier j after seeing T samples is the posterior of the switch distribution: (KT +1 = j|y1:T , x1:T ).
+
+aj
+
+=
+
+psw(KT +1
+
+=
+
+j|y1:T , x1:T )
+
+=
+
+psw(y1:T , KT +1 = j|x1:T ) psw(y1:T |x1:T )
+
+(9)
+
+These weights can be computed online exactly in a quick and simple way (Van Erven et al., 2012), thanks to dynamic programming methods from hidden Markov models.
+
+The implementation of the switch used in Alrao exactly follows the pseudo-code from (Van Erven et al., 2008), with hyperparameter  = 0.999 (allowing for many switches a priori). It can be found in the accompanying online code.
+
+B EVOLUTION OF THE POSTERIOR
+The evolution of the model averaging weights can be observed during training. In Figure 4, we can see their evolution during the training of the GoogLeNet model with Alrao, 10 classifiers, with min = 10-5 and max = 101.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+We can make several observations. First, after only a few gradient descent steps, the model averaging weights corresponding to the three classifiers with the largest learning rates go to zero. This means that their parameters are moving too fast, and their loss is getting very large.
+Next, for a short time, a classifier with a moderately large learning rate gets the largest posterior weight, presumably because it is the first to learn a useful model.
+Finally, after the model has seen approximately 4,000 samples, a classifier with a slightly smaller learning rate is assigned a posterior weight aj close to 1, while all the others go to 0. This means that after a number of gradient steps, the model averaging method acts like a model selection method.
+
+Model averaging weights aj
+
+1.0
+
+a1 : 1 = 1.0e-05
+
+a2 : 2 = 4.6e-05
+
+0.8 a3 : 3 = 2.2e-04
+
+a4 : 4 = 1.0e-03
+
+a5 : 5 = 4.6e-03
+
+0.6 a6 : 6 = 2.2e-02
+
+a7 : 7 = 1.0e-01
+
+0.4
+
+a8 : 8 = 4.6e-01 a9 : 9 = 2.2e+00
+
+a10 : 10 = 1.0e+01
+
+0.2
+
+0.0
+
+10-3
+
+10-2
+
+10-1
+
+100
+
+Epochs (log-scale)
+
+101
+
+Figure 4: Model averaging weights during training. During the training of the GoogLeNet model with Alrao, 10 classifiers, with min = 10-5 and max = 101, we represent the evolution of the model averaging weights aj, depending on the corresponding classifier's learning rate.
+
+C ALRAO-ADAM
+In Figure 5, we report our experiments with Alrao-Adam. As explained in Section 4, Alrao is much less reliable with Adam than with SGD. This is especially true for the test performance, which can even diverge while training performance remains either good or acceptable (Fig. 5). Thus Alrao-Adam seems to send the model into atypical regions of the search space.
+D NUMBER OF PARAMETERS
+As explained in Section 4, Alrao increases the number of parameters of a model, due to output layer copies. The additional number of parameters is approximately equal to (Ncl - 1) × K × d where Ncl is the number of classifier copies used in Alrao, d is the dimension of the output of the pre-classifier, and K is the number of classes in the classification task (assuming a standard softmax output; classification with many classes often uses other kinds of output parameterization instead). The number of parameters for the models used, with and without Alrao, are in Table 2. We used 10 classifiers in Alrao for convolutional neural networks, and 6 classifiers for LSTMs. Using Alrao for classification tasks with many classes, such as word prediction (10,000 classes on PTB), increases the number of parameters noticeably. For those model with significant parameter increase, the various classifier copies may be done on parallel GPUs.
+13
+
+Under review as a conference paper at ICLR 2019
+
+Loss train
+
+Loss test
+
+alrao-adam
+
+adam lr=1e-05
+
+2.0
+
+adam lr=1e-04
+
+2.0
+
+adam lr=1e-03
+
+adam lr=1e-02 1.5 1.5
+
+loss loss loss loss loss loss
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0 epochs
+
+0.0 0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0 epochs
+
+(a) Alrao-Adam on GoogLeNet: Alrao-Adam compared with standard Adam with various learning rates. Alrao uses 10 classifiers and learning rates in the interval [10-6, 1]. Each plot is averaged on 10 experiments. We observe that optimization with Alrao-Adam is efficient, since train loss is comparable to the usual Adam methods. But the model starkly overfits, as the test loss diverges.
+
+Loss train
+
+Loss test
+
+alrao alrao 2.0 2.0
+
+1.5 1.5
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0
+
+10 20 30 40 epochs
+
+0.0 0
+
+10 20 30 40 epochs
+
+(b) Alrao-Adam on MobileNet: Alrao-Adam with two different learning rate intervals, with 10 classifiers. Each plot is averaged on 10 experiments. Exactly as with GoogLeNet model, optimization itself is efficient (for both intervals). For the interval with the smallest max, the test loss does not converge and is very unstable. For the interval with the largest max, the test loss diverges.
+
+Loss train
+
+Loss test
+
+2.0 2.0
+
+1.5 1.5
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0
+
+0.0 10 20 30 40 50 0
+epochs
+
+10 20 30 40 50 epochs
+
+(c) Alrao-Adam on VGG19: Alrao-Adam on the interval [10-6, 1], with 10 classifiers. The 10 plots are 10 runs of the same experiments. While 9 of them do converge and generalize, the last one exhibits wide oscillations, both in train and test.
+
+Figure 5: Alrao-Adam: Experiments on the VGG19, GoogLeNet and MobileNet networks.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Table 2: Comparison between the number of parameters in models used without and with Alrao. LSTM (C) is a simple LSTM cell used for character prediction while LSTM (W) is the same cell used for word prediction.
+
+MODEL
+GOOGLENET VGG MOBILENET
+LSTM (C) LSTM (W)
+
+NUMBER OF PARAMETERS WITHOUT ALAO WITH ALRAO
+
+6.166M 20.041M 2.297M
+
+6.258M 20.087M 2.412M
+
+0.172M 2.171M
+
+0.197M 7.221M
+
+E OTHER WAYS OF SAMPLING THE LEARNING RATES
+In Alrao we sample a learning rate for each feature. Intuitively, each feature (or neuron) is a computation unit of its own, using a number of inputs from the previous layer. If we assume that there is a "right" learning rate for learning new features based on information from the previous layer, then we should try a learning rate per feature; some features will be useless, while others will be used further down in the network.
+An obvious variant is to set a random learning rate per weight, instead of for all incoming weights of a given feature. However, this runs the risk that every feature in a layer will have a few incoming weights with a large rate, so intuitively every feature is at risk of diverging. This is why we favored per-feature rates.
+Still, we tested sampling a learning rate for each weight in the pre-classifier (while keeping the same Alrao method for the classifier layer).
+
+loss (bits per character) loss (bits per character)
+
+4.25 4.00 3.75 3.50
+
+Loss train
+alrao: (10-3, 104) ; one lr per weight alrao: (10-3, 104) ; one lr per feat re alrao: (10-4, 102) ; one lr per feat re alrao: (10-4, 102) ; one lr per weight
+
+3.25
+
+3.00
+
+2.75
+
+2.50
+0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 epochs
+
+Loss test
+3.8 3.6 3.4 3.2 3.0 2.8 2.6 2.4
+0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 epochs
+
+Figure 6: Loss for various intervals (min, max), as a function of the sampling method for the learning rates, per feature or per weight. The model is a two-layer LSTM trained for 20 epochs only, for character prediction. Each curves represents 10 runs. (Losses are much higher than the results reported in Table 1 because the full training for Table 1 takes approximately 300 epochs.)
+
+In our experiments on LSTMs, per-weight learning rates sometimes perform well but are less stable
+and more sensitive to the interval (min, max): for some intervals (min, max) with very large max, results with per-weight learning rates are a lot worse than with per-feature learning rates. This is consistent with the intuition above.
+
+F LEARNING A FRACTION OF THE FEATURES
+As explained in the introduction, several works support the idea that not all units are useful when learning a deep learning model. Additional results supporting this hypothesis are presented in Figure 7. We trained a GoogLeNet architecture on CIFAR10 with standard SGD with learning rate 0,
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+1.6 1.4 1.2 1.0 0.8 0.6
+0.0
+
+test_nll as a function of p
+0.2 0.4 0.6 0.8
+
+1.0
+
+Figure 7: Loss of a model where only a random fraction p of the features are trained, and the others left at their initial value, as a function of p. The architecture is GoogLeNet, trained on CIFAR10.
+
+but learned only a random fraction p of the features (chosen at startup), and kept the others at their initial value. This is equivalent to sampling each learning rate  from the probability distribution P ( = 0) = p and P ( = 0) = 1 - p. We observe that even with a fraction of the weights not being learned, the model's performance is close to its performance when fully trained.
+When training a model with Alrao, many features might not learn at all, due to too small learning rates. But Alrao is still able to reach good results. This could be explained by the resilience of neural networks to partial training.
+G INCREASING NETWORK SIZE
+As explained in Section 4, learning with Alrao reduces the effective size of the network to only a fraction of the actual architecture size, depending on (min, max). We first tought that increasing the width of each layer was going to be necessary in order to use Alrao. However, our experiments show that this is not necessary.
+Alrao and SGD experiments with increased width are reported in Figure 8. As expected, Alrao with increased width has better performance, since the effective size increases. However, increasing the width also improves performance of standard SGD, by roughly the same amount.
+Thus, width is still a limiting factor both for GoogLeNet and MobileNet. This shows that Alrao can perform well even when network size is a limiting factor; this runs contrary to our initial intuition that Alrao would require very large networks in order to have enough features with suitable learning rates.
+H TUTORIAL
+In this section, we briefly show how Alrao can be used in practice on an already implemented method in Pytorch. The full code will be available once the anonymity constraint is lifted.
+The first step is to build the preclassifier. Here, we use the VGG19 architecture. The model is built without a classifier. Nothing else is required for Alrao at this step.
+class VGG(nn.Module): def __init__(self, cfg):
+16
+
+Under review as a conference paper at ICLR 2019
+
+Loss train
+
+Loss test
+
+alrao
+
+2.0
+
+SGD best lr: 1e-02 alrao, width * 3
+
+2.0
+
+SGD best lr: 1e-02, width * 3
+
+1.5 1.5
+
+loss loss loss loss
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0 1 2 3 4 5 6 7 8 0.0 0 1 2 3 4 5 6 7 8
+
+epochs
+
+epochs
+
+(a) GoogLeNet
+
+Loss train
+
+Loss test
+
+alrao
+
+2.0
+
+SGD best lr: 1e-02 alrao, width * 3
+
+2.0
+
+SGD best lr: 1e-02, width * 3
+
+1.5 1.5
+
+1.0 1.0
+
+0.5 0.5
+
+0.0 0 1 2 3 4 5 6 7 8 0.0 0 1 2 3 4 5 6 7 8
+
+epochs
+
+epochs
+
+(b) MobileNet
+
+Figure 8: Increasing network width. We compare the performance of the GoogLeNet and MobileNet models, to the same models with 3 times as many units in each layer, both for standard SGD and for Alrao.
+
+super(VGG, self).__init__() self.features = self._make_layers(cfg) # The dimension of the preclassier's output need to be specified. self.linearinputdim = 512
+def forward(self, x): out = self.features(x) out = out.view(out.size(0), -1) # The model do not contain a classifier layer. return out
+def _make_layers(self, cfg): layers = [] in_channels = 3 for x in cfg: if x == 'M': layers += [nn.MaxPool2d(kernel_size=2, stride=2)] else: layers += [nn.Conv2d(in_channels, x, kernel_size=3, padding =1), nn.BatchNorm2d(x), nn.ReLU(inplace=True)] in_channels = x
+17
+
+Under review as a conference paper at ICLR 2019
+layers += [nn.AvgPool2d(kernel_size=1, stride=1)] return nn.Sequential(*layers)
+preclassifier = VGG([64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', \ 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'])
+Then, we can build the Alrao-model with this preclassifier, sample the learning rates for the model, and define the Alrao optimizer # We define the interval in which the learning rates are sampled minlr = 10 ** (-5) maxlr = 10 ** 1
+# nb_classifiers is the number of classifiers averaged by Alrao. nb_classifiers = 10 nb_categories = 10
+net = AlraoModel(preclassifier, nb_categories, preclassifier. linearinputdim, nb_classifiers)
+# We spread the classifiers learning rates log-uniformly on the interval. classifiers_lr = [np.exp(np.log(minlr) + \
+k /(nb_classifiers-1) * (np.log(maxlr) - np.log(minlr)) \ ) for k in range(nb_classifiers)]
+# We define the sampler for the preclassifier's features. lr_sampler = lr_sampler_generic(minlr, maxlr) lr_preclassifier = generator_randomlr_neurons(net.preclassifier,
+lr_sampler)
+# We define the optimizer optimizer = SGDAlrao(net.parameters_preclassifier(),
+lr_preclassifier, net.classifiers_parameters_list(), classifiers_lr)
+Finally, we can train the model. The only differences here with the usual training procedure is that each classifier needs to be updated as if it was alone, and that we need to update the model averaging weights, here the switch weights. def train(epoch):
+for batch_idx, (inputs, targets) in enumerate(trainloader): # We update the model averaging weights in the optimizer optimizer.update_posterior(net.posterior()) optimizer.zero_grad()
+# Forward pass of the Alrao model outputs = net(inputs) loss = nn.NLLLoss(outputs, targets)
+# We compute the gradient of all the model's weights loss.backward()
+# We reset all the classifiers gradients, and re-compute them with # as if their were the only output of the network. optimizer.classifiers_zero_grad() newx = net.last_x.detach() for classifier in net.classifiers():
+loss_classifier = criterion(classifier(newx), targets) loss_classifier.backward()
+# Then, we can run an update step of the gradient descent. optimizer.step()
+18
+
+Under review as a conference paper at ICLR 2019 # Finally, we update the model averaging weights net.update_switch(targets, catch_up=False)
+19
+
+

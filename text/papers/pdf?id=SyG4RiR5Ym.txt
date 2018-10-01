@@ -1,0 +1,862 @@
+Under review as a conference paper at ICLR 2019
+NEURAL DISTRIBUTION LEARNING FOR GENERALIZED TIME-TO-EVENT PREDICTION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Predicting the time to the next event is an important task in various domains. However, due to censoring and irregularly sampled sequences, time-to-event prediction has resulted in limited success only for particular tasks, architectures and data. Using recent advances in probabilistic programming and density networks, we make the case for a generalized parametric survival approach, sequentially predicting a distribution over the time to the next event. Unlike previous work, the proposed method can use asynchronously sampled features for censored, discrete, and multivariate data. Furthermore, it achieves good performance and near perfect calibration for probabilistic predictions without using rigid network-architectures, multitask approaches, complex learning schemes or non-trivial adaptations of coxmodels. We firmly establish that this can be achieved in the standard neural network framework by simply switching out the output layer and loss function.
+1 INTRODUCTION
+Many real-world tasks can be formulated as time-to-event (TTE) prediction problems, forecasting the time taken until an event-of-interest happens in the future. Examples are predicting time to the onset of a particular disease (Price et al., 2017), predicting when a machine fails (Salfner et al., 2010) or predicting future user logins (Sobaszek & Gola, 2016). Unfortunately, the data often consists of temporal features and recurrent events which are sparsely and irregularly sampled over time. This makes the data challenging to work with. Furthermore, the main challenge is that if we do not observe a terminating event for a sequence, the time to event becomes right censored (Klein & Moeschberger, 2005). This essentially means that we only know that the event will take place later than when it was known to not occur.
+Proposed solutions taking account for censoring includes predicting TTE binned across fixed time windows (classification approaches (Harutyunyan et al., 2017; Lee et al., 2018)), predicting TTE point-wise (regressive approaches (Ishwaran et al., 2008)), ranking the risk of subjects (semiparametric (Katzman et al., 2016; Luck et al., 2017) and non-parametric (Kalderstam, 2015; Chen et al., 2013)), or estimating the target and the feature distributions jointly (variational, stochastic formulations (Soleimani et al., 2017; Ranganath et al., 2016; Mei & Eisner, 2017; Xu et al., 2017)). Numerous works have used combinations of these approaches (Du et al., 2016; Li, 2017; Xiao et al., 2017b;a; Harutyunyan et al., 2017; Lee et al., 2018). However, most existing solutions have problems with tight couplings to particular types of queries, restrictive and data-dependent loss formulations, complex model architectures, or improper handling of censored data.
+While there has been no lack of novelty in the proposed solutions, we find that the seemingly most straightforward generalized parametric survival approach has lacked a thorough treatment. In this paper, we formulate the TTE prediction task as, in each timestep, predicting all parameters of some discretized probability distribution over the current time to the next event. We show the benefits of defining distributions in terms of cumulative hazard functions (Sec. 3.1). Finally, we show that the regular negative log-likelihood for right-censored data, censored log-likelihood (known at least since de Moivre (1731)) as the loss function is sufficient to yield near perfect calibration. All together, this leads to an obvious yet novel framework for general-purpose TTE prediction. We will refer to this as HazardNet. While generalizing previous work, it is easy to implement and evaluate while being capable of yielding real-time predictions on various inference queries, such as predicting the probability of a user returning in 30 days, the expected time to failure or median time of survival.
+1
+
+Under review as a conference paper at ICLR 2019
+In section 4 we show that the model makes unbiased, calibrated probabilistic predictions and efficiently utilizes training data. This is shown by evaluating on three publicly available datasets comparing multiple TTE-distributions and neural network architectures. For the purpose of establishing a strong baseline, we propose a novel evaluation scheme, designed for real-life applications. In addition, in section 5 we reformulate the binary task of musical onset detection into a multivariate distribution prediction task, achieving state of the art results.
+2 RELATED WORK
+There is a diverse array of problem formulations for TTE-prediction (Wang et al., 2017). The methods for censored data are mainly based on classical semi-parametric Cox-models for continuous target values (Katzman et al., 2016; Luck et al., 2017; Joshi & Reeves, 2006). Others formulate it as classification problems (Harutyunyan et al., 2017; Lee et al., 2018) or multi-task learning (Luck et al., 2017; Lee et al., 2018) by predicting the event probability in each step for a fixed number of steps  ahead together with a ranking loss. Non-parametric learning-to-rank methods have been proposed (Kalderstam, 2015) but they suffer from scalability problems. Some studies (Du et al., 2016; Li, 2017; Xiao et al., 2017b;a) predict both TTE and classification of next event jointly using composition of loss functions. Others have learned from censored data by predicting features and target jointly, either using Gaussian processes (Soleimani et al., 2017) or deep exponential families (Ranganath et al., 2016). Recent extensions of this work (Miscouridou et al.) includes an interesting discussion on methods for approximating arbitrary distributions, discretization, evaluation and missing feature data. Sequential prediction is often formulated as asynchronously predicting at the same time as the event (Du et al., 2016; Li, 2017; Xiao et al., 2017b;a; Lee et al., 2018; Avati et al., 2018). However, this makes it unclear how to make predictions between events. For features arriving at different times, it has been proposed to use two recurrent neural networks (RNNs) acting on different timescales (Xiao et al., 2017b), but it did not deal with censored data. For the general problem of unevenly spaced sequences, there has been other notable successful neural network approaches such as Phased LSTM (Neil et al., 2016) or Time-LSTM (Zhu et al.).
+Limitations: Most solutions are designed specifically for each task, such as rank prediction (Katzman et al., 2016; Luck et al., 2017; Kalderstam, 2015; Chen et al., 2013), classification (Harutyunyan et al., 2017; Lee et al., 2018), and more. When using stochastic formulations (Soleimani et al., 2017; Ranganath et al., 2016; Mei & Eisner, 2017; Xu et al., 2017), inference requires extra steps and are arguably made for other tasks (such as missingness of data or understanding feature importance). Without taking into account censored data (Du et al., 2016; Li, 2017; Xiao et al., 2017b;a) probabilistic predictions might have little meaning. Most models are based on strong assumptions about data or underlying distributions, and are difficult to adapt to new problems. The pure parametric survival approaches based on density networks either focused on specific distributions (Martinsson, 2016; Avati et al., 2018) or made cases against the use of regular log-likelihood (Avati et al., 2018). While there has been recent interest in the importance of calibration (Luck et al., 2017; Avati et al., 2018), we argue for a different method of evaluating it in a real-world setting, and most importantly we want to establish a baseline to compare against whether the regular log-likelihood loss needs improvement at all.
+Our contribution: Building on the work of Martinsson (2016), we present a flexible and generalizable framework for time to event prediction that can work with multiple model architectures and distributions, supporting various probabilistic inference queries and handle asynchronously arriving features. We found no in-depth experiments or convincing results on how to evaluate performance, especially calibration for probabilistic predictions. To this end, we propose an evaluation strategy in Section 4. We found no general discussions on learning parametric survival distributions in this setting nor any in depth examples using the Weibull, Pareto, LogLogistic, or other distributions as discretized forms. By thoroughly investigating what ought to be a standard approach and suggesting evaluation methods for it, we hope to establish a strong baseline for time to event prediction. The implementation will be released online.
+2
+
+Under review as a conference paper at ICLR 2019
+
+Figure 1: Schematic illustration of HazardNet. (a) We feed a sequence of feature vectors x, shown as a heatmap, to an arbitrary model N N (i.e., a predictor). (b) N N predicts the parameter of a distribution, t = N N (xt), for each step t as an output (c). As an example, we can use an RNN to sequentially predict Weibull distribution parameters t = [t, t] = N N (x0:t).
+
+3 HAZARDNET
+While many previous approaches have focused on specific data distributions or tasks, our goal is to provide a general framework by focusing on the problem formulation.
+The basic idea is a density network coupled with a parametric survival approach. Let a neural network predict parameters of some TTE-distribution and train it using log-likelihood for censored data. As shown in Figure 1, in every step t we let the predictor map features xt to predicted parameters t, governing the shape of a distribution. The distribution is specified by fixing a functional form of a cumulative hazard function . In the following sections we will show how to use discrete target values and the possibility of learning to approximate arbitrarily complex distributions.
+
+3.1 EFFICIENTLY WORKING WITH DISTRIBUTIONS USING CUMULATIVE HAZARD FUNCTIONS
+
+We will employ the notational convenience of using cumulative hazard functions (CHF) to define probability distributions. In the survival analysis context, it is common to focus on hazard functions, but we found it more efficient to focus on its integral, defined in the following.
+Definition 1. A cumulative hazard function  : R+  R+ is a monotonically increasing positive function such that for all x  0,  0,
+
+0 = (0)  (x)  (x + )  () = 
+
+(1)
+
+where
+
+the
+
+hazard
+
+function
+
+(x)
+
+=
+
+ x
+
+(x)
+
+is
+
+its
+
+positive
+
+derivative
+
+if
+
+it
+
+exists.
+
+A cumulative hazard function (x) is a straightforward way of representing a positive distribution.
+
+If X is a random variable, we can write its corresponding cumulative density function as F (x) =
+
+P r(X < x) = 1 - e-(x) or conversely,   - log(1 - F ). Its probability density function can be
+
+written
+
+f (x)
+
+=
+
+ x
+
+F
+
+(x)
+
+=
+
+(x)e-(x).
+
+If
+
+we
+
+let
+
+the
+
+random
+
+variable
+
+X
+
+represent
+
+a
+
+life
+
+span,
+
+the
+
+survival function S(x) = Pr(X > x) = 1 - F (x) = e-(x) is the probability of surviving until
+
+time x.
+
+Cumulative Hazard functions makes a good abstraction for implementation since the conditions of Equation 1 are easily verifiable. It also simplifies transition from continuous to discrete distributions, an important consideration since real-world data tend to be discrete. Given (x), we can easily form a discrete distribution by defining a probability mass function p(t) = F (t) - F (t + 1) =
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+Table 1: Examples of cumulative hazard function representations of distributions.
+
+Exponential
+
+(
+
+x 
+
+)
+
+W eibull
+
+(
+
+x 
+
+)
+
+P areto
+
+
+
+log
+
+(1
+
++
+
+x 
+
+)
+
+LogLogistic
+
+log
+
+(1
+
++
+
+(
+
+x 
+
+)
+
+)
+
+LogLogisticM ixedHazards k LogLogistic,k
+
+e-(t)-e-(t+1) for t = 1, 2, . . . , . This also makes it easy to use different levels of discretization (i.e., days to weeks). In doing so, instead of using a continuous loss function after discretization, we can learn the discretized distribution directly, which in turn can be used to approximate a continuous distribution if needed.
+
+Example The Exponential(x)
+
+exponential distribution
+
+=
+
+x 
+
+.
+
+Discretization
+
+yields
+
+f (x)
+
+=
+
+1 
+
+the geometric
+
+e-
+
+x 
+
+can be defined
+
+with
+
+distribution, with probability
+
+the mass
+
+CHF func-
+
+tion
+
+p(x)
+
+=
+
+e-
+
+x 
+
+-
+
+e-
+
+x+1 
+
+.
+
+3.2 COMPOSING MIXTURES OF DISTRIBUTIONS
+Recent developments on simplifying probabilistic programming have made it possible to effectively compose and work with distributions and their mixtures (Siddharth et al., 2017; Dillon et al., 2017; Tran et al., 2016). One of the most well-known form of distribution composition is the mixturedensity network (MDN) (Bishop, 1994), where the probability density f = k wkfk of the target data is a linear combination of more simple basis distributions. From the perspective of CHFs, we propose that it is simple to create other powerful compositions that can easily be learned from censored data. It is easy to show that the space of CHFs are closed under strictly increasing mappings (2a), composition (a(b)), multiplication (a · b), addition a + b, and multiplication with positive scalars. As a simple example, LogLogistic = P areto(W eibull). Similar to MDNs, we can create complicated distributions by composing simpler CHFs, which can be easily learned with censored data and be discretized to any time resolution. In section 4, apart from using the commonly used Weibull-, Pareto1- and LogLogistic distributions we try their more expressive additive compositions respectively (named MixedHazards).
+
+3.3 CENSORED LOG-LIKELIHOOD
+
+Under mild assumptions discussed here, we can accurately do maximum likelihood estimation using censored data utilizing censored log-likelihood. With Y a random variable of interest parametrized by , c a constant or random variable of censoring time s.t Y  c|, X = min (Y, c) the censored (truncated) random variable of interest, and U = [Y  c] is the non-censoring indicator, (with u = 1 indicating not censored). Under these conditions it is well known that the likelihood of a censored (Klein & Moeschberger, 2005) random variable X = x with an observed non-censoring indicator U = u can be factored as
+
+f (x|)
+
+x < c (uncensored)
+
+L(X
+
+= x, U
+
+= u)  f (x)uS(x)1-u
+
+ = P r(Y
+
+> c|)
+
+x=c
+
+(right censored)
+
+0 x > c (impossible query)
+
+Which also holds in discretized case, where the above are discretized as (Yd, cd, Xd) = ( Y , c , X ) and Ud = [Yd < cd] is the non-censoring indicator (Martinsson, 2016). The practical implications of this assumption is that c should not be predictable by the features. Our
+experiments (Sec. 4) show that we learn proper calibration, hence this assumption can be made to
+hold in practice.
+
+The log-likelihood for continuous (Eq. 2) and discrete (Eq. 3) observations (x, u), can be simplified as below.
+
+L(, x, c) = log [f (x)uS(x)1-u] = u · log [(x)] - (x)
+
+(2)
+
+Ld(, x, c) = log [p(x)uS(x + 1)1-u] = u · log [e(x+1)-(x) - 1] - (x + 1).
+
+(3)
+
+In this work we focus on the discrete log-likelihood as loss function, using the CHFs in Table 1.
+
+1Parametrized as the Lomax distribution.
+
+4
+
+Under review as a conference paper at ICLR 2019 300 predicted Weibull PMF
+
+yt
+
+150.5
+
+0 0 100 200 300 400 50t0 600 700 800 900 1000
+Figure 2: Predicted Weibull pmf as a heatmap, HazardNet prediction with single 2-node LSTM cell fitted on evenly spaced events, using lagged event indicator as only input. Marked line is the actual target TTE, a countdown reaching Yt = 0 at the time of event.
+
+3.4 LOSS FUNCTION FOR SEQUENTIAL PREDICTION
+
+Consider a sequence indexed by t = 1, . . . T . We model the possibly censored observation (xt, ct)
+
+of time to event and censoring time at timestep t as a realizations of some random variable Yt,
+
+censored using a known censoring time ct s.t Xt = min (Yt, ct). The optimization task is to predict
+
+parameters t of a target distribution, given by a fixed form of , which maximizes the log-likelihood
+
+of the observation. The proposed (discrete) loss for one sequence is thus
+
+T t
+
+-Ld(t, xt, ct).
+
+While this might seem like an obvious formulation, most prior work has chosen different paths. Most work has focused on specifics of certain continuous distributions. While widely known, we hope to reaffirm that the principles of parametric survival analysis extends to all positive and discrete distributions. In terms of data shape, the dominant theme is to asynchronously predicting continuous inter-arrival times (Du et al. (2016); Li (2017); Xiao et al. (2017b;a); Lee et al. (2018); Avati et al. (2018) etc) assuming the time of prediction to coincide with the event times. We focus on the discrete form of TTE, predicted from arbitrary but equally-spaced timesteps.
+
+Equal-spacing and discrete TTE addresses two problems. First, to use sequence models we need a fixed order and want to reduce the maximum sequence length. With continuous time, the number of events can be high, and the order of events may be unclear due to tied event times. Both of these issues are solved through binning and discretization. A second problem is that with unevenlyspaced predictions the loss function involves unevenly spaced terms over time. The adequacy of this scheme when using arbitrary distributions is unclear. A subsequent question becomes how to predict or incorporate features arriving between events. By predicting at fixed intervals these are both solved since we decoupled the prediction and the event times. We have found no work addressing all these questions for censored time to event. Apparent drawback with our method is that if we want to train on a duration of 1000 time-units of data it yields a possibly sparse sequence of length 1000 (as in Figure 2). It also limits the frequency of inference to the hop size (i.e. daily predictions).
+
+4 EXPERIMENTAL RESULTS
+
+We compare a diverse number of time to event distributions (Table 1) learned with different network architectures (Figure 3) on three different datasets (Table. 2) against a binary baseline.
+
+4.1 DATA DESCRIPTION
+
+Table 2: Dataset details
+
+dataset
+LastFM-1k BPI Challenge 2016 Linux git logs
+
+sequences
+991 26613 13432
+
+length(days)
+1538 242 2664
+
+features
+2 8 5
+
+sequence id
+user id user id contributor
+
+event
+`song played' `click event' `commit'
+
+We used three publicly available event-log datasets close to real-world applications. LastFM-1k (Celma, 2010) contains complete listening histories of about 1000 users. BPI (Dees & Van Dongen,
+
+5
+
+Under review as a conference paper at ICLR 2019
+Figure 3: Models used in experiments with details. n is the number of features, k is the number of distribution parameters. (a) MLP (b) RNN (c) Dilated Causal CNN (d) Specific CNN architecture for musical onset detection discussed in Section 5.
+Figure 4: LastFM listening histories as stacked sequences of events sorted by entry into dataset. The training set (a) ends on 2008-06-01, where training TTE is artificially censored as shown as red shades. Test set (b) begins the day after, 2008-06-02. We only report evaluation results comparing prediction made on 2008-06-02 against test set TTE on this day, itself naturally censored by the end of full dataset, 2009-05-09. We don't use sequences shorter than test event lengths, as in blue shades.
+2016) includes one year of click stream data from 26k users who logged in an Employee Insurance Agency office website. We created the Linux commit log dataset, which contains all commits from 13k active contributors since 2011. 2 For each dataset, we discretized the resolution from millisecond to daily measurements. In doing so, a day with multiple events is considered a day with event hence its discrete time to event is zero. Features were aggregated by summation at each day per sequence. The number of events for a sequence in a day becomes one of the feature inputs to the day after. Furthermore, we define a new feature by aggregating events by date, marking the fraction of daily active users the day prior. This is a dense feature while other features are sparse. If a user was observed for 300 days, it yields 300 time steps of data, even if they were only seen once. For every dataset, we use 80% of the dates for training and 20% for evaluation. The training target TTE is calculated from the training set keeping training and test temporally separated but sharing sequences. This can be visualized as in Figure 4. We only evaluate on the date immediately after the testing set ends, yielding one prediction per active sequence. This is the same as training a model on currently available data and doing a follow-up study to compare if events occurred as predicted. This differs from prior work as many split into train-test by sequence. Note that temporal models such as CNN and RNN will use past history as input. 4.2 BASELINE: BINARY WINDOW MODEL In order to show the reliability of the model we need to show proper calibration of predicted probabilities and good discriminatory performance. We did this by training individual binary models
+2Code for recreating datasets & experiments will be available online
+6
+
+Under review as a conference paper at ICLR 2019
+
+Table 3: Highest achieved AUC results on predicting events within 10,30,90 and 300 days after the end of training set with baselines and HazardNet. Bin is the baseline, Bin* is the baseline trained without the last  time steps of the training set, Haz for HazardNet. Bold numbers indicate the best result per model and dataset.
+
+dataset
+lastfm1k lastfm1k lastfm1k lastfm1k
+bpi bpi
+linux linux linux linux
+
+window
+10 30 90 300
+10 30
+10 30 90 300
+
+MLP 2x50 Bin Bin* Haz
+
+0.781 0.759 0.737 0.705
+
+0.781 0.759 0.737 0.705
+
+0.782 0.759 0.737 0.705
+
+0.687 0.687 0.690 0.702 0.702 0.708
+
+0.552 0.534 0.524 0.517
+
+0.552 0.534 0.524 0.517
+
+0.552 0.534 0.524 0.517
+
+RNN 2x50 Bin Bin* Haz
+
+0.968 0.966 0.959 0.918
+
+0.967 0.967 0.952 0.893
+
+0.968 0.965 0.957 0.917
+
+0.798 0.809 0.845 0.835 0.837 0.877
+
+0.940 0.927 0.899 0.863
+
+0.941 0.925 0.906 0.864
+
+0.941 0.929 0.915 0.885
+
+CNN 14x50 Bin Bin* Haz
+
+0.967 0.957 0.945 0.907
+
+0.960 0.955 0.934 0.903
+
+0.967 0.965 0.955 0.911
+
+0.799 0.807 0.834 0.846 0.798 0.866
+
+0.910 0.885 0.861 0.789
+
+0.913 0.886 0.844 0.772
+
+0.915 0.895 0.855 0.795
+
+predicting probability of event within a threshold  = 10, 30, 90, 300 timesteps ahead. We compared this against HazardNet by querying its predicted distribution on t = Pr (Yt <  ). While a binary model is explicitly trained for one threshold, HazardNet needs to learn them all. For this reason one could view the binary models' performance as an upper bound.
+While technically not a time to event model, in practice the binary window model is the dominant modeling method for time to event problems. For experimental purposes it is illuminating. No other relevant baseline could be justifiable compared for discrete TTE over different network architectures and different probabilistic queries. The only confounding factor is the treatment of censoring in the training set. HazardNet treats it explicitly while for the binary model there is two choices. One can keep the last  timesteps of data (which doesn't have unbiased ground truth about no event) or remove it. We used both methods, denoted as Bin and Bin*.
+We use standard evaluation metrics for binary classification to evaluate the predicted probabilities. Calibration is evaluated measuring Expected Calibration error (ECE) (Naeini et al., 2015), discriminatory performance using Area Under the Curve (AUC) and overall performance using Binary Cross Entropy (BCE)3, the loss that the binary model is optimizing for.
+We ran an excess of 452 individual training runs. HazardNet was trained repetedly for every architecture and distribution4 . Binary models were trained for every architecture and threshold, with and without the last  timesteps in the training set. More details can be found in Appendix.
+
+4.3 RESULTS
+HazardNet beats or has identical performance to the binary model for almost every dataset, architecture and distribution. While HazardNet is significantly better on most metrics, the difference is very small. In Table 3 we report the best AUC achieved per experiment. Additional figures and tables can be found in Appendix. We summarize the results here.
+Different datasets have different optimal TTE-distributions: The 1-parameter exponential distribution was consistently worse than the others. Weibull and WeibullMixedHazards was the least numerically stable, often failing mid training. LogLogistic seems like a generally good choice. Weibull was optimal for LastFm-1k, differing from other datasets with it's very high event density. Weibull is the only distribution that can model increasing hazard, suitable when lack of events implies event is getting closer. The highly seasonal BPI-dataset was dominated by LogLogistic which can model hazards that peak at some time, possibly suitable to model users certain to return at end
+3Negative Bernoulli loglikelihood. 4 2-parameter Weibull, Pareto, LogLogistic, and their MixedHazard-variants ( 3 mixed CHFs each) and the 1-parameter Exponential distribution.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+of month. The highly unpredictable Linux-dataset, characterized by high dropoff was dominated by Pareto which a strictly decreasing hazard.
+The binary model should not train on the last timesteps: The temporal CNN and RNN learned that event-probability is artificially low at the end of the training set since we lack negative ground truth samples. This makes the Binary model that were allowed to train on these timesteps poorly calibrated (high ECE and BCE). On the calibration independent metric AUC, the models were indistinguishable except on the seasonal BPI-dataset where we assume the artifactc were more easily overfitted on. This confirms that the binary approach is either biased or misses training data.
+HazardNet beats the baseline overall: HazardNet was better calibrated (lower minimum ECE) and had better discriminative performance (higher calibration independent AUC). The results are most pronounced for the stronger models (CNN, RNN) implying that our model is most of the time better or equal and less prone to overfit. Comparing the metric the binary model was optimized for (BCE), the results are less convincing but very close. Over all metrics, HazardNet is significantly better, but the difference is very small.
+
+5 APPLICATION: MUSICAL ONSET DETECTION
+
+Table 4: F1 scores and standard deviation of 8 folds on onset detection. F1 evaluated before & after predicted probabilities were smoothed using a size 5 hamming window.
+
+Model
+Schluter & Bo¨ck (2014) (our implementation) Baseline (Modified Schlu¨ter) HazardNet (censored using c = 10) HazardNet (censored using c = 20)
+
+F1
+0.853±0.014 0.848±0.016 0.878 ±0.014 0.872±0.016
+
+F1 (Smoothed)
+0.853±0.015 0.851±0.017 0.874±0.015 0.869±0.018
+
+Aiming to show the versatility of the proposed model, we applied it for musical onset detection. The task is to detect relevant musical events in audio signals which is broadly used in applications such as automatic piano transcription (Hawthorne et al., 2017). The state of the art poses it as a binary prediction task. To counter class imbalance and sparseness they apply various smoothing techniques and weights on predicted probabilities (Schluter & Bo¨ck, 2014). We propose to soften this problem instead by formulating it as a multivariate time to event problem, jointly predicting the distribution of time to onset and time since onset (TSE). In this way the onset probability in each timestep can be predicted as in Eq. 5:
+pt = Pr (Onset within  = 1 steps) = Pr ([T SE < 1]  [T T E < 1]) = 1-StT SE(1)StT T E(1) (4)
+Experiments were performed on the Bo¨ck dataset, a dataset for evaluating onset detection that is used in several papers (Bo¨ck et al., 2012; Schluter & Bo¨ck, 2014) The dataset contains 321 audio clips taken from various sources, including piano, violin, percussions, and more (Bo¨ck et al., 2012). As feature input we use log scale mel-spectrograms (80 bins) computed with Librosa (McFee et al., 2015) with frequency ranges between 27.Hz to 16kHz. For each audio clip, three mel-spectrograms with different STFT window sizes(23ms, 46ms, 93ms) but same hop size(10ms) were computed and concatenated channel-wise. A single network input is 15 frames of a precomputed mel-spectrogram, where we predict on the center frame. The network architecture is shown in Figure 3 (d). To compare with previous work we used the CNN architecture of Schlu¨ter (Schluter & Bo¨ck, 2014). Our model had two extra layers for the parametric output so a comparable baseline model was made to match the number of parameters (Schluter & Bo¨ck, 2014).
+Target values for training were naturally censored at start and end of song and artificially censored s.t y < c with y the TSE and TTE and c = 10, 20. All experiments are trained on 300 epochs, using SGD with a learning rate of 0.001 and momentum linearly increasing at 10 to 20 epochs from 0.45 to 0.9. To choose predicted onset labels from the predicted probabilities we applied the peak-picking method from Librosa (McFee et al., 2015), using parameters recommended by Bo¨ck for offline detection (Bo¨ck et al., 2012). For evaluation, we use the onset evaluation metric from mir-eval (Raffel et al., 2014) with 50ms tolerance. We achieved best results using the LogLogistic distribution and c  10. Results as average optimal F1-scores from 8-fold cross validation are
+
+8
+
+Under review as a conference paper at ICLR 2019
+reported in Table 4. We find that despite only differing by the loss function, our method achieves state of the art results.
+6 SUMMARY & CONCLUSION
+In this paper we presented a simple generalized parametric survival approach for using neural networks to sequentially predict probability distributions over time to the next event.
+In the experiments we trained the proposed model (HazardNet) and queryed it on subtasks for which baseline binary models were explicitly trained for. We found that we often achieve both higher performance and better calibrated probabilistic predictions. Since the model predicts a distribution one can readily calculate other meaningful quantities from it such as predicting quantiles, expected value or sample random TTEs.
+While much prior research has focused on specifics of certain probability distributions, we unsurprisingly find that the optimal choice depends on the dataset. We think this emphasizes the importance of a broader discussion on generalized solutions and good abstractions, making it easy to experiment and create new distributions. To this goal, we showed how to train with censored data and how this extends to various continuous, discrete and multivariate distributions with minimal effort.
+We introduced and tested a way to compose distributions using their cumulative hazard functions while being able to use censored data (MixedHazards-distributions). Despite being much more expressive, we found no proof that they performed better (or worse) than simple distributions. It is tempting to work on trying to encode more information into ever more expressive predicted distributions or fine-grained predicted hazard rates. For the real-life event sequence data we used, we find little to indicate that this is a fruitful path of research.
+The main intention of the experiments was to verify that our model makes unbiased, calibrated probabilistic predictions and efficiently utilizes training data. Our criteria for relevant baselines was to be able to train with discrete censored TTE, use asynchronously arriving feature inputs while predicting at each timestep and work with arbitrary neural network-architectures. It should also be able to predict queries such as Pr (Y < 10), . . . , Pr (Y < 300). To the best of our knowledge, no existing work satisfied all of these demands. What was left for fair comparison was the binary window prediction model. That aside, comparisons between generalized parametric- and the dominant semi-parametric Cox-Proportional Hazards approach (Katzman et al., 2016; Luck et al., 2017; Joshi & Reeves, 2006) should be priority future work. The latter can only answer a subset of the probabilistic queries but it is theoretically possible to compare models in terms of their predicted rankings between subjects, calculating Pr(Y i < Y j). As we found no prior work on architecture agnostic semi-parametric approaches we propose this as future work.
+Finally, for extensions of our work we propose studies on how to extend and evaluate it for asynchronously predicted time to event and how multivariate time to event can be connected to temporal multi-class classification.
+REFERENCES
+Anand Avati, Tony Duan, Kenneth Jung, Nigam H Shah, and Andrew Ng. Countdown regression: Sharp and calibrated survival predictions. arXiv preprint arXiv:1806.08324, 2018.
+Christopher M Bishop. Mixture density networks. 1994.
+Sebastian Bo¨ck, Florian Krebs, and Markus Schedl. Evaluating the online capabilities of onset detection methods. In ISMIR, pp. 49­54, 2012.
+O. Celma. Music Recommendation and Discovery in the Long Tail. Springer, 2010.
+Yifei Chen, Zhenyu Jia, Dan Mercola, and Xiaohui Xie. A gradient boosting algorithm for survival analysis via direct optimization of concordance index. Computational and mathematical methods in medicine, 2013, 2013.
+Abraham de Moivre. Annuities Upon Lives: Or, the Valuation of Annuities Upon Any Number of Lives; as Also, of Reversions. To which is Added, an Appendix Concerning the Expectations of
+9
+
+Under review as a conference paper at ICLR 2019
+Life, and Probabilities of Survivorship. By A. de Moivre. FRS. London printed: and, Dublin re-printed, by and for Samuel Fuller, 1731.
+M. Dees and B.F. Van Dongen. Bpi challenge 2016, 2016.
+Joshua V Dillon, Ian Langmore, Dustin Tran, Eugene Brevdo, Srinivas Vasudevan, Dave Moore, Brian Patton, Alex Alemi, Matt Hoffman, and Rif A Saurous. Tensorflow distributions. arXiv preprint arXiv:1711.10604, 2017.
+Nan Du, Hanjun Dai, Rakshit Trivedi, Utkarsh Upadhyay, Manuel Gomez-Rodriguez, and Le Song. Recurrent marked temporal point processes: Embedding event history to vector. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 1555­1564. ACM, 2016.
+Hrayr Harutyunyan, Hrant Khachatrian, David C Kale, and Aram Galstyan. Multitask learning and benchmarking with clinical time series data. arXiv preprint arXiv:1703.07771, 2017.
+Curtis Hawthorne, Erich Elsen, Jialin Song, Adam Roberts, Ian Simon, Colin Raffel, Jesse Engel, Sageev Oore, and Douglas Eck. Onsets and frames: Dual-objective piano transcription. arXiv preprint arXiv:1710.11153, 2017.
+Hemant Ishwaran, Udaya B Kogalur, Eugene H Blackstone, and Michael S Lauer. Random survival forests. The annals of applied statistics, pp. 841­860, 2008.
+Rashmi Joshi and Colin Reeves. Beyond the cox model: artificial neural networks for survival analysis part ii. In Proceedings of the eighteenth international conference on systems engineering, pp. 179­184, 2006.
+Jonas Kalderstam. Neural Network Approaches To Survival Analysis. PhD thesis, Lund University, 2015.
+Jared Katzman, Uri Shaham, Jonathan Bates, Alexander Cloninger, Tingting Jiang, and Yuval Kluger. Deep survival: A deep cox proportional hazards network. arXiv preprint arXiv:1606.00931, 2016.
+J.P. Klein and M.L. Moeschberger. Survival Analysis: Techniques for Censored and Truncated Data. Statistics for Biology and Health. Springer New York, 2005. ISBN 9780387953991. URL https://books.google.co.kr/books?id=jS2Cy0lezJIC.
+Changhee Lee, William R Zame, Jinsung Yoon, and Mihaela van der Schaar. Deephit: A deep learning approach to survival analysis with competing risks. 2018.
+Yang Li. Time-dependent representation for neural event sequence prediction. arXiv preprint arXiv:1708.00065, 2017.
+Margaux Luck, Tristan Sylvain, He´lo¨ise Cardinal, Andrea Lodi, and Yoshua Bengio. Deep learning for patient-specific kidney graft survival analysis. arXiv preprint arXiv:1705.10245, 2017.
+Egil Martinsson. WTTE-RNN : Weibull Time To Event Recurrent Neural Network. Master's thesis, Chalmers University Of Technology, 2016.
+Brian McFee, Colin Raffel, Dawen Liang, Daniel PW Ellis, Matt McVicar, Eric Battenberg, and Oriol Nieto. librosa: Audio and music signal analysis in python. In Proceedings of the 14th python in science conference, pp. 18­25, 2015.
+Hongyuan Mei and Jason M Eisner. The neural hawkes process: A neurally self-modulating multivariate point process. In I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (eds.), Advances in Neural Information Processing Systems 30, pp. 6757­6767. Curran Associates, Inc., 2017.
+Xenia Miscouridou, Adler Perotte, Noe´mie Elhadad, and Rajesh Ranganath. Deep survival analysis: Nonparametrics and missingness.
+Mahdi Pakdaman Naeini, Gregory F Cooper, and Milos Hauskrecht. Obtaining well calibrated probabilities using bayesian binning. In AAAI, pp. 2901­2907, 2015.
+10
+
+Under review as a conference paper at ICLR 2019
+Daniel Neil, Michael Pfeiffer, and Shih-Chii Liu. Phased lstm: Accelerating recurrent network training for long or event-based sequences. In Advances in Neural Information Processing Systems, pp. 3882­3890, 2016.
+Bob Price, Lottie Price, Dylan Cashman, and Marzieh Nabi. Efficient bayesian detection of disease onset in truncated medical data. In Healthcare Informatics (ICHI), 2017 IEEE International Conference on, pp. 208­213. IEEE, 2017.
+Colin Raffel, Brian McFee, Eric J Humphrey, Justin Salamon, Oriol Nieto, Dawen Liang, Daniel PW Ellis, and C Colin Raffel. mir eval: A transparent implementation of common mir metrics. In In Proceedings of the 15th International Society for Music Information Retrieval Conference, ISMIR. Citeseer, 2014.
+Rajesh Ranganath, Adler Perotte, Noe´mie Elhadad, and David Blei. Deep survival analysis. arXiv preprint arXiv:1608.02158, 2016.
+Felix Salfner, Maren Lenk, and Miroslaw Malek. A survey of online failure prediction methods. ACM Computing Surveys (CSUR), 42(3):10, 2010.
+Jan Schluter and Sebastian Bo¨ck. Improved musical onset detection with convolutional neural networks. In Acoustics, speech and signal processing (icassp), 2014 ieee international conference on, pp. 6979­6983. IEEE, 2014.
+N. Siddharth, Brooks Paige, Jan-Willem van de Meent, Alban Desmaison, Noah D. Goodman, Pushmeet Kohli, Frank Wood, and Philip Torr. Learning disentangled representations with semisupervised deep generative models. In I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (eds.), Advances in Neural Information Processing Systems 30, pp. 5927­5937. Curran Associates, Inc., 2017.
+ukasz Sobaszek and Arkadiusz Gola. Survival analysis method as a tool for predicting machine failures. 177:421­428, 03 2016.
+Hossein Soleimani, James Hensman, and Suchi Saria. Scalable joint models for reliable uncertaintyaware event prediction. IEEE transactions on pattern analysis and machine intelligence, 2017.
+Dustin Tran, Alp Kucukelbir, Adji B Dieng, Maja Rudolph, Dawen Liang, and David M Blei. Edward: A library for probabilistic modeling, inference, and criticism. arXiv preprint arXiv:1610.09787, 2016.
+Ping Wang, Yan Li, and Chandan K Reddy. Machine learning for survival analysis: A survey. arXiv preprint arXiv:1708.04649, 2017.
+Shuai Xiao, Junchi Yan, Mehrdad Farajtabar, Le Song, Xiaokang Yang, and Hongyuan Zha. Joint modeling of event sequence and time series with attentional twin recurrent neural networks. arXiv preprint arXiv:1703.08524, 2017a.
+Shuai Xiao, Junchi Yan, Xiaokang Yang, Hongyuan Zha, and Stephen M Chu. Modeling the intensity function of point process via recurrent neural networks. In AAAI, pp. 1597­1603, 2017b.
+Hongteng Xu, Dixin Luo, and Hongyuan Zha. Learning hawkes processes from short doublycensored event sequences. In International Conference on Machine Learning, pp. 3831­3840, 2017.
+Yu Zhu, Hao Li, Yikang Liao, Beidou Wang, Ziyu Guan, Haifeng Liu, and Deng Cai. What to do next: modeling user behaviors by time-lstm.
+11
+
+Under review as a conference paper at ICLR 2019
+
+A APPENDIX
+
+A.1 MORE DETAILS ON EXPERIMENTS OF SECTION 4
+
+To validate our results we made a total of 452 individual training runs. All logs, results and code to recreate the experiments will be released online.
+The binary baselines were run for every dataset, threshold ( = 10, 30, 90, 300) and model (MLP, CNN, RNN) using both the last (biased) binary target value (labeled a 'Bin' in tables) and when removing the  last timesteps of the training set (labeled as Bin). Every setting was repeated for different random seeds; at least 5 times for LastFm1k (98 successful runs in total), 8 times for BPI (64) and at least 4 times for linux dataset (69).
+HazardNet was run for every dataset, distribution (Exponential, Weibull, LogLogistic, Pareto and their MixedHazards-versions) and model. Binary evaluation was calculated for every  . Every setting was repeated for different random seeds; at least 2 times for LastFm1k (63 successful runs in total), 3 times for BPI (76) and at least 3 times for linux dataset (82 runs in total). The TTE was artificially censored s.t TTE < 300. This was found to increase numerical stability and reduce overfit. We found little or no advantage in the more expressive often multimodal MixedHazardsdistributions. We speculate that this is due to the tasks being inherently hard and exact timings of events unpredictable.
+We present summaries of this large comparison matrix below. Here we also show results when using a smaller 1-layer 5-hidden units RNN. Figure 5,6, 7 shows the best metrics (HazardNet vs Binary baseline) evaluated per epoch. It is clear that the HazardNet approach is almost always better or at least as good and seems less prone to overfit. Table 5, 6, 7 summarises the final results in more detail. Figure 8 and 9 shows the test-set loss broken down per distribution. This was evaluated differently (using the whole test set, not just the timesteps after the end of training set). When comparing the binary scores for HazardNet among distributions evaluated in the more rigourous fashion proposed in Section. 4 the overall trends are the same.
+
+Table 5: Binary Cross Entropy evaluated as described in Section 4.
+
+dataset lastfm1k lastfm1k lastfm1k lastfm1k bpi bpi linux linux linux linux
+
+threshold 10 30 90 300 10 30 10 30 90 300
+
+MLP2x50B 0.462* 0.452* 0.435* 0.36* 0.627** 0.521* 0.179** 0.294** 0.404** 0.527***
+
+MLP2x50B 0.462** 0.452** 0.435** 0.333** 0.628* 0.518** 0.18* 0.295* 0.408* 0.543*
+
+MLP2x50H 0.461*** 0.45*** 0.432*** 0.329*** 0.625*** 0.515*** 0.179*** 0.292*** 0.402*** 0.534**
+
+RNN1x5B 0.226* 0.222* 0.228** 0.286* 0.637* 0.808* 0.102*** 0.161*** 0.22*** 0.327**
+
+RNN1x5B 0.226*** 0.221** 0.229* 0.244** 0.47*** 0.355*** 0.102** 0.161** 0.22** 0.312***
+
+RNN1x5H 0.226** 0.219*** 0.225*** 0.235*** 0.473** 0.356** 0.104* 0.169* 0.236* 0.351*
+
+RNN2x50B 0.224** 0.231* 0.252* 0.519* 1.03* 1.323* 0.104** 0.168*** 0.359* 0.643*
+
+RNN2x50B 0.225* 0.22*** 0.249** 0.347** 0.535** 0.442** 0.104*** 0.169** 0.24*** 0.362***
+
+RNN2x50H 0.222*** 0.221** 0.224*** 0.264*** 0.509*** 0.432*** 0.107* 0.18* 0.261** 0.418**
+
+CNN14x50B 0.228** 0.266* 0.326* 0.561* 0.867* 1.303* 0.116* 0.216* 0.435* 0.901*
+
+CNN14x50B 0.236* 0.258** 0.278** 0.264** 0.558** 0.545** 0.111** 0.188** 0.271** 0.384**
+
+CNN14x50H 0.226*** 0.219*** 0.221*** 0.238*** 0.508*** 0.434*** 0.107*** 0.173*** 0.253*** 0.372***
+
+Table 6: Area Under the Curve evaluated as described in Section 4.
+
+dataset lastfm1k lastfm1k lastfm1k lastfm1k bpi bpi linux linux linux linux
+
+threshold 10 30 90 300 10 30 10 30 90 300
+
+MLP2x50B 0.781* 0.759 0.737 0.705 0.687** 0.702* 0.552** 0.534** 0.524** 0.517**
+
+MLP2x50B 0.781** 0.759 0.737 0.705 0.687* 0.702** 0.552* 0.534* 0.524* 0.517*
+
+MLP2x50H 0.782*** 0.759 0.737 0.705 0.69*** 0.708*** 0.552*** 0.534*** 0.524*** 0.517***
+
+RNN1x5B 0.967* 0.965** 0.957*** 0.914** 0.837* 0.879* 0.943*** 0.932*** 0.921** 0.897***
+
+RNN1x5B 0.967*** 0.965* 0.956* 0.913* 0.852*** 0.893*** 0.943** 0.932** 0.921*** 0.897**
+
+RNN1x5H 0.967** 0.966*** 0.957** 0.916*** 0.851** 0.893** 0.942* 0.93* 0.919* 0.897*
+
+RNN2x50B 0.968** 0.966** 0.959*** 0.918*** 0.798* 0.853** 0.94* 0.927** 0.899* 0.863*
+
+RNN2x50B 0.967* 0.967*** 0.952* 0.893* 0.817** 0.837* 0.941** 0.925* 0.906** 0.876**
+
+RNN2x50H 0.968*** 0.965* 0.957** 0.917** 0.845*** 0.881*** 0.941*** 0.929*** 0.915*** 0.885***
+
+CNN14x50B 0.967** 0.961** 0.948** 0.907** 0.799* 0.847** 0.91* 0.885* 0.861*** 0.789*
+
+CNN14x50B 0.963* 0.955* 0.938* 0.903* 0.807** 0.803* 0.913** 0.887** 0.851* 0.806***
+
+CNN14x50H 0.967*** 0.965*** 0.955*** 0.911*** 0.836*** 0.866*** 0.915*** 0.895*** 0.855** 0.795**
+
+Table 7: Expected Calibration Error evaluated as described in Section 4.
+
+dataset lastfm1k lastfm1k lastfm1k lastfm1k bpi bpi linux linux linux linux
+
+threshold 10 30 90 300 10 30 10 30 90 300
+
+MLP2x50B 0.003*** 0.004*** 0.008** 0.088* 0.029** 0.034* 0.012** 0.022** 0.037** 0.028***
+
+MLP2x50B 0.006* 0.009* 0.014* 0.019** 0.034* 0.027** 0.013* 0.026* 0.052* 0.085*
+
+MLP2x50H 0.005** 0.005** 0.003*** 0.008*** 0.021*** 0.011*** 0.012*** 0.014*** 0.029*** 0.058**
+
+RNN1x5B 0.019** 0.019** 0.024* 0.106* 0.212* 0.368* 0.006* 0.007*** 0.007** 0.052*
+
+RNN1x5B 0.022* 0.02* 0.014** 0.056** 0.017** 0.016** 0.006** 0.007** 0.004*** 0.011***
+
+RNN1x5H 0.017*** 0.017*** 0.011*** 0.032*** 0.011*** 0.008*** 0.004*** 0.008* 0.009* 0.021**
+
+RNN2x50B 0.019** 0.037* 0.056* 0.18* 0.355* 0.507* 0.007* 0.015* 0.09* 0.164*
+
+RNN2x50B 0.021* 0.027** 0.044** 0.097** 0.06** 0.061** 0.005** 0.009** 0.023** 0.052**
+
+RNN2x50H 0.016*** 0.019*** 0.019*** 0.056*** 0.029*** 0.053*** 0.003*** 0.007*** 0.014*** 0.032***
+
+CNN14x50B 0.017*** 0.047* 0.093* 0.197* 0.304* 0.493* 0.013* 0.037* 0.098* 0.195*
+
+CNN14x50B 0.018* 0.035** 0.044** 0.065** 0.062** 0.079** 0.005** 0.016** 0.019** 0.015**
+
+CNN14x50H 0.017** 0.018*** 0.018*** 0.031*** 0.019*** 0.053*** 0.002*** 0.007*** 0.011*** 0.012***
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+BCE
+
+0.7 0.6 0.5 0.4 0.3 0.2 0.6 0.5 0.4 0.3 0.2
+0.5 0.4 0.3
+0.8
+0.6
+0.4
+0.2 1.0 0.8 0.6
+1.5 1.2 0.9 0.6 0.3
+0.175 0.150 0.125 0.100
+0.28 0.24 0.20 0.16
+0.5
+0.4
+0.3
+1.0 0.8 0.6 0.4
+0
+
+MLP_2x50 1000 20000
+
+RNN_1x5
+
+RNN_2x50
+
+CNN_14x50
+
+1000 20000
+
+1000 20000
+
+epoch
+
+1000 2000
+
+30 10 30 90 300
+
+bpi 10
+
+lastfm1k lastfm1k lastfm1k lastfm1k 10 30 90 300
+
+linux
+
+linux
+
+linux
+
+linux
+
+bpi
+
+type
+HazardNet Binary Binary*
+
+Figure 5: Minimum of each run for the test-loss during training evaluated as described in section 4. Lower is better.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+AUC
+
+1.00 0.75 0.50 0.25
+1.00 0.75 0.50 0.25 1.00 0.75 0.50 0.25
+
+MLP_2x50
+
+RNN_1x5
+
+RNN_2x50
+
+CNN_14x50
+
+0.8 0.6 0.4 0.2
+0.8
+0.7
+0.6
+0.5 0.9 0.8 0.7 0.6 0.5
+0.9 0.8 0.7 0.6 0.5
+0.9 0.8 0.7 0.6 0.5
+0.9 0.8 0.7 0.6 0.5 0.9 0.8 0.7 0.6 0.5
+0
+
+1000 20000
+
+1000
+
+20000
+epoch
+
+1000
+
+20000
+
+1000 2000
+
+30 10 30 90 300
+
+bpi 10
+
+lastfm1k lastfm1k lastfm1k lastfm1k 10 30 90 300
+
+linux
+
+linux
+
+linux
+
+linux
+
+bpi
+
+type
+HazardNet Binary Binary*
+
+Figure 6: Maximum of each run for the test-loss during training evaluated as described in section 4. Higher is better.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+ECE
+
+0.3
+0.2
+0.1
+0.0 0.3
+0.2
+0.1
+0.0 0.20 0.15 0.10 0.05 0.00
+0.2
+0.1
+0.0
+0.3 0.2 0.1 0.0 0.5 0.4 0.3 0.2 0.1 0.0 0.025 0.020 0.015 0.010 0.005
+0.04 0.03 0.02 0.01
+0.100 0.075 0.050 0.025 0.000
+0.20 0.15 0.10 0.05 0.00
+0
+
+MLP_2x50 1000 20000
+
+RNN_1x5
+
+RNN_2x50
+
+CNN_14x50
+
+1000 20000
+
+1000 20000
+
+epoch
+
+1000 2000
+
+30 10 30 90 300
+
+bpi 10
+
+lastfm1k lastfm1k lastfm1k lastfm1k 10 30 90 300
+
+linux
+
+linux
+
+linux
+
+linux
+
+bpi
+
+type
+HazardNet Binary Binary*
+
+Figure 7: Minimum of each run for the test-loss during training evaluated as described in section 4. Lower is better.
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+loss_test
+
+MLP_2x50 0.6 0.5 0.4 0.3 0.7
+
+RNN_1x5
+
+RNN_2x50
+
+CNN_14x50
+
+0.6
+
+0.5
+
+0.6 0.5 0.4 0.3 0.2
+
+linux
+
+bpi
+
+lastfm1k
+
+distribution:threshold
+Bernoulli:10 Bernoulli:30 Bernoulli:90 Bernoulli:300
+hide_timesteps
+FALSE TRUE
+
+0 1000 20000 1000 20000 1000 20000 1000 2000
+epoch
+Figure 8: Minimum over each run and timestep for the test-loss during training for the binary baselines (evaluated on all timesteps of the test set)
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+MLP_2x50 4.5 4.0 3.5 3.0 3.4
+
+RNN_1x5
+
+RNN_2x50
+
+CNN_14x50
+
+3.2
+
+3.0
+
+2.8
+
+bpi
+
+lastfm1k
+
+distribution
+Exponential LogLogistic LogLogisticMixedHazards Pareto ParetoMixedHazards Weibull WeibullMixedHazards
+
+loss_test
+
+2.8
+
+linux
+
+2.6
+
+2.4
+
+2.2 0
+
+1000 20000
+
+1000 20000 1000 20000
+epoch
+
+1000 2000
+
+Figure 9: Minimum of each run for the test-loss during training for HazardNet models (evaluated on all timesteps of the test set)
+
+17
+
+

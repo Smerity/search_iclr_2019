@@ -1,0 +1,626 @@
+Under review as a conference paper at ICLR 2019
+BEYOND GREEDY RANKING: SLATE OPTIMIZATION VIA LIST-CVAE
+Anonymous authors Paper under double-blind review
+ABSTRACT
+The conventional approach to solving the recommendation problem greedily ranks individual document candidates by prediction scores. However, this method fails to optimize the slate as a whole, and hence, often struggles to capture biases caused by the page layout and document interdepedencies. The slate recommendation problem aims to directly find the optimally ordered subset of documents (i.e. slates) that best serve users' interests. Solving this problem is hard due to the combinatorial explosion of document candidates and their display positions on the page. In this paper, we introduce List Conditional Variational Auto-Encoders (ListCVAE), which learn the joint distribution of documents on the slate conditioned on user responses, and directly generate full slates. Experiments on simulated and real-world data show that List-CVAE outperforms greedy ranking methods consistently on various scales of documents corpora.
+1 INTRODUCTION
+Recommendation systems modeling is an important machine learning area in the IT industry, powering online advertisement, social networks and various content recommendation services (Schafer et al., 2001; Lu et al., 2015). In the context of document recommendation, its aim is to generate and display an ordered list of "documents" (called a "slate" in (Swaminathan et al., 2017; Sunehag et al., 2015)) to users, based on both user preferences and documents content. For large scale recommender systems, a common scalable approach at inference time is to first select a small subset of candidate documents S out of the entire document pool D. This step is called "candidate generation". Then a function approximator such as a neural network (e.g., a Multi-Layer Perceptron or MLP) called the "ranking model" is used to predict probabilities of user engagements for each document in the small subset S and greedily generates a slate by sorting the top documents from S based on estimated prediction scores (Covington et al., 2016). This two-step process is widely popular to solve large scale recommender problems due to its scalability and fast inference at serving time. The candidate generation step can decrease the number of candidates from millions to hundreds or less, effectively dealing with scalability when faced with a large corpus of documents D. Since |S| is much smaller than |D|, the ranking model can be reasonably complicated without increasing latency.
+However, there are two main problems with this approach. First the candidate generation and the ranking models are not trained jointly, which can lead to having candidates in S that are not the highest scoring documents of the ranking model. Second and most importantly, the greedy ranking of documents on the slate suffers from numerous biases that come with the visual presentation of the slate and context in which documents are presented. For example, there exists positional biases caused by users paying more attention to prominent slate positions (Joachims et al., 2005), and contextual biases, due to interactions between documents presented together in the same slate, such as competition and complementarity, relative attractiveness, etc. (Yue et al., 2010).
+In this paper, we study the slate recommendation problem beyond the greedy ranking paradigm. We consider a slate "optimal" when it maximizes some type of user engagement feedback, a typical desired scenario in recommendation systems. For example, given a database of song tracks, the optimal slate can be an ordered list (in time or space) of k songs such that the user ideally likes every song in that list (in the order they are presented). Another example considers news articles, the optimal slate has k ordered articles such that every article is read by the user. In general, optimality can be defined as a desired user response vector on the slate and the proposed model should be
+1
+
+Under review as a conference paper at ICLR 2019
+agnostic to these problem-specific definitions. Solving the slate recommendation problem directly differs from ranking in that first, it does not assume that more relevant documents should necessarily be put in earlier positions in the slate. Second, the entire slate is used as a training example instead of single documents, preserving numerous biases encoded into the slate that might influence user responses. Finally, our model directly generates slates, again taking into account all the influential biases the model learned through training.
+In this paper, we apply Conditional Variational Auto-Encoders (CVAEs) (Kingma et al., 2014; Kingma and Welling, 2013; Jimenez Rezende et al., 2014) to model the distributions of all documents in the same slate conditioned on the user response. All documents in a slate along with their positional, contextual biases are jointly encoded into the latent space, which is then sampled and combined with desired conditioning for direct slate generation, i.e. sampling from the learned conditional joint distribution. Therefore, the model first learns which slates give which type of responses and then directly generates similar slates given a desired response vector as the conditioning at inference time. We call our proposed model List-CVAE. The key contributions of our work are:
+1. To the best of our knowledge, this is the first model that provides a conditional generative modeling framework for slate recommendation by direct generation. It does not necessarily require a candidate generator at inference time and is flexible enough to work with any visual presentation of the slate as long as the ordering of display positions is fixed throughout training and inference times.
+2. To deal with the problem at scale, we introduce an architecture that uses pretrained document embeddings combined with a negatively downsampled k-head softmax layer within the List-CVAE model, where k is the slate size.
+The structure of this paper is the following. First we introduce related work using various CVAE-type models as well as other approaches to solve the slate generation problem. Next we introduce our List-CVAE modeling approach. The last part of the paper is devoted to experiments on both simulated and the real-world datasets.
+2 RELATED WORK
+
+(a) VAE
+
+(b) CVAE-CF
+
+(c) JVAE-CF
+
+(d) JMVAE
+
+(e) List-CVAE
+
+Figure 1: Comparison of related variants of VAE models. Note that user variables are not included in the graphs for clarity. (a) VAE; (b) CVAE-CF with auxiliary variables; (c) Joint Variational Auto-Encoder-Collaborative Filtering (JVAE-CF); (d) JMVAE; and, (e) List-CVAE (ours) with the whole slate as input.
+
+Traditional matrix factorization techniques have been applied to recommender systems with success in modeling competitions such as the Netflix Prize (Koren et al., 2009). Later research emerged on using autoencoders to improve on the results of matrix factorization (Wu et al., 2016; Wang et al., 2015) (CDAE, CDL). More recently several works use Boltzmann Machines (Abdollahi and Nasraoui, 2016) and variants of VAE models in the Collaborative Filtering (CF) paradigm to model recommender systems (Li and She, 2017; Lee et al., 2017; Liang et al., 2018) (Collaborative VAE, JMVAE, CVAE-CF, JVAE-CF). See Figure 1 for model comparisons. In this paper, unless specified otherwise, the user features and any context are routinely considered part of the conditioning variables (in Section 4.1 Personalization Test, we test List-CVAE generating personalized slates for different users). These models have primarily focused on the greedy approach of modeling independently each document or pairs of documents in the slate and applying greedy ordering at inference time.
+Our model is also using a VAE type structure and in particular, is closely related to the Joint Multimodel Variational Auto-Encoder (JMVAE) architecture (Figure 1d). However, we use whole
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+slates as input instead of single documents, and directly generate slates instead of using greedy ranking by prediction scores.
+Other relevant work from the Information Retrieval (IR) literature are listwise ranking methods, e.g. (Cao et al., 2007; Xia et al., 2008; Shi et al., 2010; Huang et al., 2015). These methods use a listwise loss function that takes context and position into account. They also eventually assign a prediction score for each document and greedily rank them at inference time.
+In the Reinforcement Learning (RL) literature, Sunehag et al. (2015) view the whole slates as actions and use a deterministic policy gradient update to learn a policy that generates these actions, given concatenated document features as input.
+Finally, the framework proposed by (Wang et al., 2016) predicts user engagement for document and position pairs. It optimizes whole page layouts but may suffer from poor scalability due to combinatorial explosion.
+
+3 THEORY
+
+3.1 PROBLEM SETUP
+
+We formally define the slate recommendation problem as follows. Let D denote a corpus of documents
+
+and let k be the slate size. Then let r = (r1, . . . , rk) be the engagement response vector from users
+
+where ri  R is the user response for document di. For example, if the problem is to maximize the
+
+number of clicks on a slate, then ri  {0, 1} denotes whether the document di is clicked, and an
+
+optimal slate s = (d1, d2, . . . , dk) where di  D is such that s maximizes E[
+
+k i=1
+
+ri
+
+].
+
+3.2 VARIATIONAL AUTO-ENCODERS
+Variational Auto-Encoders (VAEs) are latent-variable models that define a joint density P(x, z) between observed variables x and latent variables z parametrized by a vector . Training such models requires marginalizing the latent variables in order to maximize the data likelihood P(x) = P(x, z)dz. Since we cannot solve this marginalization explicitly, we resort to a variational approximation. For this, a variational posterior density Q(z|x) parametrized by a vector  is introduced and we optimize the variational Evidence Lower-Bound (ELBO) on the data loglikelihood:
+
+log P(x) = KL [Q(z|x) P(z|x)] + EQ(z|x) [- log Q(z|x) + log P(x, z)] ,  -KL [Q(z|x) P(z)] + EQ(z|x) [log P(x|z)] ,
+
+(1) (2)
+
+where KL is the Kullback­Leibler divergence and where P(z) is a prior distribution over latent variables. In a Conditional VAE (CVAE) we extend the distributions P(x, z) and Q(z|x) to also depend on an external condition c. The corresponding distributions are indicated by P(x, z|c) and Q(z|x, c). Taking the conditioning c into account, we can write the variational loss to minimize as
+
+LCVAE = KL [Q(z|x, c) P(z|c)] - EQ(z|x,c) [log P(x|z, c)] .
+
+(3)
+
+3.3 OUR MODEL
+We assume that the slates s = (d1, d2, . . . dk) and the user response vectors r are jointly drawn from a distribution PDk×Rk . In this paper, we use a CVAE to model the joint distribution of all documents in the slate conditioned on the user responses r, i.e. P(d1, d2, . . . dk|r). At inference time, the List-CVAE model attempts to generate an optimal slate by conditioning on the ideal user response r.
+As we explained in Section 1, "optimality" of a slate depends on the task. With that in mind, we define the mapping  : Rk  C. It transforms a user response r into a vector in the conditioning
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+s  P(s|z, c)
+
+SSoSofoftfmtmtmaaxaxx Decoder DDDooto-t-tp-prprorododuducuctctt
+x1, x2 . . . , xk MLP
+
+EEEmmmbbebededdddidninigngg D = {d1, . . . , dn}
+
+z  Q(z|s, c) = N (µ, )
+
+Encoder
+
+(µ, ) MLP
+
+P(z|c) = N (µ0, 0) µ0, 0
+
+s
+
+MMMaaxaxx Decoder DDDooto-t-tp-prprorododuducuctctt
+x1, x2 . . . , xk MLP
+
+EEEmmmbbebededdddidninigngg D = {d1, . . . , dn}
+
+z  N (µ ,  )
+
+EEEmmmbbebededdddidninigngg
+
+MLP fprior
+
+s c = (r)
+(a) Training
+
+(µ ,  )
+
+fprior
+
+MLP
+
+c = (r )
+
+(b) Inference
+
+Figure 2: Structure of List-CVAE for both (a) training and (b) inference. s = (d1, d2, . . . , dk) is the input slate. c = (r) is the conditioning where r = (r1, r2, . . . , rk) is the user responses on the slate s. The concatenation of s and c makes the input vector to the encoder. z  Rm is the latent variable with a learned prior distribution N (µ0, 0). The raw output from the decoder are k vectors x1, x2 . . . , xk, each of which is mapped to a real document through taking the dot product with the matrix  containing all document embeddings. Thus produced k vectors of logits are then passed to
+the negatively downsampled k-head softmax operation. c is the ideal condition whose concatenation
+with sampled z is the input to the decoder at inference time.
+
+space C that encodes the user engagement metric we wish to optimize for. For instance, if we want to
+
+maximize clicks on the slate, we can use the binary click response vectors and set the conditioning to
+
+c = (r) :=
+
+k i=0
+
+ri.
+
+Then
+
+at
+
+inference
+
+time,
+
+the
+
+corresponding
+
+ideal
+
+user
+
+response
+
+r
+
+would be
+
+(1, 1, . . . , 1), and thus the ideal conditioning would be c = (r ) =
+
+k i=0
+
+1
+
+=
+
+k.
+
+As usual with CVAEs, the decoder models a distribution P(s|z, c) that, conditioned on z, is easy to represent. In our case, P(s|z, c) models an independent probability for each document on the slate, represented by a softmax distribution. Note that the documents are only independent to each other conditional on z. In fact, the marginalized posterior P(s|c) = z P(s|z, c)P(z|c)dz can be arbitrarily complex. When the encoder encodes the input slate s into the latent space, it learns the joint distribution of the k documents in a fixed order, and thus also encodes any contextual, positional biases between documents and their respective positions into the latent variable z. The decoder learns these biases through reconstruction of the input slates from latent variables z with conditions. At inference time, the decoder reproduces the input slate distribution from the latent variable z with the
+ideal conditioning, taking into account all the biases learned during training time.
+
+To shed light onto what is encoded in the latent space, we simplify the prior distribution of z to be a fixed Gaussian distribution N (0, I) in R2. We train List-CVAE and plot the predictive prior z. As training evolves, generated output slates with low total responses are pushed towards the edge of the
+latent space while high response slates cluster towards a larger, centered area (Figure 3). Therefore after training, if we sample z from its prior distribution N (0, I) and generate the corresponding
+output slates, they more likely to have high total responses.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+-100.0
+
+10 -100.0
+8
+
+10 -100.0
+8
+
+10 8
+
+666
+
+444
+
+100-.1000.0
+
+2
+100.0 0
+
+100-.1000.0
+
+2
+100.0 0
+
+100-.1000.0
+
+2
+100.0 0
+
+(a) Step=500
+
+(b) Step=1000
+
+(c) Step=5000
+
+Figure 3: Predictive prior distribution of the latent variable z in R2, conditioned on ideal user response c = (1, 1, . . . , 1). The color map corresponds to the expected total responses of the correspondingly generated slates. Plot from a simulation experiment with 1000 documents and slate size 10.
+
+Since the number of documents in D can be large, we first embed them into a low dimensional space. Let  : D  Sq-1 be that normalized embedding where Sq-1 denotes the unit sphere in Rq.  can easily be pretrained using a standard supervised model that predicts user responses from
+documents or through a standard auto-encoder technique. For the i-th document in the slate, our model produces a vector xi in Rq that is then matched to each document from D via a dot-product. This operation produces k vectors of logits for k softmaxes, i.e. k-head softmax. At training time, for large document corpora D, we uniformly randomly downsample negative documents and compute
+only a small subset of the logits for every training example, therefore efficiently scaling the nearest
+neighbor search to millions of documents with minimal model quality loss.
+
+We train this model as a CVAE by minimizing the sum of the reconstruction loss and the KLdivergence term:
+
+L = KL [Q(z | s, c) P(z |c)] - EQ(z|s,c) [log P(s | z, c)] , where  is a function of the current training step (Higgins et al., 2017).
+
+(4)
+
+During inference, output slates are generated by first sampling z from the conditionally learned prior distribution N (µ ,  ), then concatenating with the ideal condition c = (r ), thus passed into the decoder generating (x1, . . . , xk) from the learned P(s|z, c ), and finally picking the argmax over the dot-products with the full embedding matrix independently for each i = 1, . . . , k.
+
+4 EXPERIMENTS
+
+4.1 SIMULATION DATA
+
+Setup: The simulator generates a random matrix W  N (µ, )k×n×k×n where each element
+Wi,di,j,dj represents the interaction between document di at position i and document dj at position j, and n = |D|. It simulates biases caused by layouts of documents on the slate (below, we set µ = 1 and  = 0.5). Every document di  D has a probability of engagement Ai  U(0, 1) representing its innate attractiveness. User responses are computed by multiplying Ai with interaction multipliers W (i, di, j, dj) for each document presented before di on the slate. Thus the user response
+
+ ri  B 
+
+i
+Ai Wi,di,j,dj
+j=1
+
+
+
+[0,1]
+
+(5)
+
+for i = 1, . . . , k, where B represents the Bernoulli distribution.
+During training, all models see uniformly randomly generated slates s  U{1, n}k and their generated responses r. During inference time, we generate slates s by conditioning on c = (1, . . . , 1). We do not require document de-duplication since repetition may be desired in certain applications (e.g. in an online advertisement session). Moreover List-CVAE should learn to produce the optimal slates whether those slates contain duplication or not from learning the training data distribution.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Evaluation: For evaluation, we cannot use offline ranking evaluation metrics such as Normalized Discounted Cumulative Gain (NDCG) (Järvelin and Kekäläinen, 2000), Mean Average Precision (MAP) (Baeza-Yates and Ribeiro-Neto, 1999) or Inverse Propensity Score (IPS) (Little and Rubin, 2002), etc. These metrics either requires prediction scores for individual documents or assumes that more relevant documents should appear in earlier ranking positions, unfairly favoring greedy ranking methods.
+Instead, we evaluate the expected number of clicks over the distribution of generated slates and over the distribution of clicks on each document:
+
+kk
+
+k
+
+E[ ri] =
+
+E[ ri|s]P (s) =
+
+riP (r)P (s).
+
+i=1 s{1,...,n}k i=1
+
+sDk rRk i=1
+
+(6)
+
+In practice, we distill the simulated environment of Eq. 5 using cross-entropy loss onto a neural network model that officiates as our new simulation environment. The model consists of an embedding layer, which encodes documents into 8-dimensional embeddings. It then concatenates the embeddings of all the documents that form a slate and follows this concatenation with two hidden layers and a final softmax layer that predicts the slate response amongst the 2k possible responses. Thus we call it the "response model". We use the response model to predict user responses on 100,000 sampled output slates for evaluation purposes. This allows us to accurately evaluate our output slates by List-CVAE and all other baseline models.
+Baselines: Our experiments compare List-CVAE with several greedy ranking baselines that are popularly deployed in industry productions, namely Greedy MLP, Position MLP, Pairwise MLP, Greedy Long Short-Term Memory (LSTM) models as well as the randomly generated slates as a sanity check. List-CVAE generates slates s = arg maxs{1,...,n}k P(s|z, c ). The encoder and decoder of List-CVAE, as well as all the greedy MLP-type models consist of two fully-connected neural network layers of the same size. Greedy MLP trains on (di, ri) pairs and outputs the greedy slate consisting of the top k highest P^(r|d) scoring documents. Position MLP uses position in the slate as a feature during training time and sets it simply to 0 for fast performance in inference time. Pairwise MLP is an MLP model with a pairwise ranking loss L = Lx + (1 - )L(P^(x1) - P^(x2) + ) where Lx is the cross entropy loss and (x1, x2)'s are pairs of documents randomly selected with different user responses from the same slate. We sweep on hyperparameters  and  in addition to the shared MLP model structure sweep. Greedy LSTM is an LSTM model with fully-connect layers before and after the recurrent middle layers. We tune the hyperparams on the number of layers and their respective widths. We use sequences of documents that form slates as the input at training time, and uses single examples as inputs with sequence length 1 at inference time, which is similar to scoring documents as if they are in the first position of a slate of size 1. Then we greedily rank the documents based on their prediction scores.
+Small-scale experiment (n = 100, 1000, k = 10):
+We use the trained document embeddings from the response model for List-CVAE and all the baseline models. For List-CVAE, we also use trained priors P(z |c) = N (µ ,  ) where µ ,  = fprior(c ) and fprior is modeled by a small MLP (16, 32). Additionally, since we found little difference between different hyperparameters, we fixed the width of all hidden layers to 128, the learning rate to 10-3 and the number of latent dimensions to 16. For all other baseline models, we sweep on the learning rates, model structures and any model specific hyperparameters such as ,  for Position MLP and the forget bias for the LSTM model.
+Figure 4a, 4b shows the performance comparison when the number of documents n = 100, 1000 and slate size to k = 10. While List-CVAE is not quite capable of reaching a perfect performance of 10 clicks (which is probably even above the optimal upper bound), it easily outperforms all other greedy ranking baselines after only a few training steps.
+Personalization test (|U| = 50, n = 100, k = 10):
+We add user features into the conditioning c, by adding a set U of 50 different users to the simulation engine and permuting the innate attractiveness of documents and their interactions matrix W by a
+6
+
+Under review as a conference paper at ICLR 2019
+
+Number of clicks Number of clicks
+
+9
+
+8
+
+7
+
+6
+
+5 CVAE
+
+4
+
+Greedy MLP Position MLP
+
+3
+
+Pairwise MLP Greedy LSTM
+
+Random
+
+2 0 1000 2000 Step 3000 4000 5000
+
+(a) n = 100, k = 10
+
+8
+
+7
+
+6
+
+5
+
+4
+
+CVAE Greedy MLP
+
+Position MLP
+
+3
+
+Pairwise MLP Greedy LSTM
+
+Random
+
+2 0 1000 2000 Step 3000 4000 5000
+
+(b) n = 1000, k = 10
+
+6.5
+
+6.0
+
+5.5
+
+Number of clicks
+
+5.0
+
+4.5 CVAE
+
+4.0
+
+Greedy MLP Position MLP
+
+3.5
+
+Pairwise MLP Greedy LSTM
+
+Random
+
+3.0 0 2000 4000 Step 6000 8000 10000
+
+(c) Personalization Test: |U| = 50, n = 100, k = 10
+
+Figure 4: Small-scale experiments. The shaded area represent the 95% confidence interval over 20 independent runs. We compare List-CVAE against Greedy MLP, Position MLP, Pairwise MLP, Greedy LSTM and Random baselines on medium-scale synthetic data.
+
+user-specific function u. Let
+
+ riu  B 
+
+i
+
+Au(i)
+
+Wi,du (i) ,j,du (j )
+
+j=1
+
+
+
+[0,1]
+
+(7)
+
+be the response of the user u on the document di. During training, the condition c is a concatenation of 16 dimensional user embeddings (u) obtained from the response model, and responses r. At inference time, the model conditions on c = (r , (u)) for each randomly generated test user u. We sweep over hidden layers of 512 or 1024 units in List-CVAE, and all baseline MLP structures. Figure 4c show that slates generated by List-CVAE have on average higher clicks than those produced by the greedy baseline models although the convergence took much longer to reach.
+
+4.2 REAL-WORLD DATA
+Due to a lack of publicly available large scale slate datasets, we use the data provided by the RecSys 2015 YOOCHOOSE Challenge (Ben-Shimon et al., 2015). This dataset consists of 9.2M user purchase sessions around 53K products. Each user session contains an ordered list of products on which the user clicked, and whether they decided to buy them. The List-CVAE model can be used on slates with temporal ordering. Thus we form slates of size 5 by taking consecutive clicked products. We then build user responses from whether the user bought them. We remove slates with no positive responses such that after removal they only account for 50% of the total number of slates. After filtering out products that are rarely bought, we get 375K slates of size 5 and a corpus of 10,000
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+((((((((((((((((((((((((((((((((00111010010100101100001111010110,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,, 11010101101100101000001001011110,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,, 11110000111100001111000011100001,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,, 01000000010011111110101010010111,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,, 10011001100101001100110011011001)))))))))))))))))))))))))))))))) Number of clicks
+
+200000 190000 180000 20000 10000
+0
+(a) Data distribution by user responses
+
+5
+
+4
+
+3
+
+2
+
+1
+
+CVAE Greedy MLP
+
+Position MLP
+
+0
+
+Pairwise MLP Greedy LSTM
+
+Random
+
+1 0 1000 2000 Step 3000 4000 5000
+
+(b) n = 10, 000 documents
+
+55
+
+44
+
+Number of clicks Number of clicks
+
+33
+
+2 CVAE Greedy MLP Position MLP
+1 Pairwise MLP Greedy LSTM Random
+0 0 1000 2000 Step 3000 4000 5000 (c) n = 1 million documents
+
+2 CVAE Greedy MLP Position MLP
+1 Pairwise MLP Greedy LSTM Random
+0 0 1000 2000 Step 3000 4000 5000 (d) n = 2 million documents
+
+Figure 5: Real data experiments: (a) Distribution of user responses in the filtered RecSys 2015 YOOCHOOSE Challenge dataset; (b) We compare List-CVAE against all greedy ranking baselines as well as the Random baseline on a semi-synthetic dataset of 10,000 documents. The shaded area represent the 95% confidence interval over 20 independent runs; (c) We compare List-CVAE against all greedy ranking baselines as well as the Random baselines on a semi-synthetic dataset of 1 million documents.
+
+candidate documents. Figure 5a shows the user response distribution of the training data. Notice that in the response vector, 0 denotes a click and 1 denotes a buying action. For example, (1,0,0,0,1) means the user clicked on all five products but bought only the first and the last products.
+Medium-scale experiment (n = 10, 000, k = 5):
+Similarly to the previous section, we train a two-layer response model that officiates as a new semisynthetic simulation environment. We use the same hyperparameters used previously. Figure 5b shows that List-CVAE outperforms all greedy baseline models within 500 training steps, which corresponds to having seen less than 10-11% of all possible slates.
+Large-scale experiment (n = 1 million, 2 millions, k = 5):
+We synthesize 1,990k documents by adding independent Gaussian noise N (0, 0.01)k to the original 10k documents and label the synthetic documents by predicted responses from the response model. The new pool of candidate documents consists of 10k original documents and 1,990k synthetic ones, totaling 2 million documents. To match each of the k decoder outputs (x1, x2, . . . , xk) with real documents, we uniformly randomly downsample the negative document examples keeping in total only 1000 logits (the dot product outputs in the decoder). At inference time, we pick the argmax for each of k dot product outputs with the full embedding matrix without sampling. This technique speeds up the total training and inference time for 2 million documents to merely 4 minutes on 1 GPU
+8
+
+Under review as a conference paper at ICLR 2019
+
+Number of clicks
+
+5
+4
+3
+2 CVAE Greedy MLP Position MLP
+1 Pairwise MLP Greedy LSTM Random
+0 0 1000 2000 Step 3000 4000 5000 (a) h = 100%
+
+Number of clicks
+
+5.0
+
+4.5
+
+4.0
+
+3.5
+
+3.0
+
+2.5
+
+2.0
+
+CVAE Greedy MLP
+
+1.5
+
+Position MLP Pairwise MLP
+
+1.0
+
+Greedy LSTM Random
+
+0.5 0 1000 2000 Step 3000 4000 5000
+
+(b) h = 80%
+
+5 3.5
+
+3.0 4
+2.5
+3 2.0
+
+Number of clicks
+
+Number of clicks
+
+2 CVAE Greedy MLP Position MLP
+1 Pairwise MLP Greedy LSTM Random
+0 0 1000 2000 Step 3000 4000 5000 (c) h = 60%
+
+1.5 CVAE
+
+1.0
+
+Greedy MLP Position MLP
+
+0.5
+
+Pairwise MLP Greedy LSTM
+
+Random
+
+0.0 0 1000 2000 Step 3000 4000 5000
+
+(d) h = 40%
+
+Figure 6: Generalization test on List-CVAE. All training examples have total responses
+
+5 i=1
+
+ri
+
+<
+
+5h
+
+for h = 40%, 60%, 80%, 100%. Any slates with higher total responses are eliminated from the
+
+training data. The other experiment setups are the same as in the Medium-scale experiment.
+
+for both the response model with 40k training steps and List-CVAE with 5k training steps. To order to stress test our model, we used embedding dimension 16 and masked out 50% of embedding features to mimic the real world scenario where we observe only a subset of all features. We ran 2 experiments with 1 million and 2 millions documents respectively. From the results shown in Figure 5c and 5d, List-CVAE steadily outperforms all other greedy baselines again. The greatly increased number of training examples helped List-CVAE really learn all the interactions between documents and their respective positional biases. The resulting slates were able to receive close to 5 buyings on average due to the limited complexity provided by the response model.
+
+Generalization test: In practice, we may not have any close-to-optimal slates in the training data.
+
+Hence it is crucial that List-CVAE is able to generalize to unseen optimal conditions. To test its
+
+generalization capacity, we use the medium-scale experiment setup on RecSys 2015 dataset and
+
+eliminate from the training data all slates where the total user response exceed some ratio h of the
+
+slate size k = 5, i.e.
+
+k i=1
+
+ri
+
+
+
+hk
+
+for
+
+h
+
+=
+
+40%, 60%,
+
+80%,
+
+100%.
+
+Figure
+
+6
+
+shows
+
+test
+
+results
+
+on
+
+increasingly difficult training sets from which to infer on the optimal slates. Without seeing any
+
+optimal slates (Figure 6a) or slates with 4 or 5 clicks (Figure 6b), List-CVAE can still produce close
+
+to optimal slates. Even training on slates with only 1 or 2 total clicks (h = 60%), List-CVAE still
+
+surpasses the performance of all greedy baselines within 1000 steps (Figure 6c). Thus demonstrating
+
+the strong generalization power of the model.
+
+9
+
+Under review as a conference paper at ICLR 2019
+5 DISCUSSION
+The List-CVAE model moves away from the conventional greedy ranking paradigm and provides the first conditional generative modeling framework that approaches slate recommendation problem using direct slate generation. By modeling the conditional probability distribution of documents in a slate directly, this approach not only picks up automatically the positional and contextual biases between documents but also gracefully avoids the problem of combinatorial explosion of possible slates when the candidate set is large. The framework is flexible and can incorporate different types of conditional generative models. In this paper we showed its superior performance over greedy baseline models with a conditional VAE model.
+In addition, the List-CVAE model has good scalability. We designed an architecture that uses pretrained document embeddings combined with a negatively downsampled k-head softmax layer that greatly speeds up the training and scales easily to millions of documents.
+REFERENCES
+J. Ben Schafer, Joseph A. Konstan, and John Riedl. E-commerce recommendation applications. Data Mining and Knowledge Discovery, pages 115­153, 2001.
+Jie Lu, Dianshuang Wu, Mingsong Mao, Wei Wang, and Guangquan Zhang. Recommender system application developments: A survey. 74, 04 2015.
+Adith Swaminathan, Akshay Krishnamurthy, Alekh Agarwal, Miroslav Dudík, John Langford, Damien Jose, and Imed Zitouni. Off-policy evaluation for slate recommendation. In Proceedings of the 31st Conference on Neural Information Processing Systems (NIPS), 2017.
+Peter Sunehag, Richard Evans, Gabriel Dulac-Arnold, Yori Zwols, Daniel Visentin, and Ben Coppin. Deep reinforcement learning with attention for slate markov decision processes with highdimensional states and actions. 2015.
+Paul Covington, Jay Adams, and Emre Sargin. Deep neural networks for youtube recommendations. In Proceedings of the 10th ACM Conference on Recommender Systems (RecSys), New York, NY, USA, 2016.
+Thorsten Joachims, Laura Granka, Bing Pan, Helene Hembrooke, and Geri Gay. Accurately interpreting clickthrough data as implicit feedback. In 28th Annual International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR), pages 154­161, 2005.
+Yisong Yue, Rajan Patel, and Hein Roehrig. Beyond position bias: Examining result attractiveness as a source of presentation bias in clickthrough data. In 19th International Conference on World Wide Web (WWW), pages 1011­1018, 2010.
+Diederik P Kingma, Danilo Jimenez Rezende, Shakir Mohamed, and Max Welling. Semi-supervised learning with deep generative models. 2014.
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. In Proceedings of the 2nd international conference on Learning Representations (ICLR), 2013.
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and approximate inference in deep generative models. arXiv preprint arXiv:1401.4082, 2014.
+Yehuda Koren, Robert Bell, and Chris Volinsky. Matrix factorization techniques for recommender systems. Computer, 42(8):30­37, August 2009. ISSN 0018-9162.
+Yao Wu, Christopher DuBois, Alice X. Zheng, and Martin Ester. Collaborative denoising autoencoders for top-n recommender systems. In Proceedings of the Ninth ACM International Conference on Web Search and Data Mining (WSDM), pages 153­162, 2016.
+Hao Wang, Naiyan Wang, and Dit-Yan Yeung. Collaborative deep learning for recommender systems. In Proceedings of the 21th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (SIGKDD), pages 1235­1244, 2015.
+10
+
+Under review as a conference paper at ICLR 2019
+Behnoush Abdollahi and Olfa Nasraoui. Explainable restricted boltzmann machines for collaborative filtering. In 2016 ICML Workshop on Human Interpretability in Machine Learning (WHI), 2016.
+Xiaopeng Li and James She. Collaborative variational autoencoder for recommender systems. In Proceedings of the 23rd ACM SIGKDD international conference on knowledge discovery and data mining (SIGKDD), Halifax, NS, Canada, 2017.
+Wonsung Lee, Kyungwoo Song, and Il-Chul Moon. Augmented variational autoencoders for collaborative filtering with auxiliary information. In Proceedings of the 2017 ACM on Conference on Information and Knowledge Management (CIKM), 2017.
+Dawen Liang, Rahul G. Krishnan, Matthew D. Hoffman, and Tony Jebara. Variational autoencoders for collaborative filtering. 2018.
+Zhe Cao, Tao Qin, Tie-Yan Liu, Ming-Feng Tsai, and Hang Li. Learning to rank: From pairwise approach to listwise approach. Technical report, April 2007.
+Fen Xia, Tie-Yan Liu, Jue Wang, Wensheng Zhang, and Hang Li. Listwise approach to learning to rank - theory and algorithm. In Proceedings of the 25th International Conference on Machine Learning (ICML)., Helsinki, Finland, 2008.
+Yue Shi, Martha Larson, and Alan Hanjalic. List-wise learning to rank with matrix factorization for collaborative filtering. In Proceedings of the Fourth ACM Conference on Recommender Systems, RecSys, pages 269­272, New York, NY, USA, 2010. ACM. ISBN 978-1-60558-906-0.
+Shanshan Huang, Shuaiqiang Wang, Tie-Yan Liu, Jun Ma, Zhumin Chen, and Jari Veijalainen. Listwise collaborative filtering. In Proceedings of the 38th International ACM SIGIR Conference on Research and Development in Information Retrieval, SIGIR, pages 343­352, New York, NY, USA, 2015. ACM. ISBN 978-1-4503-3621-5.
+Yue Wang, Dawei Yin, Luo Jie, Pengyuan Wang, Makoto Yamada, Yi Chang, and Qiaozhu Mei. Beyond ranking: Optimizing whole-page presentation. In Proceedings of the Ninth ACM International Conference on Web Search and Data Mining, WSDM, pages 103­112, New York, NY, USA, 2016. ACM. ISBN 978-1-4503-3716-8.
+Irina Higgins, Loic Matthey, Arka Pal, Christopher Burgess, Xavier Glorot, Matthew Botvinick, Shakir Mohamed, and Alexander Lerchner. -vae: Learning basic visual concepts with a constrained variational framework. In Proceedings of Fifth International Conference on Learning Representations (ICLR)., 2017.
+Kalervo Järvelin and Jaana Kekäläinen. Ir evaluation methods for retrieving highly relevant documents. SIGIR Forum, 51:243­250, 2000.
+R. Baeza-Yates and B. Ribeiro-Neto. Modern information retrieval. Addison Wesley, 1999. R. J. A. Little and D. B. Rubin. Statistical Analysis with Missing Data. John Wiley, 2002. David Ben-Shimon, Michael Friedman, Alexander Tsikinovsky, and Johannes Hörle. Recsys chal-
+lenge 2015 and the yoochoose dataset, 2015.
+11
+
+

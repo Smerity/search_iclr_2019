@@ -1,0 +1,1935 @@
+Under review as a conference paper at ICLR 2019
+TRANSFER LEARNING FOR ESTIMATING CAUSAL EFFECTS USING NEURAL NETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We develop new algorithms for estimating heterogeneous treatment effects, combining recent developments in transfer learning for neural networks with insights from the causal inference literature. By taking advantage of transfer learning, we are able to efficiently use different data sources that are related to the same underlying causal mechanisms. We compare our algorithms with those in the extant literature using extensive simulation studies based on large-scale voter persuasion experiments and the MNIST database. Our methods can perform an order of magnitude better than existing benchmarks while using a fraction of the data.
+1 INTRODUCTION
+The rise of massive datasets that provide fine-grained information about human beings and their behavior provides unprecedented opportunities for evaluating the effectiveness of treatments. Researchers want to exploit these large and heterogeneous datasets, and they often seek to estimate how well a given treatment works for individuals conditioning on their observed covariates. This problem is important in medicine (where it is sometimes called personalized medicine) (Henderson et al., 2016; Powers et al., 2018), digital experiments (Taddy et al., 2016), economics (Athey and Imbens, 2016), political science (Green and Kern, 2012), statistics (Tian et al., 2014), and many other fields. Although a large number of articles are being written on this topic, many outstanding questions remain. We present the first paper that applies transfer learning to this problem. In the simplest case, treatment effects are estimated by splitting a training set into a treatment and a control group. The treatment group receives the treatment, while the control group does not. The outcomes in those groups are then used to construct an estimator for the Conditional Average Treatment Effect (CATE), which is defined as the expected outcome under treatment minus the expected outcome under control given a particular feature vector (Athey and Imbens, 2015). This is a challenging task because, for every unit, we either observe its outcome under treatment or control, but never both. Assumptions, such as the random assignment of treatment and additional regularity conditions, are needed to make progress. Even with these assumptions, the resulting estimates are often noisy and unstable because the CATE is a vector parameter. Recent research has shown that it is important to use estimators which consider both treatment groups simultaneously (Künzel et al., 2017; Wager and Athey, 2017; Nie and Wager, 2017; Hill, 2011). Unfortunately, these recent advances are often still insufficient to train robust CATE estimators because of the large sample sizes required when the number of covariates is not small. In this paper, we show how these difficulties in estimating the CATE can sometimes be overcome through the use of transfer learning. In particular, we provide several strategies for utilizing ancillary datasets that are related to the causal mechanism under investigation. Examples of such datasets include observations from: experiments in different locations on different populations, different treatment arms, different outcomes, and non-experimental observational studies. We show that, by transferring information from these ancillary datasets, CATE estimators can converge to better solutions with fewer samples. This is particularly important for CATE estimation, as the cost of collecting additional data is quite high and often requires real-world data collection. Our contributions are as follows:
+1. We introduce the new problem of transfer learning for estimating heterogeneous treatment effects. 1
+
+Under review as a conference paper at ICLR 2019
+2. MLRW Transfer for CATE Estimation adapts the idea of meta-learning regression weights (MLRW) to CATE estimation. By using a learned initialization, regression problems can be optimized much more quickly than with random initializations. Though a variety of MLRW algorithms exist, it is not immediately obvious how one should use these methods for CATE estimation. The principal difficulty is that CATE estimation requires the simultaneous estimation of outcomes under both treatment and control, but we only observe one of the outcomes for any individual unit. Most MLRW transfer methods optimize on a per-task basis to estimate a single quantity. We show that one can overcome this problem with clever use of the Reptile algorithm (Nichol et al., 2018).
+3. We provide several additional methods for transfer learning for CATE estimation: warm start, frozen-features, multi-head, and joint training.
+4. We apply our methods to difficult data problems and show that they perform better than existing benchmarks. We reanalyze a set of large field experiments that evaluate the effect of a mailer on voter turnout in the 2014 U.S. midterm elections (Gerber et al., 2017). This includes 17 experiments with 1.96 million individuals in total. We also simulate several randomized controlled trials using image data of handwritten digits found in the MNIST database (LeCun, 1998). We show that our methods, MLRW in particular, obtain better than state-of-the-art performance in estimating CATE, and that they require far fewer observations than extant methods.
+5. We provide open source code for our algorithms.1
+2 CATE ESTIMATION
+We begin by formally introducing the CATE estimation problem. Following the potential outcomes framework (Rubin, 1974), assume there exists a single experiment wherein we observe N i.i.d. distributed units from some super population, (Yi(0), Yi(1), Xi, Wi)  P. Yi(0) 2 R denotes the potential outcome of unit i if it is in the control group, Yi(1) 2 R is the potential outcome of i if it is in the treatment group, Xi 2 Rd is a d-dimensional feature vector, and Wi 2 {0, 1} is the treatment assignment. For each unit in the treatment group (Wi = 1), we only observe the outcome under treatment, Yi(1). For each unit under control (Wi = 0), we only observe the outcome under control. Crucially, there cannot exist overlap between the set of units for which Wi = 1 and the set for which Wi = 0. It is impossible to observe both potential outcomes for any unit. This is commonly referred to as the fundamental problem of causal inference. However, not all hope is lost. We can still estimate the Conditional Average Treatment Effect (CATE) of the treatment. Let x be an individual feature vector. Then the CATE of x, denoted  (x), is defined by
+ (x) = E[Y (1) Y (0)|X = x]. Estimating  is impossible without making further assumptions on the distribution of (Yi(0), Yi(1), Xi, Wi). In particular, we need to place two assumptions on our data. Assumption 1 (Strong Ignorability, Rosenbaum and Rubin (1983))
+(Yi(1), Yi(0)) ? W |X. Assumption 2 (Overlap) Define the propensity score of x as,
+e(x) := P(W = 1|X = x). Then there exists constant 0 < emin, emax < 1 such that for all x 2 Support(X),
+0 < emin < e(x) < emax < 1. In words, e(x) is bounded away from 0 and 1.
+1The software will be released once anonymity is no longer needed. We can also provide an anynomized copy to reviewers upon request.
+2
+
+Under review as a conference paper at ICLR 2019
+Assumption 1 ensures that there is no unobserved confounder, a random variable which influences both the probability of treatment and the potential outcomes, which would make the CATE unidentifiable. The assumption is particularly strong and difficult to check in applications. Meanwhile, Assumption 2 rectifies the situation wherein a certain part of the population is always treated or always in the control group. If, for example, all women were in the control group, one cannot identify the treatment effect for women. Though both assumptions are strong, they are nevertheless satisfied by design in randomized controlled trials. While the estimators we discuss would be sensible in observational studies when the assumptions are satisfied, we warn practitioners to be cautious in such studies, especially when the number of covariates is large (D'Amour et al., 2017). Given these two assumptions, there exist many valid CATE estimators. The crux of these methods is to estimate two quantities: the control response function,
+µ0(x) = E[Y (0)|X = x], and the treatment response function,
+µ1(x) = E[Y (1)|X = x]. If we denote our learned estimates as µ^0(x) and µ^1(x), then we can form the CATE estimate as the difference between the two
+^(x) = µ^1(x) µ^0(x). The astute reader may be wondering why we don't simply estimate µ0 and µ1 with our favorite function approximation algorithm at this point and then all go home. After all, we have access to the ground truths µ0 and µ1 and the corresponding inputs x. In fact, it is commonplace to do exactly that. When people directly estimate µ0 and µ1 with their favorite model, we call the procedure a T-learner (Künzel et al., 2017). Common choices of models include linear models and random forests, though neural networks have recently been considered (Nie and Wager, 2017). A practitioner of deep learning might find the T-learner quite trivial. After all, it amounts to using neural networks to fit two quantities, µ0 and µ1. However, it is important to note that the T-learner is a baseline method. We use it in this paper only to ease exposition, especially as it relates to transfer learning. The T-learner has many drawbacks (Athey and Imbens, 2015). It is almost always an inefficient estimator. For example, it will often perform poorly when one can borrow information across the treatment conditions. For these reasons, more sophisticated learners such as the S, X, T, R, and Y learners are almost always used instead of the T-learner (Hill, 2011; Athey and Imbens, 2016; Nie and Wager, 2017; Künzel et al., 2017; Stadie et al., 2018). Although much of our exposition will focus on transfer learning in the context of the T-learner, in practice we extend the discussed methods to these other more advanced learners, as shown in the Evaluation section. Descriptions of these more advanced estimators are given in the appendix.
+3 TRANSFER LEARNING
+In this section, we consider a scenario wherein one has access to many related causal inference experiments. The goal is to use the results from some old experiments to obtain faster training with less data on other new experiments. Since direct transfer between different populations is wrought with difficulty, we will instead achieve transfer by using previous experiments to help find an initialization for new experiments which leads to faster optimization.2 We consider two kinds of algorithms. First, there are transfer algorithms that sit on top of existing CATE estimators. These transfer algorithms take a CATE estimation strategy, such as the S-learner, and provide a recipe for transforming it into a transfer learning CATE estimator. The second class of algorithms does not sit on top of existing CATE estimation strategies. Instead, they are built from the ground up to take advantage of transfer learning. These algorithms are joint training and MLRW. Across all experiments, the input space X is the same. Let i index an experiment. Each experiment has its own distinct outcome when treatment is received, µ1,i(x), and when no treatment is received, µ0,i(x). Together, these quantities define the CATE ·,i(x) = µ1,i(x) µ0,i(x), In standard CATE estimation, we define a strategy that takes x as input and outputs predictions µ^0,i(x) and µ^1,i(x).
+2By faster optimization, we mean that starting from the learned initialization will allow the problem to be solved in fewer optimization epochs and with less data than starting with random weights.
+3
+
+Under review as a conference paper at ICLR 2019
+
+Experiment 0
+
+Experiment 1
+
+random initialization
+
+X
+
+0 0
+
+00
+
+00
+
+X
+
+0 1
+
+10
+
+10
+
+warm start
+
+X
+
+1 0
+
+01
+
+01
+
+X
+
+1 1
+
+11
+
+11
+
+Warm start method
+
+^ 00 L0 ^ 10
+backprop
+^ 10 L1 ^ 11
+backprop
+
+random initialization
+
+X
+
+0 0
+
+0
+
+
+
+0 0
+
+X
+
+0 1
+
+1
+
+
+
+0 1
+
+^ 00 L0 ^ 10
+backprop
+
+X
+
+1 0
+
+0
+
+
+
+1 0
+
+X
+
+1 1
+
+1
+
+
+
+1 1
+
+freeze during backprop
+
+Frozenfeatures method
+
+^ 10 L1 ^ 11
+backprop
+
+warm   start
+
+X
+
+0 0
+
+X
+
+0 1
+
+random initialization
+0 00 1 10
+
+warm  start
+
+X
+
+1 0
+
+0
+
+X
+
+1 1
+
+1
+
+01 11
+
+Multihead method
+
+^ 00 L0 ^ 01
+backprop
+^ 01 L1 ^ 11
+backprop
+
+Figure 1: Warm start, frozen-features, and multi-head methods for CATE transfer learning. For these figures, we use the T-learner as the base learner for simplicity. All three methods attempt to reuse neural network features from previous experiments.
+
+In transfer learning, the hope is that we can transfer knowledge between experiments. The model parameters that allowed us predict µ0,i(x), µ1,i(x) and ·,i(x) from experiment i should help us predict µ1,j(x), µ0,j(x), and ·,j(x) from experiment j.
+
+Let  be a generic expression for a neural network parameterized by . Parameters will have two subscripts. The index on the left indicates if their neural network predicts treatment or control (0
+
+for control and 1 for treatment). The index on the right is for the experiment. For example, 0,2
+
+ptraarnasmfeertrailzgeosrithm0,2s(dxe)stcoripbreeddhicetreµa0,r2e(pxr)e,stehneteoduitncofmulel
+
+under control for Experiment 2. All of detail as pseudo-code in the appendix.
+
+the
+
+3.0.1 ALGORITHMS THAT EXTEND EXISTING CATE ESTIMATORS TO TRANSFER LEARNING
+
+These algorithms extend existing CATE estimation techniques to the transfer learning setting. The following exposition is largely motivated by transfer learning with the T-Learner as a base CATE estimator. This is only for ease of exposition. The discussed procedures can extend to other, more complicated, CATE estimators such as the R, X, Y, and S learners.
+
+Warm start: estimator ^·,0
+
+Experiment = µ^1,0(x)
+
+0 predicts µ^0,0(x).
+
+Sup0,p0o(xse)
+
+=0,0µ^,0,01(,0x)araenfdully1,t0r(axin)e=d
+
+µ^1,0(x) to form the and produce a good
+
+CATE CATE
+
+estimate. For experiment 1, the input space X is identical to the input space for experiment 0, but the
+
+outcomes µ0,1(x) and µ1,1(x) are different. However, we suspect the underlying data representations
+
+lfeoarrnexedpebriymen0t,01a, nwdese1,t0
+
+are 0,1
+
+still useful. = 0,0 and
+
+Hence, 1,1 =
+
+rather 1,0.
+
+than randomly We then train
+
+1,1 (x) = µ^1,1(x). See Figure 1 and Algorithm 8 in the appendix.
+
+initializing 0,1 (x) =
+
+0,1 and µ^0,1(x)
+
+1,1 and
+
+Frozen-features: Begin by 0. Assuming 0,0 and 1,0
+
+trhaaivneinmg ore0,0thaannd
+
+kl1a,0yetorsp, rloedt uc0e
+
+good CATE estimates for experiment be the parameters corresponding to
+
+the first k layers of would make a more
+
+0,0. Define informative
+
+1 analogously. Since we input than the raw features
+
+tXhi,nwk ethweafnetattuoruesseenthcoosdeefdeabtyuresi
+
+(X ) as a
+
+betrsaatcnikmspfaortorempsaegdai0tne,1pt(uhztr0os)up=gacheµ^f00o,,11r(axn)0d,a1na1dn,1dan1,d11(,n1zo.1tT)toh=rwoµi^ut1g, ,sh1e(tx0z)0.an=Dduri1n0.g(Sxet)reaaiFnnidignuzgr1eo=1f
+
+exp1e(rxim). eTnhte1n,
+
+form the we only
+
+and Algorithm 9 in the
+
+appendix.
+
+Multi-head: In this setup, all experiments share base layers that are followed by experiment-specific
+
+layers. The intuition is that the base layers should learn general features, and the experiment-
+
+specific layers should transform those features into estimates of µj,i(x). More concretely, let 0
+
+and and
+
+1
+z1
+
+be shared base layers for estimating µ0,·(x) and µ1,·(x) respectively. Set z0 = =  1 (x1). The base layers are followed by experiment-specific layers 0,i and
+
+1,i0.
+
+(x0) Let
+
+j,i = [ between
+
+ejx,perji,im].enTtsh:eenachj,i0(,ixa)nd=1,i
+
+jis,i
+
+trainje(dx)for
+
+= some
+
+js,mi (azljl)nu=mbµ^ejr,io(xf )it.erTatriaoinnsi,nagndalttherennatthees
+
+experiment and head being trained are switched. Every head is usually trained several times. See
+
+Figure 1 Algorithm 10 in the appendix.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+SF Reptile transfer for CATE estimators: Pick your favorite CATE estimator. The goal is to
+
+learn an initialization for that CATE estimator's weights that leads to fast convergence on new
+
+experiments. More concretely, starting from good initializers 0 and 1, one can train neural networks
+
+ini0tiaalnidzatio1ntso.
+
+estimate To learn
+
+µ0,i(x) and µ1,i(x) much these good initializations,
+
+faster and with less data than starting from we use a transfer learning technique called
+
+random Reptile.
+
+The idea is to perform experiment-specific inner updates U () and then aggregate them into outer
+
+updates of the form new =  · U () + (1 ) · . In this paper, we consider a slight variation of
+
+Reptile. In standard Reptile,  is either a scalar or correlated to per-parameter weights furnished via
+
+SGD. For our problem, we would like to encourage our network layers to learn at different rates.
+
+The hope is that the lower layers can learn more general, slowly-changing features like in the frozen
+
+features method, and the higher layers can learn comparatively faster features that more quickly adapt
+
+to new tasks after ingesting the stable lower-level features. To accomplish this, we take the path of
+
+least resistance and make  a vector which assigns a different learning rate to each neural network
+
+layer. Because our intuition involves slow and fast weights, we will refer to this modification in this
+
+paper as SF Reptile: Slow Fast Reptile. Though this change is seemingly small, we found it boosted
+
+performance on our problems. See Algorithm 11.
+
+3.0.2 TRANSFER LEARNING ALGORITHMS THAT DO NOT EXTEND CATE ESTIMATION STRATEGIES
+
+Joint training: All predictions share base layers . From these base layers, there are two
+
+heads per experiment i: one to predict µ0,i(x) and one to predict µ1,i(x). Every head and
+
+the baPse features are trained wLil=l encoi ukr(aµ^g0e,it(hxe)basµe 0la,iy(exr)s)
+
+simultaneously by optimizing with respect to the loss function k + k (µ^1,i(x) µ1,i(x)) k and minimizing over all weights. This to learn generally applicable features and the heads to learn features
+
+specific to predicting a single µj,i(x). See Algorithm 6.
+
+MLRW transfer: In this method, there exists one single set of weights . There are no experimentspecific weights. Furthermore, we do not use separate networks to estimate µ0 and µ1. Instead,  is trained to estimate one µi,j(x) at a time. We train  with SF Reptile so that in the future  requires minimal samples to fit µi,j(x) from any experiment. To actually form the CATE estimate, we use a small number of training samples to fit  to µ0,i(x) and then a small number of training samples to fit  to µ1,i(x). We call  meta-learned regression weights (MLRW) because they are meta-learned over many experiments to quickly regress onto any µi,j(x). The full MLRW algorithm is presented as Algorithm 5.
+
+4 EVALUATION
+We evaluate our transfer learning estimators on both real and simulated data. In our data example, we consider the important problem of voter encouragement. Analyzing a large data set of 1.96 million potential voters, we show how transfer learning across elections and geographic regions can dramatically improve our CATE estimators. To the best of our knowledge, this is the first successful demonstration of transfer learning for CATE estimation. The simulated data has been intentionally chosen to be different in character from our real-world example. In particular, the simulated input space is images and the estimated outcome variable is continuous.
+4.1 GOTV EXPERIMENT To evaluate transfer learning for CATE estimation on real data, we reanalyze a set of large field experiments with more than 1.96 million potential voters (Gerber et al., 2017). The authors conducted 17 experiments to evaluate the effect of a mailer on voter turnout in the 2014 U.S. Midterm Elections. The mailer informs the targeted individual whether or not they voted in the past four major elections (2006, 2008, 2010, and 2012), and it compares their voting behavior with that of the people in the same state. The mailer finishes with a reminder that their voting behavior will be monitored. The idea is that social pressure--i.e., the social norm of voting--will encourage people to vote. The likelihood of voting increases by about 2.2% (s.e.=0.001) when given the mailer. Each of the experiments targets a different state. This results in different populations, different ballots, and different electoral environments. In addition to this, the treatment is slightly different in each
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+experiment, as the median voting behavior in each state is different. However, there are still many similarities across the experiments, so there should be gains from transferring information. In this example, the input X is a voter's demographic data including age, past voting turnout in 2006, 2008, 2009, 2010, 2011, 2012, and 2013, marital status, race, and gender. The treatment response function µ^1(x) estimates the voting propensity for a potential voter who receives a mailer encouraging them to vote. The control response function µ^0 estimates the voting propensity if that voter did not receive a mailer. The CATE  is thus the change in the probability of voting when a unit receives a mailer. The complete dataset has this data over 17 different states. Treating each state as a separate experiment, we can perform transfer learning across them.
+
+x A voter profile
+
+outcome The voter's propensity to vote
+
+µ0 The voter's propensity to vote when they do not receive a mailer
+
+µ1 The voter's propensity to vote when they do receive a mailer
+
+ Change in the voter's propensity to vote after receiving a mailer
+
+Being able to estimate the treatment effect of sending a mailer is an important problem in elections. We may wish to only treat people whose likelihood of voting would significantly increase when receiving the mailer, to justify the cost for these mailers. Furthermore, we wish to avoid sending mailers to voters who will respond negatively to them. This negative response has been previously observed and is therefore feasible and a relevant problem--e.g., some recipients call their Secretary of State's office or local election registrar to complain (Mann, 2010; Michelson, 2016). Evaluating a CATE estimator on real data is difficult. The primary difficulty is that we do not get to observe the true CATE for any unit, due to the fundamental problem of causal inference. By definition, only one of the two outcomes is observed for any unit. One could use the original features and simulate the outcome features, but this would require us to create a response model. Instead, we estimate the "truth" on the real data using linear models (version 1) or random forests (version 2). We then construct the data based on these estimates. For a detailed description, see Appendix A.2. We then ask the question: How do the various methods perform when they have less data than the entire sample?
+
+RESULTS
+
+We evaluate all the algorithms discussed in section 3 on the GOTV dataset. For the algorithms in section 3.0.1 that require a base CATE estimator, we use the Y learner because we found it delivered the best performance.3 For baselines, we compare against the non-transfer Y-learner and the S learner with random forests.4 In previous work, state of the art results on this problem have been achieved with both non-transfer tree-based estimators such as S-RF (Künzel et al., 2017; Green and Kern, 2012) and neural-network-based learners such as the R and Y-learners (Nie and Wager, 2017; Stadie et al., 2018).
+
+The best estimator is MLRW. This algorithm consistently converges to a very good solution with
+
+very few observations. Looking at Tables 1, 2, and 3, we observe that MLRW is the best performing
+
+transfer learner for GOTV version 1 in 8 out of 17 trials. In GOTV version 2, it is the best in 11
+
+out of 17 trials. In Figure 2, its average performance is dominant over all other algorithms. We
+
+hypothesize that this method does best because it does not try to artificially bottleneck the flow of
+
+information between outcomes and experiments. MLRW also seems more resilient to data-poisoning
+
+when it encounters outlier data, though we did not concretely test against this. We also observe that
+
+multi-head, frozen-features, and SF all generally improve upon non-transfer baselines. The faster
+
+learning rate of these algorithms indicates that positive transfer between experiments is occurring.
+
+Warm start, however, does not work well and often even leads to worse results than the baseline
+
+esti3mSeaetoTrasb. lTesh1is,
+
+is 2,
+
+consistent with and 3 and Figures
+
+prior findings on 5, 6, and 7 for full
+
+warm results
+
+start with
+
+(Finn the X,
+
+et al., 2017). Y, S, and T-learners
+
+as
+
+base
+
+CATE
+
+estimators.
+
+4We use the S learner because the Y learner is not compatible with random forests.
+
+6
+
+Under review as a conference paper at ICLR 2019
+Figure 2: Social Pressure and Voter Turnout, Version 1 (real data as a linear model) and Version 2 (real data as random forest). Our transfer learning algorithms far exceed the previous state of the art non-transfer baselines, which are represented here as S-RF and Baseline (Y-NN). 4.2 MNIST EXAMPLE In the previous experiment, we observed that the MLRW estimator performed most favorably, and transfer learning significantly improved upon the baseline. To confirm that this conclusion is not specific to voter persuasion studies, we intentionally consider a very different type of data. Recently, (Nie and Wager, 2017) introduced a simulation study wherein MNIST digits are rotated by some number of degrees ; with  furnished via a single data generating process that depends on the value of the depicted digit. They then attempt to do CATE estimation to measure the heterogeneous treatment effect of a digit's label. Motivated by this example, we develop a data generating process using MNIST digits wherein transfer learning for CATE estimation is applicable. In our example, the input X is an MNIST image. We have k data-generating processes which return different outcomes for each input when given either treatment or control. Thus, under some fixed data-generating process, µ0 represents the outcome when the input image X is given the control, µ1 represents the outcome when X is given the treatment, and  is the difference in outcomes given the placement of X in the treatment or control group. Each data-generating process has different response functions (µ0 and µ1) and thus different CATEs ( ), but each of these functions only depends on the label presented in the image X. We thus hope that transfer learning could expedite the process of learning features which are indicative of the label. See Appendix A for full details of the data generation process. In Figure 3, we confirm that a transfer learning strategy outperforms its non-transfer learning counterpart, even on image data. We also see that MLRW performs well, though in this case multi-head is competitive. We also see that several of the transfer methods are worse than non-transfer baselines.
+Figure 3: MNIST task. The baseline is the S-learner. All transfer CATE estimators for this task are built on top the S-learner, rather than the Y-learner, because we found it delivered better performance for this problem.
+7
+
+Under review as a conference paper at ICLR 2019
+5 RELATED WORKS AND DISCUSSION
+5.0.1 RELATED WORKS In this paper, we proposed the problem of transfer learning for CATE estimation. One immediate question the reader may be left with is why we chose the transfer learning techniques we did. We only considered two common types of transfer: (1) Basic fine tuning and weights sharing techniques common in the computer vision literature (Welinder et al., 2010; Saenko and Darrell, 2010; Bourdev et al., 2011; Donahue et al., 2014; Koch, 2015), (2) Techniques for learning an initialization that can be quickly optimized (Finn et al., 2017; Ravi and Larochelle, 2017; Nichol et al., 2018). However, many further techniques exist. Yet, transfer learning is an extensively studied and perennial problem (Schmidhuber, 1992; Bengio et al., 1992; Thrun, 1996; Thrun and Pratt, 1998; Taylor and Stone, 2009; Silver et al., 2013). In (Vinyals et al., 2016), the authors attempt to combine feature embeddings that can be utilized with non-parametric methods for transfer. (Snell et al., 2017) is an extension of this work that modifies the procedure for sampling examples from the support set during training. (Andrychowicz et al., 2016) and related techniques try to meta-learn an optimizer that can more quickly solve new tasks. (Rusu et al., 2016) attempts to overcome forgetting during transfer by systematically introducing new network layers with lateral connections to old frozen layers. (Munkhdalai and Yu, 2017) uses networks with memory to adapt to new tasks. We invite the reader to review (Finn et al., 2017) for an excellent overview of the current transfer learning landscape. Though the majority of the discussed techniques could be extended to CATE estimation, our implementations of (Rusu et al., 2016; Andrychowicz et al., 2016) proved difficult to tune and consequently learned very little. Furthermore, we were not able to successfully adapt (Snell et al., 2017) to the problem of regression. We decided to instead focus our attention on algorithms for obtaining good initializations, which were easy to adapt to our problem and quickly delivered good results without extensive tuning. On the topic of using neural networks to improve causal inference algorithms, a flurry of relevant work exists (Ramachandra, 2018; Magliacane et al., 2017; Johansson et al., 2016; Louizos et al., 2017; Alaa et al., 2017; Shalit et al., 2017; Nie and Wager, 2017). We found that these papers either did not allow us to better estimate the CATE, or else provided worse performance than the baseline methods we did consider in this paper. Extending transfer to other causal inference algorithms is an ongoing and interesting area of research. 5.0.2 CLOSING REMARKS We are left with several open questions. Can transfer learning still be applied to CATE estimation when the experiment input spaces differ? How should one properly deal with missing and incomplete data? Do there exist better methods for interpretability, highlighting which features are most important for transfer and why? Can these techniques be extended to causal models outside of CATE estimation? How can one properly encode causal relationships into a neural network? Answering these questions would have a positive impact on fields such as causal inference, deep learning, and reinforcement learning.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Alaa, A., Weisz, M., and M., V. D. S. (2017). Deep counterfactual networks with propensity-dropout. 1706.05966.
+Andrychowicz, M., Denil, M., Gomez, S., Hoffman, M. W., Pfau, D., Schaul, T., and de Freitas, N. (2016). Learning to learn by gradient descent by gradient descent. Neural Information Processing Systems (NIPS).
+Athey, S. and Imbens, G. W. (2015). Machine learning methods for estimating heterogeneous causal effects. stat, 1050(5).
+Athey, S. and Imbens, G. W. (2016). Recursive partitioning for heterogeneous causal effects. Proceedings of the National Academy of Sciences of the United States of America, 113(27):7353­ 60.
+Bengio, S., Bengio, Y., Cloutier, J., and Gecsei, J. (1992). On the optimization of a synaptic learning rule. Biological Neural Networks.
+Bourdev, L., Maji, S., and Malik, J. (2011). Describing people: A poselet-based approach to attribute classification. ICCV.
+D'Amour, A., Ding, P., Feller, A., Lei, L., and Sekhon, J. (2017). Overlap in observational studies with high-dimensional covariates. arXiv preprint arXiv:1711.02582.
+Donahue, J., Jia, Y., Vinyals, O., Hoffman, J., Zhang, N., Tzeng, E., and Darrell, T. (2014). Decaf: A deep convolutional activation feature for generic visual recognition. International Conference on Machine Learning (ICML).
+Finn, C., Abbeel, P., and Levine, S. (2017). Model-agnostic metalearning for fast adaptation of deep networks. ICML.
+Gerber, A. S., Huber, G. A., Fang, A. H., and Gooch, A. (2017). The generalizability of social pressure effects on turnout across high-salience electoral contexts: Field experimental evidence from 1.96 million citizens in 17 states. American Politics Research, 45(4):533­559.
+Green, D. P. and Kern, H. L. (2012). Modeling heterogeneous treatment effects in survey experiments with bayesian additive regression trees. Public opinion quarterly, 76(3):491­511.
+Henderson, N. C., Louis, T. A., Wang, C., and Varadhan, R. (2016). Bayesian analysis of heterogeneous treatment effects for patient-centered outcomes research. Health Services and Outcomes Research Methodology, 16(4):213­233.
+Hill, J. L. (2011). Bayesian nonparametric modeling for causal inference. Journal of Computational and Graphical Statistics, 20(1):217­240.
+Johansson, F. D., Shalit, U., and Sontag, D. (2016). Learning representations for counterfactual inference. ICML.
+Koch, G. (2015). Siamese neural networks for one-shot image recognition. ICML Deep Learning Workshop.
+Künzel, S., Sekhon, J., Bickel, P., and Yu, B. (2017). Meta-learners for estimating heterogeneous treatment effects using machine learning. arXiv preprint arXiv:1706.03461.
+LeCun, Y. (1998). The mnist database of handwritten digits. http://yann. lecun. com/exdb/mnist/. Louizos, C., Shalit, U., Mooij, J., Sontag, D., Zemel, R., and Welling, M. (2017). Causal effect
+inference with deep latent-variable models. NIPS. Magliacane, S., Van Ommen, T., Claassen, T., Bongers, S., Versteeg, P., and Mooij, J. (2017). Domain
+adaptation by using causal inference to predict invariant conditional distributions. 1707.06422. Mann, C. B. (2010). Is there backlash to social pressure? a large-scale field experiment on voter
+mobilization. Political Behavior, 32(3):387­407.
+9
+
+Under review as a conference paper at ICLR 2019
+Michelson, M. R. (2016). The risk of over-reliance on the institutional review board: An approved project is not always an ethical project. PS: Political Science & Politics, 49(02):299­303.
+Munkhdalai, T. and Yu, H. (2017). Meta networks. ICML. Nichol, A., Achiam, J., and Schulman, J. (2018). On first-order meta-learning algorithms. CoRR,
+abs/1803.02999. Nie, X. and Wager, S. (2017). Learning objectives for treatment effect estimation. arXiv preprint
+arXiv:1712.04912. Powers, S., Qian, J., Jung, K., Schuler, A., Shah, N. H., Hastie, T., and Tibshirani, R. (2018). Some
+methods for heterogeneous treatment effect estimation in high dimensions. Statistics in medicine. Ramachandra, V. (2018). Deep learning for causal inference. 1803.00149. Ravi, S. and Larochelle, H. (2017). Optimization as a model for few-shot learning. International
+Conference on Learning Representations (ICLR). Rosenbaum, P. R. and Rubin, D. B. (1983). The central role of the propensity score in observational
+studies for causal effects. Biometrika, 70(1):41­55. Rubin, D. B. (1974). Estimating causal effects of treatments in randomized and nonrandomized
+studies. Journal of educational Psychology, 66(5):688. Rusu, A. A., Rabinowitz, N. C., Desjardins, G., Soyer, H., Kirkpatrick, J., Kavukcuoglu, K., Pascanu,
+R., and Hadsell, R. (2016). Progressive neural networks. CoRR, vol. abs/1606.04671. Saenko, K., K. B. F. M. and Darrell, T. (2010). Adapting visual category models to new domains.
+ECCV. Schmidhuber, J. (1992). Learning to control fast-weight memories: An alternative to dynamic
+recurrent networks. Neural Computation. Shalit, U., Johansson, F., and Sontag, D. (2017). Estimating individual treatment effect: generalization
+bounds and algorithms. ICML. Silver, Yand, and Li (2013). Lifelong machine learning systems: Beyond learning algorithms. DAAAI
+Spring Symposium-Technical Report, 2013. Snell, J., , Swersky, K., and Zemel, R. (2017). Prototypical networks for few-shot learning. arXiv
+preprint arXiv:1703.05175. Stadie, B. C., Künzel, S. R., Vemuri, N., Ramakrishnan, V., Sekhon, J. S., and Abbeel, P. (2018).
+Estimating heterogenous treatment effects with the y-learner. arXiv. Taddy, M., Gardner, M., Chen, L., and Draper, D. (2016). A nonparametric bayesian analysis
+of heterogenous treatment effects in digital experimentation. Journal of Business & Economic Statistics, 34(4):661­672. Taylor and Stone (2009). Transfer learning for reinforcement learning domains: A survey. DAAAI Spring Symposium-Technical Report, 2013. Thrun (1996). Is learning the n-th thing any easier than learning the first? NIPS. Thrun, S. and Pratt, L. (1998). Learning to learn. Springer Science and Business Media. Tian, L., Alizadeh, A. A., Gentles, A. J., and Tibshirani, R. (2014). A simple method for estimating interactions between a treatment and a large number of covariates. Journal of the American Statistical Association, 109(508):1517­1532. Vinyals, O., Blundell, C., Lillicrap, T., Wierstra, D., and et al (2016). Matching networks for one shot learning. Neural Information Processing Systems (NIPS). Wager, S. and Athey, S. (2017). Estimation and inference of heterogeneous treatment effects using random forests. Journal of the American Statistical Association. Welinder, P., Branson, S., Mita, T., Wah, C., Schroff, F., Belongie, S., and Perona, P. (2010). Caltech-ucsd birds 200. technical report cns-tr-2010-001. California Institute of Technology.
+10
+
+Under review as a conference paper at ICLR 2019
+A APPENDIX: SIMULATION STUDIES AND APPLICATION
+A.1 MNIST SIMULATION For our MNIST simulation study (Section 4.2), we used the MNIST database (LeCun, 1998) which contains labeled handwritten images. We follow here the notation of Nie and Wager (2017), who introduce a very similar simulation study which is not trying to evaluate transfer learning for CATE estimation, but instead emulates a RCT with the goal to evaluate different CATE estimators. The MNIST data set contains labeled image data (Xi, Ci), where Xi denotes the raw image of i and Ci 2 {0, . . . , 9} denotes its label. We create k Data Generating Processes (DGPs), D1, . . . , Dk, each of which specifies a distribution of (Yi(0), Yi(1), Wi, Xi) and represents different CATE estimation problems. In this simulation, we let Wi = 0 if the image Xi is placed in the control, and Wi = 1 if the image Xi is placed in the treatment. Yi(Wi) quantifies the the outcome of Xi under Wi. To generate a DGP Dj , we first sample weights in the following way,
+mj(0), mj(1), . . . , mj(9) iid Unif( 3, 3), tj(0), tj(1), . . . , tj(9) iid Unif( 1, 1), pj(0), pj(1), . . . , pj(9) iid Unif(0.3, 0.7),
+and we define the response functions and the propensity score as µ0j (Ci) = mj (Ci) + 3Ci, µj1(Ci) = µj0(Ci) + tj (Ci), ej(Ci) = pj(Ci).
+To generate (Yi(0), Yi(1), Wi, Xi) from Dj, we fist sample a (Xi, Ci) from the MNIST data set, and we then generate Yi(0), Yi(1), and Wi in the following way:
+"i iid N (0, 1) Yi(0) = µ0(Ci) + "i Yi(1) = µ1(Ci) + "i
+Wi  Bern(e(Ci)).
+During training, Xi, Wi, and Yi are made available to the convolutional neural network, which then predicts ^ given a test image Xi and a treatment Wi.  is the difference in the outcome given the difference in treatment and control. Having access to multiple DGPs can be interpreted as having access to prior experiments done on a similar population of images, allowing us to explore the effects of different transfer learning methods when predicting the effect of a treatment in a new image.
+A.2 GOTV DATA EXAMPLE AND SIMULATION In this section, we describe how the simulations for the GOTV example in the main paper were done and we discuss the results of a much bigger simulation study with 51 experiments which is summarized in Tables 1, 2, and 3.
+A.2.1 DATA GENERATING PROCESSES FOR OUR REAL WORLD EXAMPLE For our data example, we took one of the experiments conducted by Gerber et al. (2017). The study took place in 2014 in Alaska and 252,576 potential voters were randomly assigned in a control and a treatment group. Subjects in the treatment group were sent a mailer as described in the main text and their voting turnout was recorded. To evaluate the performance of different CATE estimators we need to know the true CATEs, which are unknown due to the fundamental problem of causal inference. To still be able to evaluate CATE
+11
+
+Under review as a conference paper at ICLR 2019
+
+estimators researchers usually estimate the potential outcomes using some machine learning method and then generate the data from this estimate. This is to some extend also a simulation, but unlike classical simulation studies it is not up to the researcher to determine the data generating distribution. The only choice of the researcher lies in the type of estimator she uses to estimate the response functions. To avoid being mislead by artifacts created by a particular method, we used a linear model in Real World Data Set 1 and random forests estimator in Real World Data Set 2. Specifically, we generate for each experiment a true CATE and we simulate new observed outcomes based on the real data in four steps.
+
+1. We first use the estimator of choice (e.g., a random forests estimator) and train it on the
+
+treated units and on the control units separately to get estimates for the response functions,
+
+µ0 and µ1.
+
+2. Next, we sample N units from the underlying experiment to get the features and the treatment assignment of our samples (Xi, Wi)Ni=1.
+
+3. We then generate the true underlying CATE for each unit using i =  (Xi) = µ1(Xi) µ0(Xi).
+
+4. Finally we generate the observed outcome by sampling a Bernoulli distributed variable
+
+around mean µi. Yiobs  Bern(µi),
+
+µi
+
+
+
+=
+
+µ0(Xi) µ1(Xi)
+
+if if
+
+W W
+
+= 0, = 1.
+
+After this procedure, we have 17 data sets corresponding to the 17 experiments for which we know the true CATE function, which we can now use to evaluate CATE estimators and CATE transfer learners.
+
+A.2.2 DATA GENERATING PROCESSES FOR OUR SIMULATION STUDY
+
+Simulations motivated by real-world experiments are important to assess whether our methods work well for voter persuasion data sets, but it is important to also consider other settings to evaluate the generalizability of our conclusions. To do this, we first specify the control response function, µ0(x) = E[Y (0)|X = x] 2 [0, 1], and the treatment response function, µ1(x) = E[Y (1)|X = x] 2 [0, 1]. We then use each of the 17 experiments to generate a simulated experiment in the following way:
+
+1. We sample N units from the underlying experiment to get the features and the treatment assignment of our samples (Xi, Wi)Ni=1.
+
+2. We then generate the true underlying CATE for each unit using i =  (Xi) = µ1(Xi) µ0(Xi).
+
+3. Finally we generate the observed outcome by sampling a Bernoulli distributed variable
+
+around mean µi. Yiobs  Bern(µi),
+
+µi
+
+
+
+=
+
+µ0(Xi) µ1(Xi)
+
+if if
+
+W W
+
+= 0, = 1.
+
+The experiments range in size from 5,000 units to 400,000 units per experiment and the covariate vector is 11 dimensional and the same as in the main part of the paper. We will present here three different setup.
+Simulation LM (Table 1): We choose here N to be all units in the corresponding experiment. Sample 0 = ( 10, . . . , d0) iid N (0, 1) and 1 = ( 11, . . . , d1) iid N (0, 1) and define,
+µ0(x) = logistic x 0 , µ1(x) = logistic x 1 .
+
+Simulation RF (Table 2): We choose here N to be all units in the corresponding experiment.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+1. Train a random forests estimator on the real data set and define µ0 to be the resulting estimator,
+2. Sample a covariate f (e.g., age), 3. ample a random value in the support of f (e.g., 38), 4. Sample a shift s  N (0, 4).
+Now define the potential outcomes as follows:
+µ0(x) = trained Random Forests algorithm µ1(x) = logistic (logit (µ0(x) + s  1f v))
+
+Simulation RFt (Table 3): This experiment is the same as Simulation RF, but use only one percent
+
+of
+
+the
+
+data,
+
+N
+
+=
+
+#units 100
+
+.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+B PSEUDO CODE FOR CATE ESTIMATORS
+
+In this section, we will present pseudo code for the CATE estimators in this paper. We present code
+
+for the meta learning algorithms in Section C. We denote by Y 0 and Y 1 the observed outcomes for
+
+ttrheeatceodngtrroolupan. dXt0heantdreXate1dargerothuepf.eFatourreesxoamf tphleec, oYni1troisl to the feature vector of the ith unit in the treated group.
+
+the and Mk
+
+observed outcome of the ith unit in the
+
+treated units, and hence, (Y  X) is the notation
+
+Xfoi1r
+
+corresponds a regression
+
+estimator, which estimates x !7 E[Y |X = x]. It can be any regression/machine learning estimator,
+
+but in this paper we only choose it to be a neural network or random forest.
+
+These algorithms first appeared in (Künzel et al., 2017; Stadie et al., 2018). We reproduce them here for completeness.
+
+Algorithm 1 T-learner 1: procedure T­LEARNER(X, Y obs, W ) 2: µ^0 = M0(Y 0  X0) 3: µ^1 = M1(Y 1  X1)
+4: ^(x) = µ^1(x) µ^0(x) 5: end procedure M0 and M1 are here some, possibly different machine learning/regression algorithms.
+
+Algorithm 2 S-learner 1: procedure S­LEARNER(X, Y obs, W ) 2: µ^ = M (Y obs  (X, W )) 3: ^(x) = µ^(x, 1) µ^(x, 0) 4: end procedure
+M (Y obs  (X, W )) is the notation for estimating (x, w) !7 E[Y |X = x, W = w] while treating W as a 0,1­valued feature.
+
+Algorithm 3 X­learner 1: procedure X­LEARNER(X, Y obs, W, g)
+
+2: µ^0 = M1(Y 0  X0) 3: µ^1 = M2(Y 1  X1) 4: D~ i1 = Yi1 µ^0(Xi1) 5: D~ i0 = µ^1(Xi0) Yi0 6: ^1 = M3(D~ 1  X1) 7: ^0 = M4(D~ 0  X0)
+
+. Estimate response function . Compute imputed treatment effects . Estimate CATE for treated and control
+
+8: 9:
+
+end^p(rxo)c=edug(rxe)^0(x) + (1
+
+g(x))^1(x)
+
+. Average the estimates
+
+g(x) 2 [0, 1] is a weighing function which is chosen to minimize the variance of ^(x). It is sometimes possible to estimate Cov(0(x), 1(x)), and compute the best g based on this estimate. However, we have made good experiences by choosing g to be an estimate of the propensity score, but also choosing it to be constant and equal to the ratio of treated units usually leads to a good estimator of the CATE.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 4 Y-Learner Pseudo Code
+
+1: if Wi == 0 then
+
+2: Update the network 0 to predict Yiobs
+
+3: Update the network 1 to predict Yiobs +  (Xi)
+
+4: 5:
+
+Update the network  end if
+
+to predict 1 (Xi)
+
+Yiobs
+
+6: if Wi == 1 then
+
+7: Update the network 0 to predict Yiobs  (Xi) 8: Update the network 1 to predict Yiobs
+
+9: 10:
+
+Update the network  end if
+
+to predict Yiobs
+
+0 (Xi)
+
+This process describes training the Y-Learner for one step given a data point (Yiobs, Xi, Wi)
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+C EXPLICIT TRANSFER LEARNING ALGORITHMS FOR CATE ESTIMATION
+C.1 MLRW TRANSFER FOR CATE ESTIMATION
+
+Algorithm 5 MLRW Transfer for Cate Estimation.
+
+1: 2:
+
+Let Let
+
+nµu(0im) eaxnpdsµb(1ei)tbhee
+
+the outcome under treatment number of experiments.
+
+and
+
+control
+
+for
+
+experiment
+
+i.
+
+3: Let  be an N layer neural network parameterized by  = [0, . . . , N ]. 4: Let  = [0, . . . , N ] be a vector, where N is the number of layers in . 5: Let outeriters be the total number of training iterations.
+
+6: Let inneriters be the number of inner loop training iterations.
+
+7: for oiter < outeriters do
+
+8: for i < numexps do
+
+9: 10:
+
+Sample for j =
+
+X0 [0,
+
+1a]nddoX1
+
+:
+
+control
+
+and
+
+treatment
+
+units
+
+from experiment i . j iterating over treatment
+
+and
+
+control
+
+11: 12:
+
+Let for
+
+U0() =  k < inneriters
+
+do
+
+13: 14:
+
+LCo=mpkutUekr()(LX. j ) µj (Xj )k
+
+15: Use ADAM with rL to obtain Uk+1().
+
+16: 17:
+
+endUfokr() = Uk+1()
+
+18: for p < N do
+
+19: p = p · Uk(p) + (1 p) · p. 20: end for
+
+21: end for
+
+22: end for
+
+23: end for
+
+24: To Evaluate CATE estimate, do
+
+25: C = []
+
+26: for i < numexps do
+
+27: Sample X0 and X1: control and treatment units from experiment i 28: Sample X: test units from experiment i.
+
+29: for j = [0, 1] do
+
+. j iterating over treatment and control
+
+30: for k < innteriters do
+
+31: 32:
+
+CLo=mpkutUekr()(LX. j ) µj (Xj )k
+
+33: Use ADAM with rL to obtain Uk+1().
+
+34: Uk() = Uk+1() 35: end for
+
+36: 37:
+
+µ^j = end for
+
+Uk () (X )
+
+38: ^i = µ^0 µ^1
+
+39: 40:
+
+endCfo.arppend(^i)
+
+41: return C
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+C.2 JOINT TRAINING
+
+Algorithm 6 Joint Training
+
+1: 2:
+
+Let Let
+
+nµu0(im) eaxnpdsµb(1ei)tbhee
+
+the outcome under control number of experiments.
+
+and
+
+treatment
+
+for
+
+experiment
+
+i.
+
+3: Let  be a generic expression for a neural network parameterized by . 4: Let  be base neural network layers shared by all experiments.
+
+5: Let
+
+(i) 0
+
+be
+
+neural
+
+network
+
+layers
+
+predicting
+
+µ0(i)
+
+in
+
+experiment
+
+i.
+
+6: Let
+
+(i) 1
+
+be
+
+hneural
+
+nietwork
+
+layers
+
+predicting
+
+µ(1i)
+
+in
+
+experiment
+
+i.
+
+7:
+
+Let !0(i)
+
+= , h
+
+(i)
+0i
+
+be
+
+the
+
+full
+
+prediction
+
+network
+
+for
+
+µ0
+
+in
+
+experiment
+
+i.
+
+8: Let !1(i) =
+
+,
+
+(i) 1
+
+be the full prediction network for µ1 in experiment i.
+
+9:
+
+Let
+
+
+
+=
+
+S1
+j=0
+
+Snumexps
+i=1
+
+!j(i)
+
+be all trainable parameters.
+
+10: Let numiters be the total number of training iterations
+
+11: for iter < numiters do
+
+12: L = 0
+
+13: for i < numexps do
+
+14: Sample X0 and X1: control and treatment units from experiment i
+
+15: for j = [0, 1] do
+
+. j iterating over treatment and control
+
+16: L(ji) = k!j(i) (Xj ) µj (Xj )k
+
+17: 18:
+
+L= end for
+
+L
+
++
+
+L(ji)
+
+19: end for
+
+20: 21:
+
+ACopmplpyuAteDrAMLw=ith@@Lgra=diPentisPgijve@@nL!j(j(bii))y rL.
+
+22: for i < numexps do
+
+23: Sample X: test units from experiment i
+
+24: end for
+
+25: end for
+
+26: µ^0 = !0(i) (X)
+
+27: 28:
+
+µr^e1tu=rn!C1(Ai)T(XE
+
+) estimate
+
+^
+
+=
+
+µ^1
+
+µ^0
+
+5/17/2018
+
+joint_training
+
+Figure 4: Joint Training - Unlike the Multi-head method which differentiates base layers for treatment and control, the Joint Training method has all observations and experiments (regardless of treatment and control) share the same base network, which extracts general low level features from the data.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+C.3 T-LEARNER TRANSFER CATE ESTIMATORS Here, we present full pseudo code for the algorithms from Section 3 using the T-learner as a base learner. All of these algorithms can be extended to other learners including S, R, X, and Y . See the released code for implementations.
+
+Algorithm 7 Vanilla T-learner (also referred to as Baseline T-learner)
+
+1: Let µ0 and µ1 be the outcome under treatment and control.
+
+2: Let X be the experimental data. Let Xt be the test data.
+
+3: 4:
+
+Let Let
+
+0 =
+
+and 1 0 [ 1
+
+be .
+
+a
+
+neural
+
+networks
+
+parameterized
+
+by
+
+0
+
+and
+
+1.
+
+5: Let numiters be the total number of training iterations.
+
+6: Let batchsize be the number of units sampled. We use 64.
+
+7: for i < numiters do
+
+8: Sample X0 and X1: control and treatment units. Sample batchsize units.
+
+9: L0 = k(X0) µ0(X0)k
+
+10: L1 = k(X1) µ1(X1)k
+
+11: L = L0 + L1
+
+12: 13:
+
+Compute rL Apply ADAM
+
+w=ith@@Lg.radients
+
+given
+
+by
+
+r L.
+
+14: end for
+
+15: µ^0 = 0 (Xt)
+
+16: 17:
+
+µr^e1tu=rnC1A(XTEt)estimate ^ = µ^1
+
+µ^0
+
+Algorithm 8 Warm Start T-learner
+
+1: 2: 3: 4:
+
+Let Let Let Let
+
+Xµ 0i=i0abanend0dth[µe1id1b1a.ebtaethfaeonroeueuxtcrpaoelmrniemetuewnnodtreik.rsLtrpeeatartXammtieenbtteeratinhzdeedtceobsnyttdroa0tlaafnofodr rexe1xp.peerirmimeennt ti.i.
+
+5: Let numiters be the total number of training iterations.
+
+6: Let batchsize be the number of units sampled. We use 64.
+
+7: for i < numiters do
+
+8: 9: 10:
+
+SLLa10m==plkkeX0100((XXan1000d))X10µµ: 01c((oXXnt0100r))okkl and treatment units for experiment 0. Sample batchsize units.
+
+11: L = L0 + L1
+
+12: 13:
+
+Compute rL Apply ADAM
+
+w=ith@@Lg.radients
+
+given
+
+by
+
+r L.
+
+14: end for
+
+15: for i < numiters do
+
+16: 17: 18:
+
+LSLa01m==plkkeX0101((XXan1011d))X11µµ: 01c((oXXnt1011r))okkl and treatment units for experiment 1. Sample batchsize units.
+
+19: L = L0 + L1
+
+20: 21:
+
+Compute rL Apply ADAM
+
+w=ith@@Lg.radients
+
+given
+
+by
+
+r L.
+
+22: end for
+
+23: 24: 25:
+
+rµµ^^e10tu==rnC10A((XXTEtt11))estimate ^ = µ^1
+
+µ^0
+
+18
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 9 Frozen Features T-learner
+
+1: 2: 3:
+
+Let Let Let
+
+µX0ii 
+
+babneedathµgei1endbeaertaitchfeeoxropuerxtecpsoesmiroiemnuefnnodtr eia.rnLtreeeutartXamltinenbettewatnohdrektceposantrtdaromatlaeftofeorrirezxeexpdpeberiyrmime.ennt ti.i.
+
+4:
+
+Lasestoc00ia, te01d,
+
+w10i,th11pbreednicetuinragl
+
+network parameters. The subscript indicates the outcome that (0 for control and 1 for treatment) and the superscript indexes
+
+ is the
+
+experiment.
+
+5: Let 0 be the first k layers of 00 . Define 1 analogously.
+
+6: 7:
+
+Let Let
+
+nium=ite0irs[be1it.he
+
+total
+
+number
+
+of
+
+training
+
+iterations.
+
+8: Let batchsize be the number of units sampled. We use 64.
+
+9: for i < numiters do
+
+10: Sample X00 and X10: control and treatment units for experiment 0. Sample batchsize units.
+
+11: L0 = k00 (X00) µ0(X00)k
+
+12: 13:
+
+L1 = k10 (X10) µ1(X10)k L = L0 + L1
+
+14: 15:
+
+Compute rL Apply ADAM
+
+w=ith@@Lg.radients
+
+given
+
+by
+
+r0
+
+L.
+
+16: end for
+
+17: for i < numiters do
+
+18: 19:
+
+SCaommpplueteXZ0101an=d
+
+X11(:Xc01o)natrnodl
+
+and treatment units Z11 =  (X11)
+
+for
+
+experiment
+
+1.
+
+Sample
+
+batchsize
+
+units.
+
+20: L0 = k01 (Z01) µ0(Z01)k
+
+21: 22:
+
+L1 = k11 (Z11) µ1(Z11)k L = L0 + L1
+
+23: 24: 25:
+
+endCAfooprmplpyuAteDrAM1 Lw=ith@@gLr1a.dDieontnsogticvoemn bpyutre gr1aLd.ients with respect to 0 parameters.
+
+26: Compute Zt1 =  (Xt1).
+
+27: µ^0 = 01 (Zt1)
+
+28: 29:
+
+rµ^e1tu=rnC11A(ZTtE1)estimate ^ = µ^1
+
+µ^0
+
+19
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 10 Multi-Head T-learner
+
+1: 2: 3:
+
+Let Let Let
+
+µX0ii 
+
+babneedathµge1iendbeaertaitchfeeoxropuerxtecpsoesmiroiemnuefnnodtr eia.rnLtreeeutartXamltinenbettewatnohdrektceposantrtdaromatlaeftofeorrirezxeexpdpeberiyrmime.ennt ti.i.
+
+4: Let 0 be base neural network layers shared by all experiments for predicting outcomes under
+
+control.
+
+5: Let 1 be base neural network layers shared by all experiments for predicting outcomes under treatment.
+
+6: Let i.
+
+(i) 0
+
+be
+
+neural
+
+network
+
+layers
+
+receiving
+
+0
+
+(xi0)
+
+as
+
+input
+
+and
+
+predicting
+
+µ0(i)(xi0)
+
+in
+
+experiment
+
+7: Let i.
+
+(i) 1
+
+be
+
+neural
+
+network
+
+layers
+
+receiving
+
+1
+
+(xi1)
+
+as
+
+input
+
+and
+
+predicting
+
+µ1(i)(xi1)
+
+in
+
+experiment
+
+hi
+
+8:
+
+Let !0(i)
+
+= , h
+
+(i)
+0i
+
+be
+
+all
+
+trainable
+
+parameters
+
+used
+
+to
+
+predict
+
+µi0.
+
+9: Let !1(i) =
+
+,
+
+(i) 1
+
+be all trainable parameters used to predict µi1.
+
+10: 11:
+
+Let Let
+
+nuim=ite!r0(si)b[e t!he1(i)to. tal
+
+number
+
+of
+
+training
+
+iterations.
+
+12: Let batchsize be the number of units sampled. We use 64.
+
+13: Let numexps be the number of experiments.
+
+14: for i < numiters do
+
+15: for j < numexps do
+
+16: units.
+
+Sample X0j and X1j: control and treatment units for experiment j. Sample batchsize
+
+17: Compute Z0j = 0 (X0j ) and Z1j = 1 (X1j )
+
+18:
+
+Compute µ^j0
+
+=
+
+j 0
+
+(z0j )
+
+and
+
+µ^j1
+
+=
+
+j 1
+
+(z1j
+
+)
+
+19: L0 = kµ^0j µj0(X0j )k
+
+20: L1 = kµ^1j µ1j (X1j )k
+
+21: L = L0 + L1
+
+22: 23:
+
+ACopmplpyuAteDrAMi Lw=ith@@gLria.dients given by rL.
+
+24: end for
+
+25: end for
+
+26: Let C = []
+
+27: for j < numexps do
+
+28: Compute Z0j = 0 (Xtj ) and Z1j = 1 (Xtj )
+
+29:
+
+Compute µ^0j
+
+=
+
+j 0
+
+(z0j )
+
+and
+
+µ^1j
+
+=
+
+j 1
+
+(z1j
+
+)
+
+30: 31:
+
+Estimate CATE C.append(^)
+
+^
+
+=
+
+µ^j1
+
+µ^j0.
+
+32: end for
+
+33: return C
+
+20
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 11 SF Reptile T-learner
+
+1: 2: 3: 4:
+
+Let Let Let Let
+
+µX0i=i0abanend0dth[µei1d1b1a.ebtaethfaeonroeueuxtcrpaoelmrniemetuewnnodtreik.rsLtrpeeatartXammtieenbtteeratinhzdeedtceobsnyttdroa0tlaafnofodr rexe1xp.peerirmimeennt ti.i.
+
+5: 6:
+
+Let Let
+
+ = [0, . . . , N ] be a vector, where N is the number of layers numouteriters be the total number of outer training iterations.
+
+in
+
+i
+
+.
+
+7: Let numinneriters be the total number of inner training iterations.
+
+8: Let numexps be the number of experiments.
+
+9: Let batchsize be the number of units sampled. We use 64.
+
+10: for iouter < numouteriters do
+
+11: for i < numexps do
+
+12: U0(0) = 0 13: U0(1) = 1. 14: for k< numinneriters do
+
+15: Sample X0i and X1i: control and treatment units. Sample batchsize units.
+
+16: L0 = kUk(0)(X0i ) µ0(X0i )k
+
+17: 18:
+
+L1 = kUk(1)(X1i ) µ1(X1i )k L = L0 + L1
+
+19: 20:
+
+Compute rL = Use ADAM with
+
+g@@rLad. ients
+
+given
+
+by
+
+r L
+
+to
+
+obtain
+
+Uk+1(0)
+
+and
+
+Uk+1(1).
+
+21: Set Uk(0) = Uk+1(0) and Uk(1) = Uk+1(1)
+
+22: end for
+
+23: for p < N do
+
+24: p = p · Uk(p) + (1 p) · p. 25: end for
+
+26: end for
+
+27: end for
+
+28: To Evaluate CATE estimate, do
+
+29: C = [].
+
+30: for i < numexps do
+
+31: U0(0) = 0 32: U0(1) = 1. 33: for k< numinneriters do
+
+34: 35:
+
+Sample X0i L0 = kUk
+
+(a0n)d(XX0i1i):
+
+control and µ0 (X0i )k
+
+treatment
+
+units.
+
+Sample
+
+batchsize
+
+units.
+
+36: L1 = kUk(1)(X1i ) µ1(X1i )k
+
+37: L = L0 + L1
+
+38: 39:
+
+Compute rL = Use ADAM with
+
+g@@rLad. ients
+
+given
+
+by
+
+r
+
+L
+
+to
+
+obtain
+
+Uk+1(0
+
+)
+
+and
+
+Uk+1
+
+(1).
+
+40: Set Uk(0) = Uk+1(0) and Uk(1) = Uk+1(1)
+
+41: end for
+
+42: µ^0i = Uk(0)(X0i )
+
+43: µ^i1 = Uk(1)(X1i )
+
+44: 45:
+
+C^i.a=ppµ^e1ind(^µ^ii0).
+
+46: end for
+
+47: return C.
+
+21
+
+Under review as a conference paper at ICLR 2019
+D FULL RESULTS
+Below, we include the full results for the GOTV and MNIST experiments. In particular, we use show results for transfer CATE learners with S, T, X, and Y base learners. We also provide full tables of more comprehensive results for all methods and all train-test splits.
+22
+
+Under review as a conference paper at ICLR 2019
+
+MSE for the CATE
+
+S-NN 0.15
+
+T-NN
+baseline
+
+Y-NN
+
+0.10
+0.05
+0.00 0
+
+warm baseline frozen
+multi head SF
+25 50 75 100 0
+
+SF
+frozen multi head
+
+warm baseline multi head
+SF frozen
+
+25 50 75 100 0 25 50 75 100 0
+Number of units in the training set (in 1000)
+
+other estimators
+T-RF
+joint S-RF
+MLRW
+25 50 75 100
+
+Figure 5: Social Pressure and Voter Turnout, Version 1. Our results far exceed the previous state of the art, which are represented here as S-RF, T-RF, and the baseline method for S-NN and T-NN. Our new methods are Y-NN and the transfer learning methods: warm, frozen, multi-head, joint, SF Reptile, and MLRW.
+
+0.125 0.100
+
+S-NN
+
+T-NN
+baseline
+
+Y-NN
+
+other estimators
+T-RF
+
+MSE for the CATE
+
+0.075
+0.050
+0.025
+0.000 0
+
+SF multi head frozen
+
+baseline
+25 50
+
+warm
+75 100 0
+
+SF
+
+frozen multi head
+
+baseline multi head
+SF warm
+frozen
+
+25 50 75 100 0 25 50 75 100 0
+Number of units in the training set (in 1000)
+
+joint S-RF
+MLRW
+25 50 75 100
+
+Figure 6: Social Pressure and Voter Turnout, Version 2. Our results exceed the previous state of the art results, which are represented here as S-RF, T-RF, and the baseline method for S-NN and T-NN. Our new methods are Y-NN and the transfer learning methods: warm, frozen, multi-head, joint, SF Reptile, and MLRW.
+
+23
+
+Under review as a conference paper at ICLR 2019
+
+MSE for the CATE
+
+S-NN 1.6
+
+Y-NN
+baseline
+
+0.8
+
+0.4 baseline mufwrlotaizrhemenad
+
+warm MLRW
+
+0.2
+
+0 5 10
+
+0 5 10
+
+Number of units in the training set in 1000 units
+
+Figure 7: MNIST task
+
+24
+
+Under review as a conference paper at ICLR 2019 25
+
+t-lm s-rf t-rf R-NN S-NN T-NN X-NN Y-NN joint MLRW
+
+Method frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm joint
+
+LM-1 15.95 19.13 20.04 18.95
+6.74 3.3 4.85 6.84 7.29 6.53 2.73 20.72 22.76 23.46 6.63 1.19 18.83 19.52 20.06 1.54 0.92 5.68 0.9* 48.91 13.75
+1
+
+LM-2 7.82
+13.18 13.56
+5.19 6.17 3.05 38.65 5.29 6.44 6.73 2.34 27.71 5.34 7.2 14.04 11.38 10.72 8.25 8.54
+1* 2.21
+12 1.31 1.26 5.81 1.41
+
+LM-3 20.14
+7.62 7.79 9.33 2.75 2.34 7.54 3.77 4.08 4.49 1.34 8.54 5.98 5.75 10.73 84.13 10.3 4.68 5.57 2.1 1.26 16.57 5.24 5.79 3.46 1.05*
+
+LM-4 6.62
+13.27 13.62 28.98
+5.76 3.83 55.92 6.86 7.25 6.35 2.11 20.18 5.84 6.41 19.57 174.18 10.61 5.06 6.37
+3.3 15.86
+38 31.43
+3.61 4.12 1.94*
+
+LM-5 46.15 15.66
+16 3.04 5.68 3.6 11.36 5.94 6.74 7.23 2.49 23.06 5.16 5.21 17.94 1.87 10.11
+6.6 10.77 1.11* 1.19
+5.54 6.8 29.43 3.46 1.97
+
+LM-6 17.24 15.58 15.99 10.03
+6.27 4.89 3.98 7.19 7.17 6.61 2.3 15.35 10.37 11.56
+14 19.55
+12.5 11.5 9.34 46.07 20.47 3.49 1.23* 2.71 12.22 1.26
+
+LM-7 9.88
+11.44 11.76
+4.88 4.23 4.56 50.76 4.6 6.03 5.99 1.97 14.27 10.9 12.21 13.67 62.12 21.37 10.78 11.36 27.63 1.76 8.2 7.5 3.94 9.58 1.03*
+
+LM-8 10.65
+16.3 16.65 16.34
+7.17 8.47 7.74 8.08
+8.8 7.59 2.73 13.05 7.26 8.77 18.83 22.7 11.12
+12 13.16 5.47 2.75
+4.8 1.07* 12.87 14.96
+2.05
+
+LM-9 44.77 11.34 11.54
+7.91 4.15 5.87 5.72 5.61 5.63 5.79 1.94 9.37 10.25 8.93 14.36 9.67 8.27 10.26 8.03 7.48 3.96 2.61 1.32 21.76 0.9*
+
+LM-10 7.63 16.53 17.11 14.56 6.77 5.22 7.73 7.12 7.6 6.79 2.36 27.94 10.18 6.81 10.81
+0.85* 16.33
+6.25 8.66 7.21 9.4 7.21 1.35 13.25 4.75 1.85
+
+LM-11 8.43 12.57 13.66 19.23 4.88 5.43 8.64 4.34 5.82 5.99 1.95 40.03 6.26 8.93 12.25 3.34 9.81 13.11 10.96 1.02
+19.11 8.48 8.19
+15.78 8.55 1*
+
+LM-12 9
+14.11 14.38
+3.5 5.9 6.77 31.06 6.05 6.53 6.58 2.32 16.3 5.69 6.15 16.61 5.03 13.8 7.27 7.52 1.15* 1.26 12.98 1.2 17.45 13.13 1.15
+
+LM-13 11.21 13.49 13.67 10.4 6.63 5.15 30.81 8.59 8.55 7.38 2.65 20.81 6.71 7.25 39.96 0.94* 9.85 9.2 11.57 0.97 35.43 9.58 4.11 1.12 9.91 1.57
+
+LM-14 20.9 18.56 18.96 15.53 9.87 5.58 18.08 10.75 12.02 9.39 3.64 6.78 10.31 18.98 32.81
+111.42 10.15 18.45 16.7 43.82 9.29 5.08 7.72 29.01 11.68 2.75*
+
+Table 1: MSE in percent for different CATE estimators.
+
+Under review as a conference paper at ICLR 2019 26
+
+t-lm s-rf t-rf R-NN S-NN T-NN X-NN Y-NN joint MLRW
+
+Method frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm joint
+
+RF-1 17.95
+7.18 10.95 11.41
+1.56 0.69 1.36 0.91 1.08 1.55 0.66 11.66 7.83 12.74 2.53 3.45 4.34 4.09 2.51 0.42 29.41 5.45 0.71
+0.9 0.37*
+
+RF-2 26.73
+7 7.76 1.18 0.66 1.23 9.64 1.28
+1.3 1.02 0.58 27.5 4.25 3.32 22.89 2.53 1.85 2.05 1.73 0.32* 9.71 2.51 1.06 27.01 33.47 1.12
+
+RF-3 2.48 4.18 4.69
+5.7 0.7 0.4 4.26 0.84 0.94 0.62 0.35 6.89 1.44 1.33 55.57 47.09 5.47 1.67 1.72 10.65 2.74 1.53 1.54 0.52 1.3 0.18*
+
+RF-4 6.86 7.79 1.26 0.77 1.59 4.53 0.93 1.16 0.95 0.53 22.59 1.47 1.58 44.11 39.7 6.82 0.73 1.48 0.72 12.27 4.76 0.57 22.7 0.61 0.3*
+
+RF-5 4.84 8.43 9.03
+0.7 0.87 1.58
+6 1.78 1.85 1.11 0.63 20.99 1.35 1.06 4.18
+2 4.21 0.58 0.97
+36 48.87
+9.61 2.44 1.37 5.15 0.46*
+
+RF-6 1.76 9.15 10.07 3.79 0.83 0.65 6.74 2.05 2.22 0.99 0.53 12.04 1.33
+1.6 5.72 27.62 11.89 1.16 1.04 1.62 16.59 20.81 0.47 24.94 0.47 0.21*
+
+RF-7 6.2 6.03
+6.67 9.11 0.91 0.81 11.68 1.16
+1.4 0.89 0.47 19.77 2.05 2.19 33.18 10.39 7.91 4.97 7.81 0.82 50.21 3.68 0.73 0.3* 2.68 0.42
+
+RF-8 7.55 9.28 10.08 8.01 0.89 0.57
+2.8 2.04 2.15 1.18 0.63 7.85 8.55 9.28 2.62 0.78 5.02 9.23 4.35 0.87 73.74 4.84 1.38 2.08 0.45*
+
+RF-9 24.58
+5.95 6.3 7.17 0.59 0.28* 12.01 1.61 1.65 0.86 0.49 5.39 1.79 1.52 7.59 11.8 4.67 4.05 4.59 15.19 1.65 10.8 1.25 12.36 2.67 0.37
+
+RF-10 3.5 8.49
+10.35 5.14 0.87 1.98 41.6 1.06 1.12 1.03 0.57 17.31 3.21 2.77 4.96 10.85 6.82 1.49 1.34 1.61 1.76 2.87 1.77 3.39 0.37* 1.18
+
+RF-11 2.35 6.7 8.19 4.15 0.6 1.08 45.72 1.29 1.37 0.89 0.51 17.15 2.29 3.73 4.41 0.93 16.39 5.17 3.86 0.77 3.52 2.78 0.71 9.58 7.76 0.35*
+
+RF-12 2.1 8.1 9.28 0.52 0.92 1.24 4.59 1.49 1.42 1.01 0.55 9.1 3.62 4.99 2.01 9.72 6.99 2.15 1.37 46.3
+24.26 1.36 0.29 2.74 28.14 0.23*
+
+RF-13 3.39 6.46 6.73 1.26 0.91 2.27 1.98 1.99 1.83 1.14 0.64 30.42 2.03 1.64 3.01 11.74 5.22 4.07 2.08 28.37 0.76 9.07 0.63 2.47 7.48 0.26
+
+RF-14 7.41 8.64 10.04 6.88 1.23 3.66 6.75 2.69 2.52 1.49 0.91 3.55 8.7 8.74 1.23 30.62 2.11 8.05 4.83 1.98
+216.69 4.08 1.98 11.48 10.04 0.16*
+
+Table 2: MSE in percent for different CATE estimators.
+
+Under review as a conference paper at ICLR 2019 27
+
+t-lm s-rf t-rf R-NN S-NN T-NN X-NN Y-NN joint MLRW
+
+Method frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm frozen
+multi head SF
+baseline warm joint
+
+RFt-1 22.65 3.54 13.3 62.08 2.49
+1.4 0.84 14.66 17.64 2.57 0.69 18.04 43.37 69.41 12.41 12.24 3.98 60.44 30.46 1.72 5.95 3.98 0.88 8.03 102.83 0.31*
+
+RFt-2 2.74 7.04
+13.55 17.68 51.39 0.57 68.31 2.08 2.76 1.69 0.55 9.54 14.55 19.81 221.49 0.79 11.03 15.03 13.02 0.33* 11.12 14.56 10.92 0.48 38.47 1.25
+
+RFt-3 2.3
+4.39 8.41 5.22 37.47 0.73 4.12 0.95 1.38 1.12 0.34 7.33 9.48 12.99 215.01 3.22 4.33 4.93 5.11 0.87 0.41 12.85 0.28 0.36 133.88 0.21*
+
+RFt-4 5.07 6.4 11.9
+19.91 49.5 1.48 10.77 1.38 2.31 1.55 0.49 6.61 19.35 24.12 131.46 12.46 5.31 7.08 9.95 2.47 2.94 4.3 1.32 0.71 15.31 0.27*
+
+RFt-5 4.78 8.09
+14.11 14.43 43.17 1.54 17.28 2.24 1.99 1.81 0.63 22.11 15.68 20.28 94.89 2.87 5.42 9.51 9.21
+1.8 2.49 3.66 1.89 2.53 37.32 0.35*
+
+RFt-6 8.3
+6.41 15.48 20.53 29.19 1.27 20.06
+7.3 8.64
+1.6 0.64 9.21 20.91 37.07 328.53 12.11 4.67 21.22 13.12 5.44 24.73 9.78 11.35 1.21 410.04 0.29*
+
+RFt-7 9.77
+11.44 14.42 18.51 21.81
+1.1 10.22
+3.17 4.32 1.52 0.51 20.2
+16 19.64 199.48 21.38 14.03
+14.7 9.95 1.35 3.44 11.13 8.42 0.31* 38.28 0.33
+
+RFt-8 38.73 6.33 12.54 49.63 27.25 1.63 1.08 1.08 1.37 1.86 0.64 10.65 41.72 39.37 41.14 1.86 5.99 16.83 12.8 19.37 58.63 3.03
+1.6 1.77 14.96 0.61*
+
+RFt-9 23.94 6.05 10.19
+8.99 61.34 0.88 8.95 0.88 0.85 1.43
+0.5 15.06
+6.99 9.36 398.33 1.48
+7 8 4.48 37.98 12.99 5.78 5.66 0.41* 5.02 0.61
+
+RFt-10 8.94 6.52
+18.99 86.89 27.02 1.07 9.11 5.29
+5.5 1.63 0.53 13.87 30.02 40.65 83.75 18.46
+7 80.71 50.45
+0.81 0.41 3.37 0.54 0.74 11.97 0.4*
+
+RFt-11 83.37 5.09 12.48 54.17 17.25 1.53 5.97 1.44 3.76 1.47 0.46* 27.64 45.59 37.59 132 1.82 6.42 23.89 19.27 0.7 9.55 11.87 0.54 23.48 33.71 0.57
+
+RFt-12 4.26 9.29
+14.64 23.86 64.22 0.79 19.67 2.37 5.44 1.68 0.55* 17.96 16.03 18.62 434.25 99.38 7.21 25.5 12.92 33.11
+0.6 11.33
+2.01 1.4
+26.33 1.32
+
+RFt-13 4.31
+11.64 13.61
+3.02 24.94 0.74 11.64 2.85 3.13 1.85
+0.66 14.08
+4.79 6.87 125.88 14.67 4.89 4.67 8.1 1.34 3.93 4.51 0.61 1.15 11.99
+0.8
+
+RFt-14 31.76 4.28 12.02 18.98 11.24 1.59 8.68 1.78 3.49 2.27 0.8 4.49 18.63 32.52
+168.92 28.43
+2.34 17.1 15.73 13.64 0.49 2.64 2.13 17.72 147.45 0.24*
+
+Table 3: MSE in percent for different CATE estimators.
+
+

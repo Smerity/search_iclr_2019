@@ -1,0 +1,769 @@
+PROBABILISTIC PLANNING WITH SEQUENTIAL MONTE CARLO
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Planning is a fundamental ability of intelligent agents, which allows them to reason about their future behaviour and efficiently learn new tasks. Despite its importance, planning remains an open problem in complex environments. Current challenges include model compounding errors in roll-outs and exponential search space over trajectories. In this work, we propose a novel formulation of planning, which views it as a probabilistic inference problem over future optimal trajectories. This enables us to use sampling methods, and thus, tackle planning in continuous and high-dimensional spaces using a fixed computational budget. We design a new algorithm, Sequential Monte Carlo Planning (SMCP), by leveraging modern methods in Sequential Monte Carlo (SMC), Bayesian smoothing, and control as inference. We draw parallels between our algorithm and popular planning methods such as Monte Carlo Tree Search (MCTS) (Kearns et al., 2002) and Random Shooting methods (Rubinstein & Kroese, 2004). Furthermore, we show that SMCP can capture multimodal policies and can quickly learn continuous control tasks.
+1 INTRODUCTION
+In order for machine learning agents to exhibit intelligent behaviour, they must be able to learn quickly, predict the consequences of their actions, and explain how they will react in a given situation. These characteristics are best achieved when the agent is able to efficiently use an approximate model of the world.
+Recent successes in planning were achieved with deep learning (DL), such examples include Alpha Go (Silver et al., 2017) which used Monte Carlo Tree Search (MCTS) (Kearns et al., 2002) and robot manipulation which used model predictive control (MPC) (Finn & Levine, 2017).
+These successes, however, may only have been possible because the use of perfect or simple models, and have been difficult to replicate in complex environments due to model error compounding or environments with complex dynamics such as contact forces. Additionally, these methods rely on strong assumptions such as unimodality when resampling actions via MPC (using Cross Entropy Methods) and MCTS-UCT (Upper Confidence for Trees)(Kocsis & Szepesva´ri, 2006) assumes discrete states. Efficient planning, therefore, remains an open problem, particularly in cases when states and actions are continuous and high-dimensional
+Here, we frame planning as a density estimation problem over optimal future trajectories. Since trajectories consist of an intertwined sequence of states and actions, estimating this density is complex. To solve this issue, we leverage tools from statistics, such as Sequential Monte Carlo (SMC) methods to build complex and sequential distributions over trajectories. Sequential Monte Carlo methods are flexible and efficient methods used to approximate complex distributions by drawing from simpler ones sequentially. Gu et al. (2015) recently developed techniques advancing SMC by approximating the optimal proposal distribution using variational inference methods. In the field of control as inference, Haarnoja et al. (2018) independently proposed Soft Actor Critic (SAC) as a way to approximate the optimal policy. We propose a method that combines the aforementioned methods to make an efficient and robust planning algorithm: SMC planning (SMCP). SMC allows us to naturally spend more computing resources on promising trajectories and capture the uncertainties in the model while SAC maximizes the entropy of its policy, thus allowing us to efficiently explore the distribution of trajectories.
+Contribution. We depict the problem of planning as one of density estimation that can be estimated using SMC methods. We introduce a novel planning strategy based on the SMC class of algorithms, in which we treat the policy as the proposed distribution to be learned. Following, we draw connections between our algorithm and popular planning algorithms: MCTS and Random Shooting (RS). We investigate how our method empirically compares with existing
+1
+
+model-based methods and a strong model-free baseline on the standard benchmark Mujoco benchmark (Todorov et al., 2012).
+
+2 BACKGROUND
+
+2.1 CONTROL AS INFERENCE
+
+We consider the general case of a Markov Decision Process (MDP) {S, A, penv, r, , µ} where S and A represent the state and action spaces respectively. We use the letters s and a to denote states and actions, which we consider to be continuous vectors. Further notations include: penv(s |s, a) as the state transition probability of the environment, r(s, a)1 as the reward function, and   [0, 1) as the discount factor. µ denotes the probability distribution over initial
+states.
+
+This work focuses on an episodic formulation, with a fixed end-time of T . We define a trajectory as a sequence of
+
+state-action pairs xt:T = {(st, at), . . . , (sT , aT )}, and we use the notation  for a policy which represents a distribution
+
+over actions conditioned on a state. Here  is parametrized by a neural network with parameters . The notation
+
+q(x1:T ) = µ(s1)
+
+T -1 t1
+
+penv(st+1|st, at)(at|st)
+
+denotes
+
+the
+
+probability
+
+of
+
+a
+
+trajectory
+
+x1:T
+
+under
+
+policy
+
+ .
+
+Traditionally, in reinforcement learning (RL) problems, the
+
+goal is to find the optimal policy that maximizes the ex-
+
+pected return Eq [
+
+ t=0
+
+
+
+t
+
+rt
+
+].
+
+However, it is useful to
+
+frame RL as an inference problem within a probabilis-
+
+tic graphical framework (Rawlik et al., 2012; Toussaint
+
+& Storkey, 2006; Levine, 2018). First, we introduce an
+
+auxiliary binary random variable Ot denoting the "optimality" of a pair (st, at) at time t and define its probability2 as p(Ot = 1|st, at) = exp(r(st, at)). O is a convenience
+
+variable only here for the sake of modelling. By consider-
+
+ing the variables (st, at) as latent and Ot as observed, we
+
+can construct a Hidden Markov Model (HMM) as depicted
+
+in figure 2.1. Notice that the link s  a is not present in
+
+figure 2.1 as the dependency of the optimal action on the
+
+state depends on the future observations. In this graphical
+
+model, the optimal policy is expressed as p(at|st, Ot:T ).
+
+Observed
+
+O1
+
+O2
+
+O3
+
+Ot
+
+Latent
+
+a1
+
+a2
+
+a3
+
+at
+
+...
+
+s1 s2 s3 st
+
+Figure 2.1: Ot is an observed optimality variable with probability p(Ot|st, at) = exp(r(st, at))
+
+The posterior probability of this graphical model can be written as:
+T
+p(x1:T |O1:T )  p(x1:T , O1:T ) = µ(s1) penv(st+1|at, st) exp
+t=1
+
+T
+r(st, at) .
+t=1
+
+(2.1)
+
+It appears clearly that finding optimal trajectories is equivalent to finding plausible trajectories yielding a high return.
+
+Many control as inference methods can be seen as approximating the density by optimizing its variational lower bound:
+
+log p(O1:T )  Ex1:T q [
+
+T t=1
+
+r(st
+
+,
+
+at
+
+)
+
+-
+
+log (at|st)]
+
+(Rawlik
+
+et
+
+al.,
+
+2012;
+
+Toussaint,
+
+2009).
+
+Instead
+
+of
+
+directly
+
+differentiating the variational lower bound, it is possible to take a message passing approach such as the one used in
+
+Soft Actor-Critic (SAC) (Haarnoja et al., 2018) and directly estimate the optimal policy p(at|st, Ot:T ).
+
+2.2 SEQUENTIAL MONTE CARLO
+Since distributions over trajectories are complex, it is often difficult or impossible to directly draw samples from them. Fortunately in statistics, there are successful strategies for drawing samples from complex sequential distributions, such as SMC methods (Doucet et al., 2001). These techniques require knowledge of the density of a target distribution up to a multiplicative constant.
+1For the state-action pair (st, at) at time t, we will use the notation rt = r(st, at) 2as in Levine (2018), if the rewards are bounded above, we can always remove a constant so that the probability is well defined.
+
+2
+
+For simplicity, in the remainder of this section we will overload the notation and refer to the target distribution as p(x) and the proposal distribution as q(x). In the next section, we will define the distributions p and q in the context of planning.
+
+Importance sampling (IS): In the case where x can be efficiently sampled from another simpler distribution q i.e.
+
+the proposal distribution, we can estimate the likelihood of any point x under p straightforwardly by computing the
+
+unnormalized
+
+importance
+
+sampling
+
+weights
+
+w(x)
+
+
+
+p(x) q(x)
+
+and
+
+using
+
+the
+
+identity
+
+p(x)
+
+=
+
+w(x) w(x)q(x)dx
+
+q(x).
+
+We
+
+will
+
+refer to w¯(x) =
+
+w(x) w(x)q(x)dx
+
+as
+
+the
+
+normalized
+
+importance
+
+sampling
+
+weights.
+
+In
+
+practice,
+
+one
+
+draws
+
+N
+
+samples
+
+from
+
+q: {x(n)}nN=1  q; these are referred to as particles. The set of particles {x(n)}nN=1 associated with the weights {w¯(n)} are simulations of samples from p. That is, we approximate the density p with a weighted sum of diracs from samples
+
+of q:
+
+N
+
+p(x)  w¯(n)x(n) (x), with x(n) sampled from q
+
+n=1
+
+where x0 (x) denotes the Dirac delta mass located as x0.
+
+Sequential Importance Sampling (SIS): When our problem is sequential in nature x = x1:T , the complexity of the
+
+sampling can grow super-linearly with T . By exploiting the sequential structure, the unnormalized weights can be
+
+updated
+
+iteratively
+
+in
+
+an
+
+efficient
+
+manner:
+
+wt(x1:t)
+
+=
+
+wt-1
+
+(x1:t-1
+
+)
+
+p(xt q(xt
+
+|x1:t-1 ) |x1:t-1 )
+
+.
+
+We
+
+call
+
+this
+
+the
+
+update
+
+step.
+
+This
+
+enables us sample sequentially xt  q(xt|x1:t-1) to finally obtain the set of particles {x(1n:T) } and their weights {w¯T(n)} linearly in the horizon T .
+
+Sequential Importance Resampling (SIR) / Particle Filter: When the horizon T is long, samples from q usually have a low likelihood under p, and thus the quality of our approximation decreases exponentially with T . More concretely, the unnormalized weights wt(n) converge to 0 with t  . This usually causes the normalized weight distribution to degenerate, with one weight having a mass of 1 and the others a mass of 0. This phenonmemon is known as weight impoverishment.
+One way to address weight impoverishment is to add a resampling step where each particle is resampled to higher likelihood regions at each time step. This can typically reduce the variance of the estimation from growing exponentially with t to growing linearly. Resampling can also have adverse effects, for instance all the particles could be resampled on the most likely particle, leading to a particle degeneracy. We tackle this issue by selecting the temperature of the resamping distribution to not be too low.
+
+3 PLANNING AS PROBABILISTIC INFERENCE
+In the context of control as inference, it is natural to see planning as the act of approximating a distribution of optimal future trajectories via simulation. In order to plan, an agent must possess a model of the world that can accurately capture consequences of its actions. In cases where multiple trajectories have the potential of being optimal, the agent must rationally partition its computational resources to explore each possibility. Given finite time, the agent must limit its planning to a finite horizon h. We, therefore, define planning as the act of approximating the optimal distribution over trajectories of length h. In the control-as-inference framework, this distribution is naturally expressed as p(a1, s2, . . . sh, ah|O1:T , s1), where s1 represents our current state.
+3.1 PLANNING AND BAYESIAN SMOOTHING
+As we consider the current state s1 given, it is equivalent and convenient to focus on p(x1:h|O1:T ). Bayesian smoothing is an approach to the problem of estimating the distribution of a latent variable conditioned on all past and future observations. This method decomposes the posterior into:
+
+p(x1:h|O1:T )  p(x1:h|O1:h) · p(Oh+1:T |xh)
+
+(3.1)
+
+This corresponds to a forward-backward messages factorization in a Hidden Markov Model as depicted in figure 3.1.
+
+3
+
+Filtering is the task of estimating p(xt|O1:t): the probability of a latent variable conditioned on all past observations. In contrast, smoothing estimates p(xt|O1:T ): the density of a latent variable conditioned on all the past and future
+measurements.
+
+In the belief propagation algorithm for HMMs, these probabilities correspond to the forward message h(xh) = p(x1:h|O1:h) and backward message h(xh) = p(Oh+1:T |xh) , both of which are computed recur- O1 Ot-1 Ot Ot+1 OT sively. While in discrete spaces, these forward and backward messages can be estimated using the sum-product algorithm, its complexity scales with the square of the space dimension. We will now devise efficient x1 xt-1 xt xt+1 xT strategies for computing both the forward and backward messages.
+
+3.2 THE BACKWARD MESSAGE AND THE VALUE FUNCTION
+
+p(x1:h|O1:h)
+
+p(Oh+1:T |xh)
+
+The backward message p(Oh+1:T |xh) can be understood as the answer to: "What is the probability of following an optimal trajectory from the next time step on until the end of the episode, given my current state?" Importantly, this term is closely related to the notion of value function in RL. Indeed, in the control-as-inference framework, the state-
+
+Figure 3.1: Factorization of the HMM into forward (red) and backward (blue) messages. Estimating the forward message is filtering, estimating the value of the latent knowing all the observations is smoothing.
+
+and action-value functions are defined as V (sh) = log p(Oh:T |sh) and Q(sh, ah) = log p(Oh:T |sh, ah) respectively. They are solutions of a
+soft-Bellman equation that differ a little from the traditional Bellman
+
+equation (O'Donoghue et al., 2016; Nachum et al., 2017; Schulman et al., 2017; Abdolmaleki et al., 2018). A more in
+
+depth explanation can be found in (Levine, 2018). We can show subsequently that:
+
+p(Oh+1:T |xh) = Esh+1|xh exp V (sh+1)
+
+(3.2)
+
+if we choose the action prior to be uniform. Full details can be found in appendix A.3. Estimating the backward message is then equivalent to learning a value function. Consequently we use SAC (Haarnoja et al., 2018) to efficiently estimate the value function.
+
+3.3 FILTERING WITH SEQUENTIAL MONTE CARLO METHODS
+
+Unlike the backward message, the forward message does not have a straightforward interpretation in RL. One way to
+estimate it reliably without making simplifying assumptions is to apply SMC methods covered in section 2.2. To be consistent with the terminology of section 2.2, we call p(x1:h|O1:h) the target distribution and q(x1:h) the proposal distribution.
+
+The
+
+importance
+
+sampling
+
+weights
+
+wt
+
+
+
+p(x1:t |O1:t ) q (x1:t)
+
+adhere
+
+to
+
+the
+
+following
+
+recursive
+
+expression:
+
+wt  exp rt - log (at|st) · wt-1
+
+(3.3)
+
+assuming that we had learned a perfect model of the environment. The derivation of the recursion is provided in Appendix A.2. The perfect-model hypothesis is not needed when we have access to a simulator of the environment, as in AlphaGo (Silver et al., 2017) or Guo et al. (2014) who used the Arcade Learning Environment (ALE) (Bellemare et al., 2013) simulator.
+Notice that the weight update at each step corresponds to a multiplication by the exponential of the entropy regularized reward, which is consistent with the reward signal used in Maximum Entropy Reinforcement Learning (Ziebart, 2010).
+
+3.4 SEQUENTIAL MONTE CARLO PLANNING ALGORITHM
+We can now use the computations of the forward and backward message to derive the full algorithm. We consider the root state of the planning to be the current state st. We aim at building a set of particles {xt(:nt)+h}Nn=1 and their weights {w^T(n)}nN=1 representative of the planning density p(xt:t+h|O1:T ) over optimal trajectories. We use SAC (Haarnoja et al., 2018) for the policy and value function, but any other policy can be used for the proposal distribution.
+
+4
+
+We summarize the proposed algorithm in Algorithm 1. At
+
+each step, we sample from the proposal distribution or model-free agent (line 5) and evaluate the expected likelihood of the step of being optimal using a given model of the
+
+Algorithm 1 Planning using Sequential Importance Resampling
+
+environment, i.e. w^T  exp(rt + V (st+1) - log (at|st)) 1: for t in {0, . . . , T } do
+
+(line 8-9). The trajectories are then weighted by their like- 2: st(n) = st, n, 1  n  N .
+
+lihood of being optimal till the end of the episode. We 3: w0 = 1.
+
+subsequently (re-)sample trajectories from a multinomial 4: for i in {t, . . . , t + h} do
+
+distribution with probabilities proportional to this likelihood (line 10). Each (re-)sampled trajectory particle is assigned a fixed weight of 1 (line 11), as these particles together now constitute an unweighted empirical distribution of p(x1:t|O1:t), whereas before sampling we had a weighted empirical distribution. After the tree search has been performed for h steps, we possess an unweighted distribution over trajectories and can sample from it (line 14). We then execute the first action from the sampled trajectory into the environment. We restart the procedure at the following time step. The pseudo code is provided in Algorithm 1. An alternative algorithm that does not use the resampling step is highlighted in Algorithm 2.
+A schematic view of the algorithm can also be found on figure 3.2.
+
+5: {a(in)  SAC (a(in)|si(n))}nN=0 6: {s(i+n)1, ri(n)  pmodel(·|s(in), ai(n))}nN=0 7: wi  wi-1 · exp(ri -  log SAC (ai|si)) 8: w^T  wi · exp(V SAC (st+1))
+9: # Resample the particles  weight w^T 10: {x1(n:i)+1}Nn=1  Mult(n; w^T(1), . . . , w^T(N)) 11: wi  1
+12: end for
+13: w^T  wt+h 14: Sample n  Categorical(w^T(1), . . . , w^T(N)). 15: Select at, first action of x(n). 16: st+1, rt  penv(·|st, at) 17: st  st+1.
+18: end for
+
+· ·· ·
+
+(a) Configuration at time t - 1: we
+have the root white node st-1, the actions at(-n)1 are black nodes and the leaf nodes are the s(tn). We have one particle on the leftmost branch, two on the
+central branch and one on the rightmost
+branch.
+
+· ·· ·
+(b) Update: New actions and states are sampled from the proposal distribution and model. The particle sizes are proportional to their density p(x1:t|O1:T ) .
+
+· · ··
+(c) Resampling: after sampling with replacement the particles relatively to their weight, the less promising branch was cut while the most promising has now two particles.
+
+Figure 3.2: Schematic view of Sequential Monte Carlo planning. In each tree, the white nodes represent states and black nodes represent actions. Each bullet point near a state represents a particle, meaning that this particle contains the total trajectory of the branch. The root of the tree represents the root planning state, we expand the tree downward when planning.
+
+5
+
+4 RELATED WORK
+
+4.1 PLANNING ALGORITHMS
+
+In this section, we highlight the connections between our SMCP algorithm and other popular planning algorithms such as Monte Carlo Tree Search and Random Search.
+
+As shown in figure 3.2, SMC-Planning stochastically explores the most promising trajectories in the tree, cutting the less promising branches off when their particles are not resampled. MCTS with UCT, on the other hand, uses a confidence interval based approach, optimistically expanding branches that may have the best return (Agrawal, 1995; Szita & Lo¨rincz, 2006). Indeed SMC-Planning can be viewed as the maximum entropy tree search equivalent of MCTS. While it may not perform as well as MCTS in discrete environments with known dynamics, our algorithm can also be applied to continuous tasks.
+
+Note also the similarity between the loss used in Expert Iteration with MCTS (Anthony et al., 2017) and AlphaGo Zero (Silver et al., 2017). These algorithms learn policies that minimize the cross entropy between the MCTS policy p and the neural network policy : p log . This is similar to the way in which our algorithm learns the proposal distribution as it minimizes the expected KL divergence between the optimal policy and our current policy.
+
+There are also similarities with the random search methods in the continuous setting. Random search methods draw a
+
+sequence of actions independent from the states and evaluate the log likelihood after a horizon h i.e.
+
+h i=1
+
+ri.
+
+The
+
+trajectory that is most likely to be optimal without conditioning further than h steps is selected. In this work, we
+
+compare our algorithm with the Cross Entropy Method (CEM) (Rubinstein & Kroese, 2004; Szita & Lo¨rincz, 2006)
+
+which is a more sophisticated random search that uses evolutionary methods.
+
+4.2 PLANNING AS INFERENCE
+Attias (2003) proposed a definition of planning most similar to ours. He computed a posterior over actions conditioned on reaching the goal state within a specific number of steps. Much work aimed at solving control as inference problems have focused on maximum entropy policies.
+Planning can also be tackled with trajectory optimization methods. When the systems is linear Gaussian (linear Gaussian transitions, observations, reward function and Gaussian noise), Linear Quadratic Regulator methods can compute directly the optimal planning. However we do not assume we have access to the dynamics, nor that it is linear gaussian. While extensions of LQR to more complex environments exist (Todorov & Li, 2005; Toussaint, 2009), these methods typically do not handle well arbitrary reward functions.
+More generally, the problem of RL has also been portrayed as an inference problem by (Dayan & Hinton, 1997; Rawlik et al., 2010; 2012).
+Botvinick & Toussaint (2012) summarized the connection between RL and neuroscience views of planning as inference. From these perspectives, planning as inference is seen to occur when the decision-making agent makes use an internal cognitive model to represent the future as a joint probability distribution over actions, outcomes states and rewards. The agent can then sample from its internal model to perform a tree search or could condition on future states of interest and perform inverse inference to discover the course of actions necessary to obtain its goal.
+
+4.3 INFERENCE IN STATE SPACE MODELS
+Sequential Monte Carlo methods have grown in popularity since their inception, in localisation (Arulampalam et al., 2002) and signal processing (Del Moral, 1996), due to their ease of use and flexibility. They have the advantage being able to cover multiple modes and scale well with horizon (Doucet et al., 2001). This is particularly relevant in real time localization tasks where one must estimate the position and velocity of an agent (often a robot), given only the previous measurements (signals from GPS, accelerometers or gyro sensors for instance).
+Bayesian smoothing (Sa¨rkka¨, 2013) has also been applied to Part of Speech (PoS) tagging. For instance, in a sentence, parts of speech (nouns, verbs, articles, etc.) are considered to be the latent variables and the spoken words are considered as the observed variables. Similar to planning as inference, PoS tagging requires consideration of consistency i.e. conditioning on future words in a sentence in order to infer current words.
+
+6
+
+(a) Sequential Importance Resampling (SIR): when resampling the trajectories at each time step, the agent is able to focus on the promising trajectories and does not collapse on a single mode.
+
+(b) Sequential Importance Sampling (SIS): if we do not perform the resampling step the agent spends most of its computation on uninteresting trajectories and was not able to explore as well.
+
+(c) CEM: here the agent samples all the actions at once from a Gaussian with learned mean and covariance. We needed to update the parameters 50 times for the agent to find one solution, but it forgot the other one.
+
+Figure 5.1: Comparison of three methods on the toy environment. The agent (·) must go the goal ( ) while avoiding the wall ( | ) in the center. The proposal distribution is taken to be an isotropic gaussian. Here we plot the planning distribution imagined at t = 0 for three different agents. Only the agent using Sequential Importance Resampling was able to find good trajectories while not collapsing on a single mode.
+
+Gu et al. (2015) proposed minimizing the KL divergence between the true and the approximate posterior to learn a good proposal distribution. It is similar to how we learn our proposal distribution, however, we minimized the KL(q p) instead of the inverse KL. Our method is more appropriate when performing exploration.
+
+5 EXPERIMENTS
+
+5.1 DIDACTIC EXAMPLE
+
+In this section, we aim to show that SMCP can deal with multimodal policies when planning. We applied two version of
+
+SMCP: i) with a resampling step (SIR) ii) without a resampling step (SIS) and compare it to CEM on a simple 2D point
+
+mass environment 5.1. Here, the agent can control the displacement on (x, y) within the square [0, 1]2, a = (x, y)
+
+with maximum magnitude ||a|| = 0.05. The starting position (·) of the agent is (x = 0, y = 0.5), while the goal ( ) is
+
+at
+
+g
+
+=
+
+(x
+
+=
+
+1,
+
+y
+
+=
+
+0.5).
+
+The
+
+reward
+
+is
+
+the
+
+agent's
+
+relative
+
+closeness
+
+to
+
+the
+
+goal:
+
+rt
+
+=
+
+1
+
+-
+
+||st+1 -g||2 ||st -g||2
+
+.
+
+However,
+
+there
+
+is a partial wall at the centre of the square leading to two optimal trajectories, one choosing the path below the wall and
+
+one choosing the path above.
+
+The proposal is an isotropic normal distribution for each planning algorithm, and since the environment's dynamics are known, there is no need for learning: the only difference between the three methods is how they handle planning. We used 1500 particles for each method, and updated the parameters of CEM 50 times. Our experiment 5.1 shows how having particles can deal with multimodality and how the resampling step can help to focus on the most promising trajectories.
+
+5.2 CONTINUOUS CONTROL BENCHMARK
+The experiments were conducted on the Open AI Gym benchmark suite (Brockman et al., 2016). The aim of our experiments were to understand how incorporating planning increases the learning speed of RL agents. We evaluated our algorithm on a suite of Mujoco tasks. These environments provide a complex benchmark with continuous states and actions that requires exploration in order to achieve state-of-the-art performances. We used minimal tweaking of the hyper parameters of SMCP as we fixed the horizon length to 25, the temperature to 10 and the reward scaling suggested by Haarnoja et al. (2018) for all experiments.
+We included as baselines: SAC (Haarnoja et al., 2018), CEM (Finn & Levine, 2017) and RS (Nagabandi et al., 2017). SAC was included because: i) it has one of the highest performances on Mujoco tasks, which make it a very strong
+
+7
+
+total return
+
+Hopper-v2
+1750
+
+1500
+
+1250
+
+1000
+
+750
+
+500
+
+250
+
+0 0
+
+20000 40000 60000 st8e0p000 100000 120000 140000
+
+3000 2500 2000 1500 1000 500
+0 500
+0
+
+HalfCheetah-v2
+20000 40000 600st0e0p 80000 100000 120000
+
+800 600 400 200
+0 0
+
+Walker2d-v2
+category random sac sir_sac cem sis_sac
+10000 20000 step 30000 40000 50000
+
+Figure 5.2: Training curves on the Mujoco continuous control benchmarks. SMCP (green) learns faster than the SAC model-free baseline and achieve higher asymptotic performances than the model-based methods (CEM and RS).
+
+baseline, and ii) it is a component of our algorithm, as we use it as a proposal distribution in the planning phase. The CEM and RS methods were included since they are amongst the most popular planning algorithms in the deep RL community.
+Our results suggest that SMCP does not learn as fast as CEM initially as it heavily relies on estimating a good value function. However, SMCP quickly achieved higher performances than CEM. SMCP also learned faster than SAC because it was able to leverage information from the model early in training.
+Note that our results differ slightly from the results usually found in the model-based RL literature. This is because we are tackling a more difficult problem: estimating the transitions and the reward function. We are using unmodified versions of the environments which introduce many challenges. For instance, our reward function is very noisy. Usually, the environments are modified such that the reward can be computed directly from the state e.g. Chua et al. (2018).
+6 CONCLUSION AND FUTURE WORK
+The main objective of this research was to leverage sampling methods to develop an efficient planning method that could be applied to complex continuous domains. Our work has led to three major contributions: (1) drawing connections between planning and Bayesian smoothing, (2) development of a planning algorithm referred to as "Sequential Monte Carlo planning" (SMCP), and (3) successful application of SMCP in complex continuous control benchmark tasks.
+An advantage of our approach is its ability to hold distributions over potential trajectories, unlike modern RL methods, which depend heavily on mode seeking behaviour. Approximating a distribution over potentially good trajectories, instead of seeking the mode, leads to natural exploration strategies which translates to faster learning in difficult tasks.
+Additionally, our approach allows us to understand how an agent is going to behave several time steps into the future. This characteristic is important when deploying RL agents in high stake scenarios as they will not fail unexpectedly.
+Our approach is expensive to train due the necessity of training all components of model free agents (i.e. policy and value networks) and any additional generative models. We also need to query these models multiple times before the agent takes an action.
+Despite the achievements of this work, there still remains work to be done to achieve effective planning under realistic constraints. Some challenges to begin with include: i) planning in visual environments, ii) to leverage the different uncertainties captured by the model and the agent, and iii) be less dependent on the proposal distribution. But ultimately, we believe that our algorithm could be used as a stepping stone to achieve the standard of planning necessary to deploy real world reinforcement learning agents.
+8
+
+ACKNOWLEDGMENTS
+Use unnumbered third level headings for the acknowledgments. All acknowledgments, including those to funding agencies, go at the end of the paper.
+REFERENCES
+Abbas Abdolmaleki, Jost Tobias Springenberg, Yuval Tassa, Remi Munos, Nicolas Heess, and Martin Riedmiller. Maximum a posteriori policy optimisation. arXiv preprint arXiv:1806.06920, 2018.
+Rajeev Agrawal. Sample mean based index policies by o (log n) regret for the multi-armed bandit problem. Advances in Applied Probability, 27(4):1054­1078, 1995.
+Thomas Anthony, Zheng Tian, and David Barber. Thinking fast and slow with deep learning and tree search. In Advances in Neural Information Processing Systems, pp. 5360­5370, 2017.
+M Sanjeev Arulampalam, Simon Maskell, Neil Gordon, and Tim Clapp. A tutorial on particle filters for online nonlinear/non-gaussian bayesian tracking. IEEE Transactions on signal processing, 50(2):174­188, 2002.
+Hagai Attias. Planning by probabilistic inference. In AISTATS. Citeseer, 2003.
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning environment: An evaluation platform for general agents. Journal of Artificial Intelligence Research, 47:253­279, 2013.
+Matthew Botvinick and Marc Toussaint. Planning as inference. Trends in cognitive sciences, 16(10):485­488, 2012.
+Greg Brockman, Vicki Cheung, Ludwig Pettersson, Jonas Schneider, John Schulman, Jie Tang, and Wojciech Zaremba. Openai gym. arXiv preprint arXiv:1606.01540, 2016.
+Kurtland Chua, Roberto Calandra, Rowan McAllister, and Sergey Levine. Deep reinforcement learning in a handful of trials using probabilistic dynamics models. arXiv preprint arXiv:1805.12114, 2018.
+Peter Dayan and Geoffrey E Hinton. Using expectation-maximization for reinforcement learning. Neural Computation, 9(2):271­278, 1997.
+Pierre Del Moral. Non-linear filtering: interacting particle resolution. Markov processes and related fields, 2(4): 555­581, 1996.
+Arnaud Doucet, Nando De Freitas, and Neil Gordon. An introduction to sequential monte carlo methods. In Sequential Monte Carlo methods in practice, pp. 3­14. Springer, 2001.
+Chelsea Finn and Sergey Levine. Deep visual foresight for planning robot motion. In Robotics and Automation (ICRA), 2017 IEEE International Conference on, pp. 2786­2793. IEEE, 2017.
+Shixiang Gu, Zoubin Ghahramani, and Richard E Turner. Neural adaptive sequential monte carlo. In Advances in Neural Information Processing Systems, pp. 2629­2637, 2015.
+Xiaoxiao Guo, Satinder Singh, Honglak Lee, Richard L Lewis, and Xiaoshi Wang. Deep learning for real-time atari game play using offline monte-carlo tree search planning. In Advances in neural information processing systems, pp. 3338­3346, 2014.
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor. arXiv preprint arXiv:1801.01290, 2018.
+Michael Kearns, Yishay Mansour, and Andrew Y Ng. A sparse sampling algorithm for near-optimal planning in large markov decision processes. Machine learning, 49(2-3):193­208, 2002.
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Levente Kocsis and Csaba Szepesva´ri. Bandit based monte-carlo planning. In European conference on machine learning, pp. 282­293. Springer, 2006.
+9
+
+Sergey Levine. Reinforcement learning and control as probabilistic inference: Tutorial and review. arXiv preprint arXiv:1805.00909, 2018.
+Ofir Nachum, Mohammad Norouzi, Kelvin Xu, and Dale Schuurmans. Bridging the gap between value and policy based reinforcement learning. In Advances in Neural Information Processing Systems, pp. 2775­2785, 2017.
+Anusha Nagabandi, Gregory Kahn, Ronald S Fearing, and Sergey Levine. Neural network dynamics for model-based deep reinforcement learning with model-free fine-tuning. arXiv preprint arXiv:1708.02596, 2017.
+Brendan O'Donoghue, Remi Munos, Koray Kavukcuoglu, and Volodymyr Mnih. Combining policy gradient and q-learning. arXiv preprint arXiv:1611.01626, 2016.
+Konrad Rawlik, Marc Toussaint, and Sethu Vijayakumar. An approximate inference approach to temporal optimization in optimal control. In Advances in neural information processing systems, pp. 2011­2019, 2010.
+Konrad Rawlik, Marc Toussaint, and Sethu Vijayakumar. On stochastic optimal control and reinforcement learning by approximate inference. In Robotics: science and systems, volume 13, pp. 3052­3056, 2012.
+RY Rubinstein and DP Kroese. A unified approach to combinatorial optimization, monte-carlo simulation, and machine learning. Springer-Verlag New York, LLC, 2004.
+Simo Sa¨rkka¨. Bayesian filtering and smoothing, volume 3. Cambridge University Press, 2013.
+John Schulman, Xi Chen, and Pieter Abbeel. Equivalence between policy gradients and soft q-learning. arXiv preprint arXiv:1704.06440, 2017.
+David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of go without human knowledge. Nature, 550 (7676):354, 2017.
+Istva´n Szita and Andra´s Lo¨rincz. Learning tetris using the noisy cross-entropy method. Neural computation, 18(12): 2936­2941, 2006.
+Emanuel Todorov and Weiwei Li. A generalized iterative lqg method for locally-optimal feedback control of constrained nonlinear stochastic systems. In American Control Conference, 2005. Proceedings of the 2005, pp. 300­306. IEEE, 2005.
+Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control. In Intelligent Robots and Systems (IROS), 2012 IEEE/RSJ International Conference on, pp. 5026­5033. IEEE, 2012.
+Marc Toussaint. Robot trajectory optimization using approximate inference. In Proceedings of the 26th annual international conference on machine learning, pp. 1049­1056. ACM, 2009.
+Marc Toussaint and Amos Storkey. Probabilistic inference for solving discrete and continuous state markov decision processes. In Proceedings of the 23rd international conference on Machine learning, pp. 945­952. ACM, 2006.
+Brian D Ziebart. Modeling purposeful adaptive behavior with the principle of maximum causal entropy. 2010.
+10
+
+A APPENDIX
+A.1 ABBREVIATION AND NOTATION
+
+Table A.1: Abbreviation
+
+SMCP: SAC: CEM: RS:
+MCTS: SMC: SIR: SIS:
+
+Sequential Monte Carlo Planning. Soft Actor Critic.
+Cross Entropy Method. Random Shooting.
+Monte Carlo Tree Search. Sequential Monte Carlo. Sequential Importance Resampling. Sequential Importance Sampling.
+
+x1:T Ot
+p(Ot|st, at) penv
+pmodel
+w p(x) q(x) t  {1, . . . T } n  {1, . . . N }
+
+Table A.2: Notation
+{si, ai}iT=1. Optimality variable. exp(r(st, at)) Probability of a pair state action of being optimal. Transition probability of the environment. Takes state and action (st, at) as argument and return next state and reward (st+1, rt). Model of the environment. Takes state and action (st, at) as argument and return next state and reward (st+1, rt). Normalized weight of the importance sampling. Density of interest. Approximation of the density of interest. time steps. particle number.
+
+A.2 RECURSIVE WEIGHTS
+
+wt(x1:t)
+
+=
+
+p(x1:t|O1:t) q(x1:t)
+
+=
+
+p(x1:t-1)|O1:t-1penv(st+1|st, at)p(Ot|st, at q(x1:t-1)q(xt|x1:t-1)
+
+=
+
+p(x1:t-1)|O1:t-1) q(x1:t-1)
+
+penv(st+1|st, at) exp(rt) pmodel(st+1|st, at)(at|st)
+
+=
+
+wt-1
+
+penv(st+1|st, at)) pmodel(st+1|st, at)
+
+exp(rt
+
+-
+
+log
+
+ (at |st ))
+
+11
+
+(A.1)
+
+A.3 VALUE FUNCTION: BACKWARD MESSAGE
+
+.
+
+p(O1:t+1|xt) =
+
+p(xt+1|xt) exp Q(st+1, at+1)dxt+1
+
+xt+1
+
+= penv(st+1|st, st)
+
+p(at+1|xt) exp Q(st+1, at+1)dat+1 dst+1
+
+st+1
+
+at+1
+
+= penv(st+1|st, at) exp V (st+1)dst+1
+st+1
+By definition of the value function in (Levine, 2018).
+
+(A.2)
+
+A.4 EXPERIMENT DETAILS
+Random samples: 1000 transitions are initially collected a random policy to pretrain the model and the proposal distribution. After which the agents start following their respective policy.
+
+Data preprocessing: We normalize the observation to have zero mean and standard deviation 1. We add zero mean Gaussian noise to the training data for the model to improve its robustness.
+
+Architecture: For the model with used 3 hidden layers with 256 hidden units as in Chua et al. (2018) and ReLU activation. For the agent we used a single hidden layer with 256 hidden units for the three networks: the value function, the policy and the soft Q function.
+
+Model Predictive Control: The model is used to predict the return for the horizon H of N particles. We then sample or take the best trajectory and return the first action of this trajectory. In our experiments, we fix the maximum number of particles for every methods to 2500. For SMCP, the temperature was fixed to 10.
+
+Soft Actor Critic: We used a custom implementation with a Gaussian policy for both the SAC baseline and the proposal distribution used for both versions of SMCP. We used Adam (Kingma & Ba, 2014) with a learning rate of 0.0003.
+Model: We train the model pmodel to minimize the negative log likelihood of p(st+1|st + t(st, at), t(st, at)). For every experiment, we used a fully connected neural network with 3 hidden layers of 256 hidden units. We train the model to predict the distribution on the next state and learn a deterministic reward function from the current state and simulated next state. Additionally, we manually add the penalty on action magnitude. At the end of each episode we train the model for 10 epochs. Since the training is fairly short, we stored every transitions into the buffer. The model is defined as:
+
+st  p(·|st, at) rt = g(st, st) -  a 2
+
+(A.3) (A.4)
+
+where  was taken from the Mujoco gym environments. Each neural network has 256 hidden units and 2 hidden layers. We used Adam (Kingma & Ba, 2014) with a learning rate of 0.001.
+
+Environment Temperature Horizon length SAC Reward Scaling Reward Function ()
+
+Hopper Walker Half Cheetah
+
+10 10 10
+
+25 25 25
+
+5 5 5
+
+0.001 0.001
+0.5
+
+12
+
+A.5 SEQUENTIAL IMPORTANCE SAMPLING PLANNING Algorithm 2 Sequential Importance Sampling - Planning
+1: for t in {0, . . . , T } do 2: st(n) = st, n, 1  n  N . 3: w0 = 1. 4: for i in {t, . . . , t + h} do 5: {ai(n)  SAC (a(in)|s(in))}nN=0 6: {si(+n)1, ri(n)  pmodel(·|si(n), ai(n))}Nn=0 7: wi = wi-1 · exp(ri -  log SAC (ai|si)) 8: end for 9: w^T  wt+h · exp(V SAC (st+h+1)) 10: Sample n  Categorical(w^T(1), . . . , w^T(N)). 11: Select at, first action of x(n). 12: st+1, rt  penv(·|st, at) 13: st  st+1. 14: end for
+13
+
+

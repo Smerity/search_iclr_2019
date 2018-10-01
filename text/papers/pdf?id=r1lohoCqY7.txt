@@ -1,0 +1,3545 @@
+Under review as a conference paper at ICLR 2019
+LEARNING-BASED FREQUENCY ESTIMATION ALGORITHMS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Estimating the frequencies of elements in a data stream is a fundamental task in data analysis and machine learning. The problem is typically addressed using streaming algorithms which can process very large data using limited storage. Today's streaming algorithms, however, cannot exploit patterns in their input to improve performance. We propose a new class of algorithms that automatically learn relevant patterns in the input data and use them to improve its frequency estimates. The proposed algorithms combine the benefits of machine learning with the formal guarantees available through algorithm theory. We prove that our learning-based algorithms have lower estimation errors than their non-learning counterparts. We also evaluate our algorithms on two real-world datasets and demonstrate empirically their performance gains.
+1. INTRODUCTION
+Classical algorithms provide formal guarantees over their performance, but often fail to leverage useful patterns in their input data to improve their output. On the other hand, deep learning models are highly successful at capturing and utilizing complex data patterns, but often lack formal error bounds. The last few years have witnessed a growing effort to bridge this gap and introduce algorithms that can adapt to data properties while delivering worst case guarantees. Deep learning modules have been integrated into the design of Bloom filters (Kraska et al., 2018; Mitzenmacher, 2018), caching algorithms (Lykouris & Vassilvitskii, 2018), graph optimization (Dai et al., 2017), similarity search (Salakhutdinov & Hinton, 2009; Weiss et al., 2009) and compressive sensing (Bora et al., 2017). This paper makes a significant step toward this vision by introducing frequency estimation streaming algorithms that automatically learn to leverage the properties of the input data.
+Estimating the frequencies of elements in a data stream is one of the most fundamental subroutines in data analysis. It has applications in many areas of machine learning, including feature selection (Aghazadeh et al., 2018), ranking (Dzogang et al., 2015), semi-supervised learning (Talukdar & Cohen, 2014) and natural language processing (Goyal et al., 2012). It has been also used for network measurements (Estan & Varghese, 2003; Yu et al., 2013; Liu et al., 2016) and security (Schechter et al., 2010). Frequency estimation algorithms have been implemented in popular data processing libraries, such as Algebird at Twitter (Boykin et al., 2016). They can answer practical questions like: what are the most searched words on the Internet? or how much traffic is sent between any two machines in a network?
+The frequency estimation problem is formalized as follows: given a sequence S from some universe U , for any element i  U , estimate fi, the number of times i occurs in S. If one could store all arrivals from the stream S, one could sort the elements and compute their frequencies. However, in big data applications, the stream is too large (and may be infinite) and cannot be stored. This challenge has motivated the development of streaming algorithms, which read the elements of S in a single pass and compute a good estimate of the frequencies using a limited amount of space. Over the last two decades, many such streaming algorithms have been developed, including CountSketch (Charikar et al., 2002), Count-Min (Cormode & Muthukrishnan, 2005b) and multi-stage filters (Estan & Varghese, 2003). The performance guarantees of these algorithms are well-understood, with upper and lower bounds matching up to O(·) factors (Jowhari et al., 2011).
+However, such streaming algorithms typically assume generic data and do not leverage useful patterns or properties of their input. For example, in text data, the word frequency is known to be inversely correlated with the length of the word. Analogously, in network data, certain applications tend to generate more traffic than others. If such properties can be harnessed, one could design
+1
+
+Under review as a conference paper at ICLR 2019
+frequency estimation algorithms that are much more efficient than the existing ones. Yet, it is important to do so in a general framework that can harness various useful properties, instead of using handcrafted methods specific to a particular pattern or structure (e.g., word length, application type).
+In this paper, we introduce learning-based frequency estimation streaming algorithms. Our algorithms are equipped with a learning model that enables them to exploit data properties without being specific to a particular pattern or knowing the useful property a priori. We further provide theoretical analysis of the guarantees associated with such learning-based algorithms.
+We focus on the important class of "hashing-based" algorithms, which includes some of the most used algorithms such as Count-Min, Count-Median and Count-Sketch. Informally, these algorithms hash data items into B buckets, count the number of items hashed into each bucket, and use the bucket value as an estimate of item frequency. The process can be repeated using multiple hash functions to improve accuracy. Hashing-based algorithms have several useful properties. In particular, they can handle item deletions, which are implemented by decrementing the respective counters. Furthermore, some of them (notably Count-Min) never underestimate the true frequencies, i.e., f~i  fi holds always. However, hashing algorithms lead to estimation errors due to collisions: when two elements are mapped to the same bucket, they affect each others' estimates. Although collisions are unavoidable given the space constraints, the overall error significantly depends on the pattern of collisions. For example, collisions between high-frequency elements ("heavy hitters") result in a large estimation error, and ideally should be minimized. The existing algorithms, however, use random hash functions, which means that collisions are controlled only probabilistically.
+Our idea is to use a small subset of S, call it S , to learn the heavy hitters. We can then assign heavy hitters their own buckets to avoid the more costly collisions. It is important to emphasize that we are learning the properties that identify heavy hitters as opposed to the identities of the heavy hitters themselves. For example, in the word frequency case, shorter words tend to be more popular. The subset S itself may miss many of the popular words, but whichever words popular in S are likely to be short. Our objective is not to learn the identity of high frequency words using S . Rather, we hope that a learning model trained on S learns that short words are more frequent, so that it can identify popular words even if they did not appear in S .
+Our main contributions are as follows:
+· We introduce learning-based frequency estimation streaming algorithms, which learn the properties of heavy hitters in their input and exploit this information to reduce errors
+· We provide performance guarantees showing that our algorithms can deliver a logarithmic factor improvement in the error bound over their non-learning counterparts. Furthermore, we show that our learning-based instantiation of Count-Min, a widely used algorithm, is asymptotically optimal among all instantiations of that algorithm. See Table 4.1 in section 4.1 for the details.
+· We evaluate our learning-based algorithms using two datasets: traffic load on an Internet backbone link and search query popularity. In comparison to their non-learning counterparts, our algorithms yield performance gains that range from 18% to 71%.
+2. RELATED WORK
+Frequency estimation in data streams. Frequency estimation, and the closely related problem of finding frequent elements in a data stream, are some of the most fundamental and well-studied problems in streaming algorithms, see Cormode & Hadjieleftheriou (2008) for an overview. Hashingbased algorithms such as Count-Sketch (Charikar et al., 2002), Count-Min (Cormode & Muthukrishnan, 2005b) and multi-stage filters (Estan & Varghese, 2003) are widely used solutions for these problems. These algorithms also have close connections to sparse recovery and compressed sensing (Cande`s et al., 2006; Donoho, 2006), where the hashing output can be considered as a compressed representation of the input data (Gilbert & Indyk, 2010).
+Several "non-hashing" algorithms for frequency estimation have been also proposed (Misra & Gries, 1982; Demaine et al., 2002; Karp et al., 2003; Metwally et al., 2005). These algorithms do not possess many of the properties of hashing-based methods listed in the introduction (such as the ability to handle deletions), but they often have better accuracy/space tradeoffs. For a fair comparison, our
+2
+
+Under review as a conference paper at ICLR 2019
+
+evaluation focuses only on hashing algorithms. However, our approach for learning heavy hitters should be useful for non-hashing algorithms as well.
+Some papers have proposed or analyzed frequency estimation algorithms customized to data that follows Zipf Law (Charikar et al., 2002; Cormode & Muthukrishnan, 2005a; Metwally et al., 2005; Minton & Price, 2014; Roy et al., 2016); the last algorithm is somewhat similar to the "lookup table" implementation of the heavy hitter oracle that we use as a baseline in our experiments. Those algorithms need to know the data distribution a priori, and apply only to one distribution. In contrast, our learning-based approach applies to any data property or distribution, and does not need to know that property or distribution a priori.
+Learning-based algorithms. Recently, researchers have begun exploring the idea of integrating machine learning models into algorithm design. In particular, researchers have proposed improving compressed sensing algorithms, either by using neural networks to improve sparse recovery algorithms (Mousavi et al., 2017; Bora et al., 2017), or by designing linear measurements that are optimized for a particular class of vectors (Baldassarre et al., 2016; Mousavi et al., 2015), or both. The latter methods can be viewed as solving a problem similar to ours, as our goal is to design "measurements" of the frequency vector (f1, f2 . . . , f|U|) tailored to a particular class of vectors. However, the aforementioned methods need to explicitly represent a matrix of size B × |U |, where B is the number of buckets. Hence, they are unsuitable for streaming algorithms which, by definition, have space limitations much smaller than the input size.
+Another class of problems that benefited from machine learning is distance estimation, i.e., compression of high-dimensional vectors into compact representations from which one can estimate distances between the original vectors. Early solutions to this problem, such as Locality-Sensitive Hashing, have been designed for worst case vectors. Over the last decade, numerous methods for learning such representations have been developed (Salakhutdinov & Hinton, 2009; Weiss et al., 2009; Jegou et al., 2011; Wang et al., 2016). Although the objective of those papers is similar to ours, their techniques are not usable in our applications, as they involve a different set of tools and solve different problems.
+More broadly, there have been several recent papers that leverage machine learning to design more efficient algorithms. The authors of (Dai et al., 2017) show how to use reinforcement learning and graph embedding to design algorithms for graph optimization (e.g., TSP). Other learning-augmented combinatorial optimization problems are studied in (He et al., 2014; Balcan et al., 2018; Lykouris & Vassilvitskii, 2018). More recently, (Kraska et al., 2018; Mitzenmacher, 2018) have used machine learning to improve indexing data structures, including Bloom filters that (probabilistically) answer queries of the form "is a given element in the data set?" As in those papers, our algorithms use neural networks to learn certain properties of the input. However, we differ from those papers both in our design and theoretical analysis. Our algorithms are designed to reduce collisions between heavy items, as such collisions greatly increase errors. In contrast, in existence indices, all collisions count equally. This also leads to our theoretical analysis being very different from that in (Mitzenmacher, 2018).
+
+3. PRELIMINARIES
+
+3.1. ESTIMATION ERROR
+
+We will use ei := |f~i - fi| to denote the estimation error for fi. To measure the overall estimation error between the frequencies F = {f1, f2, · · · } and their estimates F~ = {f~1, f~2, · · · }, we will use the expected error EiD[ei], where D models the distribution over the queries to the data structure. Similar to past work (Roy et al., 2016), we assume the query distribution D is the same as the
+
+distribution of the input stream, i.e., for any j we have PriD[i = j] = fj/N , where N is the sum of all frequencies. This leads to:
+
+Err(F , F~) := 1/N |f~i - fi| · fi
+
+(3.1)
+
+iU
+
+We note that the theoretical guarantees of frequency estimation algorithms are typically phrased in the "( , )-form", e.g., Pr[|f~i - fi| > N ] <  for every i (see e.g., Cormode & Muthukrishnan (2005b)). However, this formulation involves two objectives ( and ). We believe that the (single
+objective) expected error in Equation 3.1 is more natural from the machine learning perspective.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+3.2. ALGORITHMS FOR FREQUENCY ESTIMATION In this section, we recap three variants of hashing-based algorithms for frequency estimation.
+
+Single Hash Function. The basic hashing algorithm uses a single uniformly random hash function h : U  [B]. The algorithm maintains a one-dimensional array C[1 . . . B], in which all entries are initialized to 0. Given an element i, the algorithm increments C[h(i)]. It can be seen that at the end of the stream, we have C[b] = j:h(j)=b fj. The estimate f~i of fi is defined as f~i = C[h(i)] =
+j:h(i)=h(j) fj. Note that it is always the case that f~i  fi.
+Count-Min. We have k distinct hash functions hi : U  [B] and an array C of size k × B. The algorithm maintains C, such that at the end of the stream we have C[ , b] = j:h (j)=b fj. For each i  U , the frequency estimate f~i is equal to min k C[ , h (i)], and always satisfies f~i  fi.
+Count-Sketch. Similarly to Count-Min, we have k distinct hash functions hi : U  [B] and an array C of size k × B. Additionally, in Count-Sketch, we have k sign functions gi : U  {-1, 1}, and the algorithm maintains C such that C[ , b] = j:h (j)=b fj · g (j). For each i  U , the frequency estimate f~i is equal to the median of {g (i)·C[ , h (i)]} k. Note that unlike the previous two methods, here we may have f~i < fi.
+3.3. ZIPFIAN DISTRIBUTION
+In our theoretical analysis we assume that the item frequencies follow the Zipf Law. That is, if we re-order the items so that their frequencies appear in a sorted order fi1  fi2  . . .  fin , then fij  1/j. To simplify the notation we assume that fi = 1/i.
+
+4. LEARNING-BASED FREQUENCY ESTIMATION ALGORITHMS
+
+We aim to develop frequency estimation algorithms that exploit data properties for better performance. To do so, we learn an oracle that identifies heavy hitters, and use the oracle to assign each heavy hitter its unique bucket to avoid collisions. Other items are simply hashed using any classic frequency estimation algorithm (e.g., Count-Min, or Count-Sketch), as shown in the block-diagram in Figure 4.1. This design has two useful properties: First, it allows us to augment a classic frequency estimation algorithm with learning capabilities, producing a learning-based counterpart that inherits the original guarantees of the classic algorithm. For example, if the classic algorithm is Count-Min, the resulting learning-based algorithm never underestimates the frequencies. Second, it provably reduces the estimation errors, and for the case of Count-Min it is (asymptotically) optimal.
+Algorithm 1 provides pseudo code for our design. The design assumes an oracle HH(i) that attempts to determine whether an item i is a "heavy hitter" or not. All items classified as heavy hitters are assigned to one of the Br unique buckets reserved for heavy items. All other items are fed to the remaining B - Br buckets using a conventional frequency estimation algorithm SketchAlg (e.g., Count-Min or Count-Sketch).
+
+Algorithm 1 Learning-Based Frequency Estimation
+
+1: procedure LEARNEDSKETCH(B, Br, HH, SketchAlg)
+
+2: for each stream element i do
+
+3: if HH(i) = 1 then
+
+4: if i is already stored in a unique bucket then
+
+5: increment the count of i
+
+6: else create a new unique bucket for i and
+
+7: initialize the count to 1
+
+8: end if
+
+9: else
+
+10:
+
+feed
+
+i
+
+to
+
+a
+
+sketch
+
+of
+
+size
+
+k
+
+×
+
+(
+
+B-Br k
+
+)
+
+using
+
+SketchAlg
+
+11: end if
+
+12: end for
+
+13: end procedure
+
+Element i
+
+Learned Oracle
+
+Heavy
+
+Not heavy
+
+Unique Buckets
+
+SketchAlg
+(e.g., Count-Min)
+
+Figure 4.1: Pseudo-code and block-diagram representation of our algorithms
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+The estimation procedure is analogous. To compute f~i, the algorithm first checks whether i is stored in a unique bucket, and if so, reports its count. Otherwise, it queries the SketchAlg procedure. Note that if the element is stored in a unique bucket, its reported count is exact, i.e., f~i = fi.
+The oracle is constructed using machine learning and trained with a small subset of S, call it S . Note that the oracle learns the properties that identify heavy hitters as opposed to the identities of the heavy hitters themselves. For example, in the case of word frequency, the oracle would learn that shorter words are more frequent, so that it can identify popular words even if they did not appear in the training set S .
+
+4.1. ANALYSIS
+
+Our algorithms combine simplicity with strong error bounds. Below, we summarize our theoretical results, and leave all theorems, lemmas, and proofs to the appendix. In particular, Table 4.1 lists the results proven in this paper, where each row refers to a specific streaming algorithm, its corresponding error bound, and the theorem/lemma that proves the bound.
+
+First, we show (Theorem 7.11 and Theorem 7.14) that if the heavy hitter oracle is accurate, then the
+error of the learned variant of Count-Min is up to a logarithmic factor smaller than that of its non-
+learning counterpart. The improvement is maximized when B is of the same order as n (a common scenario1). Furthermore, we prove that this result continues to hold even if the learned oracle makes
+prediction errors with probability , as long as  = O(1/ ln n) (Lemma 7.15).
+
+Second, we show that, asymptotically, our learned Count-Min algorithm cannot be improved any further by designing a better hashing scheme. Specifically, for the case of Learned Count-Min with a perfect oracle, our design achieves the same asymptotic error as the "Ideal Count-Min", which optimizes its hash function for the given input (Theorem 8.4).
+
+Finally, we note that the learning-augmented algorithm inherits any ( , )-guarantees of the original version. Specifically, its error is not larger than that of SketchAlg with space B - Br, for any input.
+
+Algorithms Single Hash Function (B)
+Count-Min Sketch (k, B) Learned Count-Min(B) Ideal Count-Min(B)
+
+Expected Error
+
+(ln2 n/B)
+
+k+2
+
+(
+
+k ln n B ln k
+
+)
+
+and
+
+O(
+
+k
+
+ln
+
+n
+
+ln k-1 B
+
+(
+
+kn B
+
+)
+
+)
+
+(ln2(n/B)/B)
+
+(ln2(n/B)/B)
+
+Analysis Lemma 7.2
+Theorem 7.11 Theorem 7.14 Theorem 8.4
+
+Table 4.1: Our performance bounds for different algorithms on streams with frequencies obeying Zipf Law. k is a constant ( 2) that refers to the number of hash functions, B is the number of buckets, and n is the number of distinct elements. The space complexity of all algorithms is the same, (B). See section 7.4 for non-asymptotic versions of the some of the above bounds
+
+5. EXPERIMENTS
+
+Baselines. We compare our learning-based algorithms with their non-learning counterparts. Specifically, we augment Count-Min with a learned oracle using Algorithm 1, and call the learningaugmented algorithm "Learned Count-Min". We then compare Learned Count-Min with traditional Count-Min. We also compare it with "Learned Count-Min with Ideal Oracle" where the neuralnetwork oracle is replaced with an ideal oracle that knows the identities of the heavy hitters in the test data, and "Table Lookup with Count-Min" where the heavy hitter oracle is replaced with a lookup table that memorizes heavy hitters in the training set. The comparison with the latter baseline allows us to show the ability of Learned Count-Min to generalize and detect heavy items unseen in the training set. We repeat the evaluation where we replace Count-Min (CM) with Count-Sketch (CS) and the corresponding variants.
+Training a Heavy Hitter Oracle. We construct the heavy hitter oracle by training a neural network to predict the heaviness of an item. Note that the prediction of the network is not the final estimation. It is used in Algorithm 1 to decide whether to assign an item to a unique bucket. We train the network to predict the item counts (or the log of the counts) and minimize the squared loss of the prediction. Empirically, we found that when the counts of heavy items are few orders of magnitude larger than
+
+1For example, Goyal et al. (2012) uses B = 20M, n = 33.5M and B = 50M, n = 94M .
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+the average counts (as is the case for the Internet traffic data set), predicting the log of the counts leads to more stable training and better results. Once the model is trained, we can select the optimal cutoff threshold using validation data, and use the model as the oracle described in Algorithm 1.
+5.1. INTERNET TRAFFIC ESTIMATION
+For our first experiment, the goal is to estimate the number of packets for each network flow. A flow is a sequence of packets between two machines on the Internet. It is identified by the IP addresses of its source and destination and the application ports. Estimating the size of each flow i ­ i.e., the number of its packets fi ­ is a basic task in network management (Sivaraman et al., 2017).
+
+Dataset: The traffic data is collected at a backbone link of a Tier1 ISP
+
+Frequency (log scale)
+
+between Chicago and Seattle in 2016 (CAIDA). Each recording session is 105
+
+around one hour. Within each minute, there are around 30 million packets 104
+
+and 1 million unique flows. For a recording session, we use the first 7 103
+
+minutes for training, the following minute for validation, and estimate the packet counts in subsequent minutes. The distribution of packet counts over Internet flows is heavy tailed, as shown in Figure 5.1.
+Model: The patterns of the Internet traffic are very dynamic, i.e., the
+
+102 101 100
+Sor1t0e1d ite1m03s (lo1g0 5scale10)7
+
+flows with heavy traffic change frequently from one minute to the next. Figure 5.1: Frequency of
+
+However, we hypothesize that the space of IP addresses should be smooth
+
+Internet Flows
+
+in terms of traffic load. For example, data centers at large companies and university campuses
+
+with many students tend to generate heavy traffic. Thus, though the individual flows from these
+
+sites change frequently, we could still discover regions of IP addresses with heavy traffic through a
+
+learning approach.
+
+We trained a neural network to predict the log of the packet counts for each flow. The model takes
+as input the IP addresses and ports in each packet. We use two RNNs to encode the source and
+destination IP addresses separately. The RNN takes one bit of the IP address at each step, starting
+from the most significant bit. We use the final states of the RNN as the feature vector for an IP
+address. The reason to use RNN is that the patterns in the bits are hierarchical, i.e., the more
+significant bits govern larger regions in the IP space. Additionally, we use two-layer fully-connected
+networks to encode the source and destination ports. We then concatenate the encoded IP vectors, encoded port vectors, and the protocol type as the final features to predict the packet counts 2. The inference time takes 2.8 microseconds per item on a single GPU without any optimizations3.
+
+Results: We plot the results of two representative test minutes (the 20th and 50th) in Figure 5.2. All plots in the figure refer to the estimation error (Equation 3.1) as a function of the used space. The space includes space for storing the buckets and the model. Since we use the same model for all test minutes, the model space is amortized over the 50-minute testing period.
+
+Figure 5.2 reveals multiple findings. First, the figure shows that our learning-based algorithms exhibit a better performance than their non-learning counterparts. Specifically, Learned Count-Min, compared to Count-Min, reduces the the error by 32% with space of 0.5 MB and 42% with space of 1.0 MB (Figure 5.2a). Learned Count-Sketch, compared to Count-Sketch, reduces the error by 52% at 0.5 MB and 57% at 1.0 MB (Figure 5.2c). In our experiments, each regular bucket takes 4 bytes. For the learned versions, we account for the extra space needed for the unique buckets to store the item IDs and the counts. One unique bucket takes 8 bytes, twice the space of a normal bucket.4
+Second, the figure also shows that our neural-network oracle performs better than memorizing the heavy hitters in a lookup table. This is likely due to the dynamic nature of Internet traffic ­i.e., the heavy flows in the training set are significantly different from those in the test data. Hence,
+
+2We use RNNs with 64 hidden units. The two-layer fully-connected networks for the ports have 16 and 8 hidden units. The final layer before the prediction has 32 hidden units.
+3Note that new specialized hardware such as Google TPU, hardware accelerators and network compression (Han et al., 2017; Sze et al., 2017; Chen et al., 2017; Han et al., 2016; 2015) can drastically improve the inference time. Further, Nvidia has predicted that GPU will get 1000x faster by 2025. Because of these trends, the overhead of neural network inference is expected to be less significant in the future (Kraska et al., 2018).
+4By using hashing with open addressing, it suffices to store IDs hashed into log Br +t bits (instead of whole IDs) to ensure there is no collision with probability 1 - 2-t. log Br + t is comparable to the number of bits per counter, so the space for a unique bucket is twice the space of a normal bucket.
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+Average Error per item (Frequency)
+
+200 Count Min 175 Table lookup CM 150 Learned CM (NNet)
+Learned CM (Ideal)
+125 100 75 50 25
+00.0 0.5 Spac1e.0 (MB) 1.5 2.0
+
+Average Error per item (Frequency)
+
+200 Count Min 175 Table lookup CM 150 Learned CM (NNet)
+Learned CM (Ideal)
+125 100 75 50 25
+00.0 0.5 Spac1e.0 (MB) 1.5 2.0
+
+Average Error per item (Frequency)
+
+(a) Learned Count-Min - 20th test minute
+200 Count Sketch 175 Table lookup CS 150 Learned CS (NNet)
+Learned CS (Ideal)
+125 100 75 50 25
+00.0 0.5 Spac1e.0 (MB) 1.5 2.0
+
+Average Error per item (Frequency)
+
+(b) Learned Count-Min - 50th test minute
+200 Count Sketch 175 Table lookup CS 150 Learned CS (NNet)
+Learned CS (Ideal)
+125 100 75 50 25
+00.0 0.5 Spac1e.0 (MB) 1.5 2.0
+
+(c) Learned Count-Sketch - 20th test minute
+
+(d) Learned Count-Sketch - 50th test minute
+
+Figure 5.2: Comparison of our algorithms with Count-Min and Count-Sketch on Internet traffic data.
+
+memorization does not work well. On the other hand, our model is able to extract structures in the input that generalize to unseen test data.
+
+Third, the figure shows that our model's performance stays roughly the same from the 20th to the 50th minute (Figure 5.2b and Figure 5.2d), showing that it learns properties of the heavy items that generalize over time.
+
+Lastly, although we achieve significant improvement over Count-Min and Count-Sketch, our scheme can potentially achieve even better results with an ideal oracle, as shown by the dashed green line in Figure 5.2. This indicates potential gains from further optimizing the neural network model.
+
+5.2. SEARCH QUERY ESTIMATION
+
+For our second experiment, the goal is to estimate the number of times a search query appears.
+Dataset: We use the AOL query log dataset, which consists of 21 million search queries collected from 650 thousand users over 90 days. The users are anonymized in the dataset. There are 3.8 million unique queries. Each query is a search phrase with multiple words (e.g., "periodic table element poster"). We use the first 5 days for training, the following day for validation, and estimate the number of times different search queries appear in subsequent days. The distribution of search query frequency follows the Zipfian law, as shown in Figure 5.3
+
+Frequency (log scale)
+
+104
+103
+102
+101
+100
+Sor1te01d item1s03 (log s1c05ale)
+Figure 5.3: Frequency of search queries
+
+Model: Unlike traffic data, popular search queries tend to appear more consistently across multiple days. For example, "google" is the most popular search phrase in most of the days in the dataset. Simply storing the most popular words can easily construct a reasonable heavy hitter predictor. However, beyond remembering the popular words, other factors also contribute to the popularity of a search phrase that we can learn. For example, popular search phrases appearing in slightly different forms may be related to similar topics. Though not included in the AOL dataset, in general, metadata of a search query (e.g., the location of the search) can provide useful context of its popularity.
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Average Error per item (Frequency) Average Error per item (Frequency) Average Error per item (Frequency) Average Error per item (Frequency)
+
+4.0 3.5 3.0 2.5 2.0 1.5 1.0 0.5 0.0 0.2
+
+Count Min Table lookup CM Learned CM (NNet) Learned CM (Ideal) 0.4 Spa0c.6e (MB0.)8 1.0 1.2
+
+4.0 3.5 3.0 2.5 2.0 1.5 1.0 0.5 0.0 0.2
+
+Count Min Table lookup CM Learned CM (NNet) Learned CM (Ideal) 0.4 Spa0c.6e (MB0.)8 1.0 1.2
+
+4.0 3.5 3.0 2.5 2.0 1.5 1.0 0.5 0.0 0.2
+
+Count Sketch Table lookup CS Learned CS (NNet) Learned CS (Ideal) 0.4 Spa0c.6e (MB0.)8 1.0 1.2
+
+4.0 3.5 3.0 2.5 2.0 1.5 1.0 0.5 0.0 0.2
+
+Count Sketch Table lookup CS Learned CS (NNet) Learned CS (Ideal) 0.4 Spa0c.6e (MB0.)8 1.0 1.2
+
+(a) Learned Count-Min (b) Learned Count-Min (c) Learned Count-Sketch (d) Learned Count-Sketch
+
+50th test day
+
+80th test day
+
+50th test day
+
+80th test day
+
+Figure 5.4: Comparison of our algorithms with Count-Min and Count-Sketch on search query data.
+
+To construct the heavy hitter oracle, we trained a neural network to predict the number of times a search phrase appears. To process the search phrase, we train an RNN with LSTM cells that takes characters of a search phrase as input. The final states encoded by the RNN are fed to a fully-connected layer to predict the query frequency. Our character vocabulary includes lower-case English alphabets, numbers, punctuation marks, and a token for unknown characters. We map the character IDs to embedding vectors before feeding them to the RNN5. We choose RNN due to its effectiveness in processing sequence data (Sutskever et al., 2014; Graves, 2013; Kraska et al., 2018).
+
+Results: We plot the estimation error vs. space for two representative test days (the 50th and 80th day) in Figure 5.4. As before, the space includes both the bucket space and the space used by the model. The model space is amortized over the test days since the same model is used for all days.
+
+Similarly, our learned sketches outperforms their conventional counterparts. For Learned CountMin, compared to Count-Min, it reduces the loss by 18% at 0.5 MB and 52% at 1.0 MB (Figure 5.4a). For Learned Count-Sketch, compared to Count-Sketch, it reduces the loss by 24% at 0.5 MB and 71% at 1.0 MB (Figure 5.4c). Further, our algorithm performs similarly for the 50th and the 80th day (Figure 5.4b and Figure 5.4d), showing that the properties it learns generalize over a long period.
+
+The figures also show an interesting difference from the Internet traffic data: memorizing the heavy hitters in a lookup table is quite effective in the low space region. This is likely because the search queries are less dynamic compared to Internet traffic (i.e., top queries in the training set are also popular on later days). However, as the algorithm is allowed more space, memorization becomes ineffective.
+
+5.3. ANALYZING HEAVY HITTER MODELS
+
+We analyze the accuracy of the neural network heavy hitter models to better understand the results on the two datasets. Specifically, we use the models to predict whether an item is a heavy hitter (top 1% in counts) or not, and plot the ROC curves in Figure 5.5. The figures show that the model for the Internet traffic data has learned to predict heavy items more effectively, with an AUC score of 0.9. As for the model for search query data, the AUC score is 0.8. This also explains why we see larger improvements over non-learning algorithms in Figure 5.2.
+
+True Positive Rate True Positive Rate
+
+1.0 1.0
+
+0.8 0.8
+
+0.6 0.6
+
+0.4 0.4
+
+0.2
+AUC = 0.900 0.00.00 Fa0l.s25e Po0s.5it0ive R0.7a5te 1.00
+
+0.2
+AUC = 0.808 0.00.00 Fa0l.s25e Po0s.5it0ive R0.7a5te 1.00
+
+(a) Internet traffic 50th test minute
+
+(b) Search query 50th test day
+
+Figure 5.5: ROC curves of the learned models.
+
+6. CONCLUSION
+We have presented a new approach for designing frequency estimation streaming algorithms by augmenting them with a learning model that exploits data properties. We have demonstrated the benefits of our design both analytically and empirically. We envision that our work will motivate a deeper integration of learning in algorithm design, leading to more efficient algorithms.
+
+5We use an embedding size of 64 dimensions, an RNN with 256 hidden units, and a fully-connected layer with 32 hidden units.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Amirali Aghazadeh, Ryan Spring, Daniel LeJeune, Gautam Dasarathy, Anshumali Shrivastava, and Richard G Baraniuk. Mission: Ultra large-scale feature selection using count-sketches. In International Conference on Machine Learning, 2018.
+Maria-Florina Balcan, Travis Dick, Tuomas Sandholm, and Ellen Vitercik. Learning to branch. In International Conference on Machine Learning, 2018.
+Luca Baldassarre, Yen-Huan Li, Jonathan Scarlett, Baran Go¨zcu¨, Ilija Bogunovic, and Volkan Cevher. Learning-based compressive subsampling. IEEE Journal of Selected Topics in Signal Processing, 10(4):809­822, 2016.
+Ashish Bora, Ajil Jalal, Eric Price, and Alexandros G Dimakis. Compressed sensing using generative models. In International Conference on Machine Learning, pp. 537­546, 2017.
+Oscar Boykin, Avi Bryant, Edwin Chen, ellchow, Mike Gagnon, Moses Nakamura, Steven Noble, Sam Ritchie, Ashutosh Singhal, and Argyris Zymnis. Algebird. https://twitter. github.io/algebird/, 2016.
+CAIDA. Caida internet traces 2016 chicago. http://www.caida.org/data/monitors/passive-equinixchicago.xml.
+Emmanuel J Cande`s, Justin Romberg, and Terence Tao. Robust uncertainty principles: Exact signal reconstruction from highly incomplete frequency information. IEEE Transactions on information theory, 52(2):489­509, 2006.
+Moses Charikar, Kevin Chen, and Martin Farach-Colton. Finding frequent items in data streams. In International Colloquium on Automata, Languages, and Programming, pp. 693­703. Springer, 2002.
+Yu-Hsin Chen, Tushar Krishna, Joel S Emer, and Vivienne Sze. Eyeriss: An energy-efficient reconfigurable accelerator for deep convolutional neural networks. IEEE Journal of Solid-State Circuits, 52(1):127­138, 2017.
+Graham Cormode and Marios Hadjieleftheriou. Finding frequent items in data streams. Proceedings of the VLDB Endowment, 1(2):1530­1541, 2008.
+Graham Cormode and S Muthukrishnan. Summarizing and mining skewed data streams. In Proceedings of the 2005 SIAM International Conference on Data Mining, pp. 44­55. SIAM, 2005a.
+Graham Cormode and Shan Muthukrishnan. An improved data stream summary: the count-min sketch and its applications. Journal of Algorithms, 55(1):58­75, 2005b.
+Hanjun Dai, Elias Khalil, Yuyu Zhang, Bistra Dilkina, and Le Song. Learning combinatorial optimization algorithms over graphs. In Advances in Neural Information Processing Systems, pp. 6351­6361, 2017.
+Erik D Demaine, Alejandro Lo´pez-Ortiz, and J Ian Munro. Frequency estimation of internet packet streams with limited space. In European Symposium on Algorithms, pp. 348­360. Springer, 2002.
+David L Donoho. Compressed sensing. IEEE Transactions on information theory, 52(4):1289­ 1306, 2006.
+Fabon Dzogang, Thomas Lansdall-Welfare, Saatviga Sudhahar, and Nello Cristianini. Scalable preference learning from data streams. In Proceedings of the 24th International Conference on World Wide Web, pp. 885­890. ACM, 2015.
+Cristian Estan and George Varghese. New directions in traffic measurement and accounting: Focusing on the elephants, ignoring the mice. ACM Transactions on Computer Systems (TOCS), 21(3): 270­313, 2003.
+Anna Gilbert and Piotr Indyk. Sparse recovery using sparse matrices. Proceedings of the IEEE, 98 (6):937­947, 2010.
+9
+
+Under review as a conference paper at ICLR 2019
+Amit Goyal, Hal Daume´ III, and Graham Cormode. Sketch algorithms for estimating point queries in nlp. In Proceedings of the 2012 Joint Conference on Empirical Methods in Natural Language Processing and Computational Natural Language Learning, pp. 1093­1103. Association for Computational Linguistics, 2012.
+Alex Graves. Generating sequences with recurrent neural networks. arXiv preprint arXiv:1308.0850, 2013.
+Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding. arXiv preprint arXiv:1510.00149, 2015.
+Song Han, Xingyu Liu, Huizi Mao, Jing Pu, Ardavan Pedram, Mark A Horowitz, and William J Dally. Eie: efficient inference engine on compressed deep neural network. In Computer Architecture (ISCA), 2016 ACM/IEEE 43rd Annual International Symposium on, pp. 243­254. IEEE, 2016.
+Song Han, Junlong Kang, Huizi Mao, Yiming Hu, Xin Li, Yubin Li, Dongliang Xie, Hong Luo, Song Yao, Yu Wang, et al. Ese: Efficient speech recognition engine with sparse lstm on fpga. In Proceedings of the 2017 ACM/SIGDA International Symposium on Field-Programmable Gate Arrays, pp. 75­84. ACM, 2017.
+He He, Hal Daume III, and Jason M Eisner. Learning to search in branch and bound algorithms. In Advances in neural information processing systems, pp. 3293­3301, 2014.
+Herve Jegou, Matthijs Douze, and Cordelia Schmid. Product quantization for nearest neighbor search. IEEE transactions on pattern analysis and machine intelligence, 33(1):117­128, 2011.
+Hossein Jowhari, Mert Saglam, and Ga´bor Tardos. Tight bounds for lp samplers, finding duplicates in streams, and related problems. In Proceedings of the thirtieth ACM SIGMOD-SIGACT-SIGART symposium on Principles of database systems, pp. 49­58. ACM, 2011.
+Richard M Karp, Scott Shenker, and Christos H Papadimitriou. A simple algorithm for finding frequent elements in streams and bags. ACM Transactions on Database Systems (TODS), 28(1): 51­55, 2003.
+Tim Kraska, Alex Beutel, Ed H Chi, Jeffrey Dean, and Neoklis Polyzotis. The case for learned index structures. In Proceedings of the 2018 International Conference on Management of Data, pp. 489­504. ACM, 2018.
+Abhishek Kumar, Minho Sung, Jun Jim Xu, and Jia Wang. Data streaming algorithms for efficient and accurate estimation of flow size distribution. In ACM SIGMETRICS Performance Evaluation Review, volume 32, pp. 177­188. ACM, 2004.
+Zaoxing Liu, Antonis Manousis, Gregory Vorsanger, Vyas Sekar, and Vladimir Braverman. One sketch to rule them all: Rethinking network flow monitoring with univmon. In Proceedings of the 2016 ACM SIGCOMM Conference, pp. 101­114. ACM, 2016.
+Thodoris Lykouris and Sergei Vassilvitskii. Competitive caching with machine learned advice. In International Conference on Machine Learning, 2018.
+Ahmed Metwally, Divyakant Agrawal, and Amr El Abbadi. Efficient computation of frequent and top-k elements in data streams. In International Conference on Database Theory, pp. 398­412. Springer, 2005.
+Gregory T Minton and Eric Price. Improved concentration bounds for count-sketch. In Proceedings of the twenty-fifth annual ACM-SIAM symposium on Discrete algorithms, pp. 669­686. SIAM, 2014.
+Jayadev Misra and David Gries. Finding repeated elements. Science of computer programming, 2 (2):143­152, 1982.
+Michael Mitzenmacher. A model for learned bloom filters and optimizing by sandwiching. In Advances in Neural Information Processing Systems, 2018.
+10
+
+Under review as a conference paper at ICLR 2019
+Ali Mousavi, Ankit B Patel, and Richard G Baraniuk. A deep learning approach to structured signal recovery. In Communication, Control, and Computing (Allerton), 2015 53rd Annual Allerton Conference on, pp. 1336­1343. IEEE, 2015.
+Ali Mousavi, Gautam Dasarathy, and Richard G Baraniuk. Deepcodec: Adaptive sensing and recovery via deep convolutional neural networks. arXiv preprint arXiv:1707.03386, 2017.
+Pratanu Roy, Arijit Khan, and Gustavo Alonso. Augmented sketch: Faster and more accurate stream processing. In Proceedings of the 2016 International Conference on Management of Data, pp. 1449­1463. ACM, 2016.
+Ruslan Salakhutdinov and Geoffrey Hinton. Semantic hashing. International Journal of Approximate Reasoning, 50(7):969­978, 2009.
+Stuart Schechter, Cormac Herley, and Michael Mitzenmacher. Popularity is everything: A new approach to protecting passwords from statistical-guessing attacks. In Proceedings of the 5th USENIX conference on Hot topics in security, pp. 1­8. USENIX Association, 2010.
+Vibhaalakshmi Sivaraman, Srinivas Narayana, Ori Rottenstreich, S Muthukrishnan, and Jennifer Rexford. Heavy-hitter detection entirely in the data plane. In Proceedings of the Symposium on SDN Research, pp. 164­176. ACM, 2017.
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In Advances in neural information processing systems, pp. 3104­3112, 2014.
+Vivienne Sze, Yu-Hsin Chen, Tien-Ju Yang, and Joel S Emer. Efficient processing of deep neural networks: A tutorial and survey. Proceedings of the IEEE, 105(12):2295­2329, 2017.
+Partha Talukdar and William Cohen. Scaling graph-based semi supervised learning to large number of labels using count-min sketch. In Artificial Intelligence and Statistics, pp. 940­947, 2014.
+Jun Wang, Wei Liu, Sanjiv Kumar, and Shih-Fu Chang. Learning to hash for indexing big data - a survey. Proceedings of the IEEE, 104(1):34­57, 2016.
+Yair Weiss, Antonio Torralba, and Rob Fergus. Spectral hashing. In Advances in neural information processing systems, pp. 1753­1760, 2009.
+Minlan Yu, Lavanya Jose, and Rui Miao. Software defined traffic measurement with opensketch. In NSDI, volume 13, pp. 29­42, 2013.
+11
+
+Under review as a conference paper at ICLR 2019
+
+7. ANALYSIS - FULL PROOFS
+
+In this section, we analyze the performance of three different approaches, single (uniformly random)
+hash function, Count-Min sketch, and Learned Count-Min sketch when the frequency of items is from Zipfian distribution. For simplicity, we assume that the number of distinct elements n is equal to the size of the universe |U |, and fi = 1/i. We use [n] to denote the set {1 . . . n}. We also drop the normalization factor 1/N in the definition of estimation error.
+
+The following observation is useful throughout this section (in particular, in the section on nonasymptotic analysis).
+
+Observation 7.1. For sufficiently large values of n (i.e., n > 250),
+
+n1
+
+ln(n + 1) <
+
+< ln n + 0.58
+
+i
+
+i=1
+
+(7.1)
+
+7.1. SINGLE HASH FUNCTION
+
+Lemma 7.2. The expected error of a single uniformly random hash function h : [n]  [B] (with B
+
+buckets)
+
+for
+
+estimating
+
+the
+
+frequency
+
+of
+
+items
+
+whose
+
+distribution
+
+is
+
+Zipfian
+
+is
+
+(
+
+ln2 n B
+
+).
+
+Proof: E[Err(F , F~h)] = E[
+
+(f~j - fj) · fj] =
+
+E[
+
+fq] · fj
+
+j[n]
+
+j[n] {q=j | h[q]=h[j]}
+
+=
+
+ln n (( )
+B
+
+-
+
+fj B
+
+)
+
+·
+
+fj
+
+=
+
+ln2 n ( ).
+B
+
+j[n]
+
+Moreover, since each bucket maintains the frequency of items that are mapped to it under h, the space complexity of this approach is proportional to the number of buckets which is (B).
+
+7.2. COUNT-MIN SKETCH
+
+Here, we provide an upper bound and lower bound for the expected estimation error of Count-
+
+Min sketch with k hash functions and B buckets per row. In the rest of this section, for each j  [n],  k, we use ej, and ej respectively to denote the estimation error of fj by h and Count-Min sketch. Recall that the expected error of Count-Min sketch is defined as follows:
+
+E[Err(F , F~CM )] = E[ (f~j - fj) · fj] =
+
+E[ej] · fj,
+
+(7.2)
+
+j[n]
+
+j[n]
+
+Our high-level approach is to partition the interval [0, B ln n] into m + 1 smaller intervals by a
+
+sequence
+
+of
+
+thresholds
+
+(ln1+
+
+(
+
+n B
+
+))
+
+=
+
+r0
+
+
+
+···
+
+
+
+rm
+
+=
+
+B ln n
+
+where
+
+
+
+is
+
+a
+
+parameter
+
+to
+
+be
+
+determined
+
+later.
+
+Formally, we define  > 0,
+
+the sequence of n
+r := (ln( ) + B
+
+ris to satisfy the following ln r +1) ln r +1.
+
+property:
+
+(7.3)
+
+Claim 7.3. For each i  0, ln ri+1  2 ln ri.
+
+Proof:
+
+By (7.3) and assuming ln ri+1
+
+
+
+ln(
+
+n B
+
+),
+
+ri
+
+< 2 ln1+ ri+1.
+
+Hence, ln ri+1
+
+>
+
+( )ri
+
+1 1+
+
+2
+
+>
+
+2 ln ri for sufficiently large values of ri6 assuming   3.
+
+Note
+
+that
+
+as
+
+long
+
+as
+
+ln ri+1
+
+
+
+ln(
+
+n B
+
+),
+
+ri
+
+
+
+ri+1.
+
+Otherwise,
+
+ri
+
+=
+
+o(ln1+
+
+(
+
+n B
+
+))
+
+<
+
+r0.
+
+Corollary 7.4. For each i  1 and c  1, ji ln-c rj = O(ln-c ri).
+
+6More precisely, ri  1.3 × 106.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Then, to compute (7.2), we rewrite E[ej] using the thresholds r0, · · · , rm as follows:
+
+
+E[ej] = Pr(ej  x)dx
+
+(7.4)
+
+0
+
+r0 m-1 ri+1
+
+BB
+
+= Pr(ej  x)dx +
+
+Pr(ej  x)dx
+
+0
+
+ri
+i=0 B
+
+ O( r0 ) + m-1 B
+i=0
+
+ri+1 B
+ri B
+
+Pr(ej  x|ej <
+
+ri+1 ) + B
+
+m-1
+
+Pr(ej 
+
+rq B
+
+|ej
+
+<
+
+rq+1 ) B
+
+dx
+
+q=i+1
+
+Next,
+
+we
+
+compute
+
+Pr(ej
+
+
+
+t B
+
+|ej
+
+<
+
+)ri+1
+B
+
+for
+
+each
+
+t
+
+
+
+[ri, ri+1).
+
+Lemma 7.5.
+
+For each t  [ri, ri+1), Pr(ej
+
+
+
+t B
+
+|ej
+
+<
+
+ri+1 B
+
+)
+
+=
+
+O
+
+k(ln(
+
+n B
+
+)+ln
+
+ri+1
+
+)
+
+t ln ri+1
+
+.
+
+Proof: First we prove the following useful observation.
+
+Claim 7.6.
+
+For each item j and hash function h , E[ej,
+
+| ej,
+
+<
+
+r B
+
+]
+
+
+
+ln(
+
+n B
+
+)+ln
+
+B
+
+r
+
+.
+
+Proof:
+
+Note that the condition ej,
+
+<
+
+r B
+
+implies that for all items q
+
+<
+
+B r
+
+(and q
+
+=
+
+j), h
+
+(j)
+
+=
+
+h
+
+(q).
+
+Hence,
+
+E[ej,
+
+| ej,
+
+< r] B
+
+fq
+
+·
+
+1 B
+
+
+
+ln
+
+n
+
+-
+
+ln(
+
+B r
+
+)
+
+B
+
+=
+
+ln(
+
+n B
+
+)
+
++
+
+ln
+
+r
+
+.
+
+B
+
+q>
+
+B r
+
+Thus, by Markov's inequality, for each item j and hash function h ,
+
+Pr(ej,
+
+t > B | ej,
+
+
+
+r)
+
+ln(
+
+n B
+
+)
+
++
+
+ln
+
+r
+
+.
+
+Bt
+
+(7.5)
+
+Now, for each h
+
+in Count-Min sketch, we bound the value of Pr(ej,
+
+
+
+t B
+
+)
+
+where
+
+t
+
+
+
+[ri, ri+1):
+
+Pr(ej,
+
+
+
+t )
+B
+
+
+
+m-1
+Pr(ej,
+
+
+
+rq B
+
+|ej,
+
+< rq+1 ) B
+
+q=i
+
+
+
+m-1
+
+ln(
+
+n B
+
+)
+
++
+
+ln
+
+rq+1
+
+q=i rq
+
+1 = O( ln ri+1 )
+
+by (7.5) and Corollary 7.4
+
+Hence, for k  2,
+
+Pr(ej
+
+
+
+t B
+
+|ej
+
+<
+
+ri+1 ) B
+
+
+
+k Pr(ej,1
+
+
+
+t B
+
+|ej,1
+
+<
+
+ri+1 B
+
+)k=2
+
+Pr(ej,
+
+
+
+t )
+
+B
+
+=O
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+ri+1)
+
+t ln(k-1) ri+1
+
+by (7.5) and (7.6)
+
+(7.6)
+
+Next,
+
+for
+
+each
+
+item
+
+j,
+
+we
+
+bound
+
+the
+
+contribution
+
+of
+
+each
+
+interval
+
+(
+
+ri B
+
+,
+
+ri+1 B
+
+)
+
+to
+
+E[ej ],
+
+namely
+
+ri+1
+
+B ri
+
+Pr(ej  x)dx.
+
+B
+
+Claim 7.7. For each i  0,
+
+ri+1
+B ri B
+
+Pr(ej
+
+
+
+x)dx
+
+=
+
+O( ).k(ln(
+
+n B
+
+)+ln
+
+ri+1
+
+)
+
+B ln(k-1)-1 ri+1
+
+Proof: ri+1
+B
+Pr(ej  x)dx =
+ri B
+
+ri+1 B
+ri B
+
+Pr(ej
+
+
+
+x|ej
+
+<
+
+ri+1 ) + B
+
+m-1
+
+Pr(ej
+
+
+
+rq B
+
+|ej
+
+<
+
+rq+1 ) B
+
+dx
+
+q=i+1
+
+A Bq
+
+ri+1
+
+First, we compute
+
+B ri
+
+Adx.
+
+ri+1B
+
+B ri
+
+Pr(ej
+
+
+
+x|ej
+
+<
+
+ri+1 )dx B
+
+
+
+B
+
+ri+1 B
+ri B
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+ri+1)
+
+(B ln(k-1) ri+1)x
+
+)dx
+
+=
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+ri+1)
+
+B ln(k-1)-1 ri+1
+
+)
+
+(7.7)
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+ri+1
+
+Similarly,
+
+B ri
+
+m-1 q=i+1
+
+Bq
+
+dx
+
+is
+
+at
+
+most:
+
+ri+1 B
+ri
+
+B
+
+m-1
+
+Pr(ej
+
+
+
+rq B
+
+|ej
+
+<
+
+rq+1 )dx B
+
+=
+
+B q=i+1
+
+ri+1 B
+ri B
+
+m-1 q=i+1
+
+O(
+
+k(ln(
+
+n B
+
+rq ln
+
+) + ln rq+1 (k-1) rq+1
+
+)
+
+)dx
+
+ri+1 m-1
+B
+
+k
+
+= ri B
+
+q=i+1 O( lnk rq+1 )dx
+
+by (7.3)
+
+Hence, ri+1
+B
+Pr(ej  x)dx =
+ri B
+
+ri+1 B
+ri B
+
+ri+1
+
+Bk
+
+= ri B
+
+O( lnk ri+2 )dx
+
+by Corollary 7.4
+
+=
+
+O(
+
+B
+
+kri+1 lnk ri+2
+
+)
+
+=
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+ri+2)
+
+B ln(k-1) ri+2
+
+)
+
+(7.8)
+
+Pr(ej
+
+
+
+x|ej
+
+<
+
+ri+1 ) B
+
++
+
+m-1
+
+Pr(ej
+
+
+
+rq B
+
+|ej
+
+<
+
+rq+1 ) B
+
+dx
+
+q=i+1
+
+=
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+B ln(k-1)-1
+
+ri+1) ri+1
+
+)
+
++
+
+O(
+
+k(ln(
+
+n B
+
+B ln
+
+) + ln ri+2 (k-1) ri+2
+
+)
+
+)
+
+=
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+B ln(k-1)-1
+
+ri+1) ri+1
+
+)
+
+by (7.3)
+
+by (7.7)-(7.8) (7.9)
+
+Now, we complete the error analysis of (7.4):
+
+E[ej ]
+
+
+
+O(
+
+r0 B
+
+)
+
++
+
+m-1
+
+i=0
+
+ri+1 B
+ri B
+
+Pr(ej  x|ej <
+
+ri+1 ) + B
+
+m-1
+
+Pr(ej 
+
+rq B
+
+|ej
+
+<
+
+rq+1 ) B
+
+dx
+
+q=i+1
+
+=
+
+O(
+
+r0 B
+
+)
+
++
+
+m-1 i=0
+
+O(
+
+k(ln(
+
+n B
+
+)
+
++
+
+ln
+
+B ln(k-1)-1
+
+ri+1) ri+1
+
+)
+
+by (7.9)
+
+=
+
+O(
+
+r0 B
+
+)
+
++
+
+O(k
+
+B
+
+ln(
+
+n B
+
+)
+
+ln(k-1)-1
+
+r1
+
+)
+
++
+
+O( B
+
+k ln(k-1)-2
+
+r1
+
+)
+
+(7.10)
+
+Note that (7.10) requires (k - 1) - 2  1 which is satisfied by setting  = 3/(k - 1) and k  2.
+
+Thus, for each item j,
+
+E[ej ]
+
+=
+
+O(r0/B)
+
+=
+
+O(
+
+ln
+
+k+2 k-1
+
+(
+
+n B
+
+B
+
+) )
+
+(7.11)
+
+Lemma 7.8. The expected error of Count-Min sketch of size k × B (with k  2) for estimating
+
+k+2
+
+items
+
+whose
+
+frequency
+
+distribution
+
+is
+
+Zipfian
+
+is
+
+O(
+
+ln
+
+n
+
+ln
+
+k-1
+B
+
+(n/B) ).
+
+In particular, if B
+
+=
+
+(n),
+
+then
+
+E[Err(F ,
+
+F~CM
+
+)]
+
+=
+
+O(
+
+ln n n
+
+).
+
+Proof: By plugging in our upper bound on the estimation error of each item computed in (7.11) in
+
+the definition of expected estimation error of Count-Min (7.2), we have the following.
+
+E[Err(F , F~CM )] =
+
+n
+
+E[ej ]
+
+·
+
+fj
+
+=
+
+O(
+
+ln
+
+k+2 k-1
+
+(
+
+n B
+
+)
+
+B
+
+·
+
+ln n).
+
+j=1
+
+Next, we show a lower bound on the expected error of Count-Min sketch with B buckets (more precisely, of size (k × B/k)) for estimating the frequency of items that follow Zipf Law.
+
+Observation 7.9.
+
+For each item j, Pr[ej
+
+
+
+1/(2(
+
+B k
+
+)
+
+ln
+
+k
+
++
+
+1)]
+
+
+
+1
+
+-
+
+1 k
+
+.
+
+Proof:
+
+For
+
+each
+
+item
+
+j,
+
+the
+
+probability
+
+that
+
+none
+
+of
+
+the
+
+first
+
+2(
+
+B k
+
+)
+
+ln
+
+k
+
++
+
+1
+
+items
+
+(excluding
+
+itself)
+
+collide
+
+with
+
+it
+
+in
+
+at
+
+least
+
+one
+
+of
+
+the
+
+hash
+
+functions
+
+h1, · · ·
+
+, hk
+
+is
+
+at
+
+most
+
+k(1 -
+
+1 (B/k)
+
+)2(
+
+B k
+
+)
+
+ln
+
+k
+
+
+
+1 k
+
+.
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+Hence,
+
+with
+
+probability
+
+at
+
+least
+
+1
+
+-
+
+1 k
+
+,
+
+the
+
+estimation
+
+f~j
+
+includes
+
+the
+
+frequency
+
+of
+
+one
+
+of
+
+the
+
+top
+
+2(
+
+B k
+
+)
+
+ln
+
+k
+
++
+
+1
+
+frequent
+
+items.
+
+Lemma 7.10.
+
+The
+
+expected
+
+error
+
+of
+
+Count-Min
+
+sketch
+
+of
+
+size
+
+k
+
+×
+
+(
+
+B k
+
+)
+
+for
+
+estimating
+
+items
+
+whose
+
+frequency
+
+distribution
+
+is
+
+Zipfian
+
+is
+
+at
+
+least
+
+(k-1) ln n 2B ln k+k
+
+.
+
+Proof:
+
+Observation 7.9 implies that E[ej]  (1 -
+
+1 k
+
+)
+
+2(
+
+B k
+
+)
+
+1 ln
+
+k+1
+
+=
+
+k-1 2B ln k+k
+
+.
+
+Hence,
+
+E[Err(F , F~CM )] =
+
+E[ej] · fj
+
+j[n]
+
+ ( k - 1 ) ln n 2B ln k + k
+
+By Observation 7.1
+
+Theorem 7.11.
+
+The
+
+expected
+
+error
+
+of
+
+Count-Min
+
+sketch
+
+of
+
+size
+
+k
+
+×
+
+(
+
+B k
+
+)
+
+on
+
+estimating
+
+the
+
+frequency
+
+k+2
+
+of
+
+n
+
+items
+
+from
+
+Zipfian
+
+distribution
+
+is
+
+at
+
+least
+
+(
+
+k ln n B ln k
+
+)
+
+and
+
+at
+
+most
+
+O(
+
+k
+
+ln
+
+n
+
+ln k-1 B
+
+(
+
+kn B
+
+)
+
+).
+
+In particular, for the case B = (n) and k = O(1), the expected error of Count-Min sketch is
+
+(
+
+ln n B
+
+).
+
+Proof: The proof follows from Lemma 7.8 and 7.10. We remark that the bound in Lemma 7.8 is for
+
+the expected estimation error of Count-Min sketch of size k × B. Hence, to get the bound on the
+
+expected
+
+error
+
+of
+
+Count-Min
+
+of
+
+size
+
+k
+
+×
+
+(
+
+B k
+
+),
+
+we
+
+must
+
+replace
+
+B
+
+with
+
+B/k.
+
+7.3. LEARNED COUNT-MIN SKETCH
+
+Definition 7.12 (-HeavyHitter). Given a set of items I = {i1, · · · , in} with frequencies f = f1, · · · , fn , an item j is a -HeavyHitter of I if fj  ||f ||1.
+Remark 7.13. If the frequency distribution of items I is Zipfian, then the number of -HeavyHitters is at most 1/( ln n). In other words, Br  ( ln n)-1.
+
+To recall, in our Learned Count-Min sketch with parameters (Br, B), Br buckets are reserved for
+
+the frequent items returned by HH and the rest of items are fed to a Count-Min sketch of size
+
+k
+
+×
+
+(
+
+B
+
+-Br k
+
+)
+
+where
+
+k
+
+is
+
+a
+
+parameter
+
+to
+
+be
+
+determined.
+
+We
+
+emphasize
+
+that
+
+the
+
+space
+
+complexity
+
+of
+
+Learned Count-Min sketch with parameter (Br, B) is Br + B = O(B).
+
+Theorem 7.14. The optimal expected error of Learned Count-Min sketches with parameters
+
+(Br, B)
+
+is
+
+at
+
+most
+
+(ln(n/Br )+0.58)2 B-Br
+
+.
+
+In
+
+particular,
+
+for
+
+Br
+
+=
+
+(B)
+
+=
+
+(n),
+
+E[Err(F , F~L-CM )]
+
+=
+
+O(
+
+1 n
+
+).
+
+Proof: Since, the count of top Br frequent items are stored in their own buckets, for each j  Br,
+
+ej = 0. Hence,
+
+E[Err(F , F~L-CM )] =
+
+E[ej] · fj
+
+j[n]
+
+= E[ej] · fj j  Br, ej = 0
+
+j>Br
+
+<
+
+(ln(n/Br) + 0.58)2 B - Br
+
+By Observation 7.1
+
+Note that the last inequality follows from the guarantee of single hash functions; in other words,
+
+setting k = 1 in the Count-Min sketch.
+
+7.3.1. LEARNED COUNT-MIN SKETCH USING NOISY HEAVYHITTERS ORACLE
+
+Unlike the previous part, here we assume that we are given a noisy HeavyHitters oracle HH such
+
+that for each item j, Pr
+
+HH (j,
+
+1 Br ln
+
+n)
+
+=
+
+HH0(j,
+
+Br
+
+1 ln
+
+n
+
+)
+
+  where HH0 is an ideal HeavyHitter
+
+oracle that detects heavy items with no error.
+
+Lemma 7.15. In an optimal Learned Count-Min sketch with parameters (Br, B) and a noisy
+
+HeavyHitters
+
+oracle
+
+HH ,
+
+E[Err(F ,
+
+F~(L-CM,))]
+
+=
+
+O(
+
+2
+
+ln2
+
+Br +ln2(n/Br ) B-Br
+
+).
+
+15
+
+Under review as a conference paper at ICLR 2019
+
+Proof: The key observation is that each heavy item, any of Br most frequent items, may only
+
+misclassify with probability . Hence, for each item j classified as "not heavy",
+
+E[ej ]
+
+
+
+
+
+·
+
+(
+
+ln Br B-
+
++1 Br
+
+)
+
++
+
+(
+
+ln(n/Br) + B - Br
+
+1
+
+)
+
+=
+
+O(
+
+
+
+ln
+
+Br + ln(n/Br) B - Br
+
+),
+
+(7.12)
+
+where the first term denotes the expected contribution of the misclassified heavy items and the
+
+second term denotes the expected contribution of non-heavy items.
+
+The rest of analysis is similar to the proof of Theorem 7.14.
+
+E[Err(F , F~(L-CM,))] =
+
+E[ej] · fj
+
+j[n]
+
+<  E[ej] · fj + E[ej] · fj
+
+jBr
+
+j>Br
+
+
+
+O(
+
+·
+
+ln
+
+Br
+
++
+
+ln(n/Br ))
+
+·
+
+O(
+
+
+
+ln
+
+Br + ln(n/Br) B - Br
+
+)
+
+ O( 2 ln2 Br + ln2(n/Br) ). B - Br
+
+By (7.12)
+
+Corollary 7.16. Assuming Br = (B) = (n) and  = O(1/ ln n), E[Err(F , F~(L-CM,))] = O(1/n).
+
+Space analysis. Here, we compute the amount of space that is required by this approach.
+
+Lemma 7.17.
+
+The
+
+amount
+
+of
+
+space
+
+used
+
+by
+
+Learned
+
+Count-Min
+
+sketch
+
+of
+
+size
+
+k
+
+·
+
+(
+
+B
+
+-Br k
+
+)
+
+with
+
+cutoff
+
+(Br reserved buckets) for estimating the frequency of items whose distribution is Zipfian is O(B).
+
+Proof: The amount of space required to store the counters corresponding to functions h1, · · · , hk is
+
+O(k
+
+·
+
+(
+
+B-Br k
+
+)).
+
+Here,
+
+we
+
+also
+
+need
+
+to
+
+keep
+
+a
+
+mapping
+
+from
+
+the
+
+heavy
+
+items
+
+(top
+
+Br
+
+frequent
+
+items
+
+according to HH) to the reserved buckets Br which requires extra O(Br) space; each reserved
+
+buckets stores both the hashmap of its corresponding item and its count.
+
+7.4. NON-ASYMPTOTIC ANALYSIS OF COUNT-MIN AND LEARNED COUNT-MIN
+In this section, we compare the non-asymptotic expected error of Count-Min sketch and out Learned Count-Min sketch with ideal HeavyHitters oracle. Throughout this section, we assume that the amount of available space to the frequency estimation algorithms is (1+)B words. More precisely, we compare the expected error of Count-Min sketch with k hash functions and our Learned CountMin sketch with Br = B reserved buckets. Recall that we computed the following bounds on the expected error of these approaches (Lemma 7.10 and Theorem 7.14):
+
+(k - 1) ln n
+
+E[ErrCM ]
+
+
+
+2(1
+
++ )B
+
+ln(k)
+
+, +k
+
+E[ErrL-CM ]
+
+
+
+(ln(
+
+n B
+
+)
+
+(1 -
+
++ 0.58)2 )B
+
+.
+
+In the rest of this section, we assume that B  n and then compute the minimum value of  that
+
+guarantees
+
+E[ErrL-CM ]
+
+
+
+1 1+
+
+·
+
+E[ErrCM ].
+
+In
+
+other
+
+words,
+
+we
+
+compute
+
+the
+
+minimum
+
+amount
+
+of
+
+space that is required so that our Learned Count-Min sketch performs better than Count-Min sketch
+
+by a factor of at least (1 + ).
+
+E[ErrL-CM ]
+
+
+
+(ln(
+
+1 
+
+)
+
++
+
+0.58)2
+
+(1 - )B
+
+
+
+1 1+
+
+·
+
+(k - 1) ln n 2(1 + )B ln k + k
+
+
+
+1 1+
+
+· E[ErrCM ],
+
+Hence,
+
+we
+
+must have
+
+(0.58 - ln  - ln )2
+
+
+
+(k-1)(1-)
+
+(1+)(2(1+)
+
+ln
+
+k+(
+
+k B
+
+))
+
+· ln n.
+
+By solving
+
+the
+
+corre-
+
+sponding quadratic equation,
+
+ln2
+
+
+
++
+
+2(ln
+
+
+
+-
+
+0.58)
+
+ln
+
+
+
++
+
+((ln
+
+
+
+-
+
+0.58)2
+
+-
+
+(1
+
++
+
+(k - 1)(1 - ) )(2(1 + ) ln k +
+
+(
+
+k B
+
+))
+
+·
+
+ln
+
+n)
+
+
+
+0.
+
+This implies that ln  = - ln  + 0.58 -
+
+3.58
+(k-1) ln n
+
+.
+
+(k-1)(1-)
+
+(1+)(2(1+)
+
+ln
+
+k+(
+
+k B
+
+))
+
+· ln n.
+
+By setting 
+
+=
+
+1 2
+
+,
+
+
+
+
+
+e 2(1+)(3 ln k+(k/B))
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+Next, we consider different values of k and show that in each case what is the minimum amount of space in which Learned CM outperforms CM by a factor of 1.06 (setting  = 0.06).
+
+· k = 1. In this case, we are basically comparing the expected error of a single hash function
+
+and Learned Count-Min. In particular, in order to get a gap of at least (1 + ), by a more
+
+careful analysis of Lemma 7.2,  must satisfy the following condition:
+
+E[ErrL-CM ]
+
+
+
+(ln(
+
+1 
+
+)
+
++
+
+0.58)2
+
+(1 - )B
+
+
+
+1 1+
+
+·
+
+ln2 n - 1.65 (1 + )B
+
+
+
+1 1+
+
+· E[Errh],
+
+To
+
+simplify
+
+it
+
+further,
+
+we
+
+require
+
+that
+
+(ln(
+
+2 
+
+)
+
++
+
+0.58)2
+
+
+
+3.18 · (ln2
+
+n - 1.65)
+
+which
+
+implies
+
+that  = (1/ ln n).
+
+· k = 2. In this case,    3.58 for sufficiently large values of B. Hence, we require
+e (ln n)/4.5
+that the total amount of available space is at least 5.37n .
+e (ln n)/4.5
+
+· k  {3, 4}: In this case,    2 for sufficiently large values of B. Hence, we
+e (ln n)/3.5
+require that the total amount of available space is at least 5.37n .
+e (ln n)/3.5
+
+· k  5. In this case,    2 for sufficiently large values of B. Hence, we require
+e (ln n)/2.6
+that the total amount of available space is at least 5.37n .
+e (ln n)/2.6
+
+We also note that settings where the number of buckets is close to n are quite common in practice. For example, Goyal et al. (2012) uses ((1 + )B = 20M, n = 33.5M ) and ((1 + )B = 50M, n = 94M ) with k = 3, while Kumar et al. (2004) uses different pairs of ((1 + )B, n) including (B = 288K, n = 563K). Plugging these values into the exact formulas computed above shows that Learned CM has a significantly lower loss than CM.
+
+8. OPTIMAL HASH FUNCTION
+
+In this section we compute an asymptotic bound error bound of optimal hash functions that map items [n] to a set of buckets C[1 · · · B].
+
+Claim 8.1. For a set of items I, let f (I) denote the total frequency of all items in I; f (I) :=
+
+iI fi. In any optimal hash function of form {h : I  [BI ]} with minimum estimation error, any
+
+item
+
+with
+
+frequency
+
+at
+
+least
+
+f (I) BI
+
+does
+
+not
+
+collide
+
+with
+
+any
+
+other
+
+items
+
+in
+
+I.
+
+Proof: For each bucket b  [BI ], lets fh(b) denotes the frequency of items mapped to b under h; f (b) := iI:h(i)=b fi. Recall that the estimation error of a hash function h is defined as Err(F (I), F~h(I)) := iI fi · (f (h(i)) - i). Note that we can rewrite Err(F (I), F~h(I)) as
+Err(F (I), F~h(I)) = fi · (f (h(i)) - fi) = fi · f (h(i)) - fi2
+
+iI iI iI
+
+= f (b)2 - fi2.
+
+(8.1)
+
+b[BI ]
+
+iI
+
+Note that in (8.1) the second term is independent of h and is a constant. Hence, an optimal hash
+
+function minimizes the first term, bBI f (b)2.
+
+Suppose I \ {i}
+
+uthnadtearnainteomptiim walithhasfhreqfuunecntcioynathle.asStinfBc(IeI)
+
+collides the total
+
+with a (non-empty) set frequency of the items
+
+of items mapped
+
+I  to the
+
+bucket
+
+b
+
+containing
+
+i
+
+is
+
+greater
+
+than
+
+f (I) BI
+
+(i.e.,
+
+f (h(i))
+
+>
+
+f (I) BI
+
+),
+
+there
+
+exists
+
+a
+
+bucket
+
+b
+
+such
+
+that
+
+f (b)
+
+<
+
+f (I) BI
+
+.
+
+Next,
+
+we
+
+define
+
+a
+
+which contradicts the optimality
+
+new hash of h:
+
+function
+
+h
+
+with
+
+smaller
+
+estimation
+
+error
+
+compared
+
+to
+
+h
+
+h(i) if i  I \ I
+
+h(i) = b
+
+otherwise.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+Formally, Err(F (I), F~h (I)) - Err(F (I), F~h(I)) = fh (b)2 + fh (b)2 - fh(b)2 - fh(b)2
+= (fi + f (I))2 + fh (b)2 - fi2 - (fh (b) + f (I))2 = 2fi · f (I) - 2fh (b) · f (I)
+= 2f (I) · (fi - fh (b))
+f (I) > 0 Since fi > B > fh (b).
+
+Next, we show that in any optimal hash function h : [n]  [B] and assuming Zipfian input distribution, (B) most frequent items do not collide with any other items under h.
+
+Lemma 8.2. Suppose that B = n/ where   e4.2 is a constant and lets assume that items follow Zipfian distribution. In any hash function h : [n]  [B] with minimum estimation error, none of the
+
+B 2 ln 
+
+most
+
+frequent
+
+items
+
+collide
+
+with
+
+any
+
+other
+
+items
+
+(i.e.,
+
+they
+
+are
+
+mapped
+
+to
+
+a
+
+singleton
+
+bucket).
+
+Proof: Let ij be the most frequent item that is not mapped to a singleton bucket under h. If
+
+j
+
+>
+
+B 2 ln 
+
+then
+
+the
+
+statement
+
+holds.
+
+Suppose
+
+it
+
+is
+
+not
+
+the
+
+case
+
+and
+
+j
+
+
+
+2
+
+B ln
+
+
+
+.
+
+Let
+
+I
+
+denote
+
+the
+
+set
+
+of items with frequency at most fj = 1/j (i.e., I = {ij | j  j}) and let BI denote the number
+
+of buckets that the items with index at least j mapped to; BI = B - j + 1. Also note that by
+
+Observation
+
+7.1,
+
+f (I)
+
+<
+
+ln(
+
+n j
+
+)
+
++
+
+1.
+
+Next,
+
+by
+
+Claim
+
+8.1,
+
+we
+
+show
+
+that
+
+h
+
+does
+
+not
+
+hash
+
+the
+
+items
+
+{j,
+
+·
+
+·
+
+·
+
+,
+
+n}
+
+to
+
+BI
+
+optimally.
+
+In
+
+particular,
+
+we
+
+show
+
+that
+
+the
+
+frequency
+
+of
+
+item
+
+j
+
+is
+
+more
+
+than
+
+f (I) BI
+
+.
+
+To prove this, first we observe that the function g(j) := j · (ln(n/j) + 1) is strictly increasing in
+
+[1, n].
+
+Hence,
+
+for
+
+any
+
+j
+
+
+
+2
+
+B ln
+
+
+
+,
+
+j
+
+·
+
+(ln(
+
+n j
+
+)
+
++
+
+1)
+
+
+
+B 2 ln 
+
+·
+
+(ln(2 ln )
+
++ 1)
+
+ B · (1 -
+
+1 )
+
+2 ln 
+
+Since ln(2 ln ) + 2 < ln  for ln   4.2
+
+< BI
+
+Thus, fj
+
+=
+
+1 j
+
+>
+
+ln(n/j  )+1 BI
+
+>
+
+f (I) BI
+
+which implies that an optimal hash function must map j
+
+to a
+
+singleton bucket.
+
+Theorem 8.3. If n/B  e4.2, then the estimation error of any hash function that maps a set of n
+
+items
+
+following
+
+Zipfian
+
+distribution
+
+to
+
+B
+
+buckets
+
+is
+
+(
+
+ln2
+
+(
+
+n B
+
+B
+
+)
+
+).
+
+Proof:
+
+By
+
+Lemma 8.2,
+
+in
+
+any hash
+
+function
+
+with
+
+minimum estimation
+
+error,
+
+the
+
+(
+
+2
+
+B ln
+
+
+
+)
+
+most
+
+fre-
+
+quent items do not collide with any other items (i.e., they are mapped into a singleton bucket) where
+
+ = n/B > e4.2.
+
+Hence, the goal is to minimize (8.1) for the set of items I which consist of all items other than the
+
+(
+
+2
+
+B ln
+
+
+
+)
+
+most
+
+frequent
+
+items.
+
+Since
+
+the
+
+sum
+
+of
+
+squares
+
+of
+
+m
+
+items
+
+that
+
+summed
+
+to
+
+S
+
+is
+
+at
+
+least
+
+S2/m,
+
+the multi-set loss of any optimal hash function is at least:
+
+Err(F (I), F~h (I)) =
+
+f (b)2 -
+
+fi2
+
+b[B]
+
+i[n]
+
+
+
+( iI fi)2
+
+B(1
+
+-
+
+2
+
+1 ln
+
+
+
+)
+
+-
+
+iI
+
+fi2
+
+ (ln(2 ln ) - 1)2 - 2 ln  + 1 B Bn
+
+ln2  = ( )
+B
+
+ln2(n/B)
+
+= (
+
+).
+
+B
+
+By (8.1)
+By Observation 7.1 Since  > e4
+
+18
+
+Under review as a conference paper at ICLR 2019
+
+Next, we show a more general statement which basically shows that the estimation error of any
+
+Count-Min
+
+sketch
+
+with
+
+B
+
+buckets
+
+is
+
+(
+
+ln2
+
+(n/B B
+
+)
+
+)
+
+no
+
+matter
+
+how
+
+many
+
+rows
+
+(i.e.,
+
+the
+
+value
+
+of
+
+k)
+
+it
+
+has.
+
+Theorem 8.4. If n/B  e4.2, then the estimation error of any Count-Min sketch that maps a set of
+
+n
+
+items
+
+following
+
+Zipfian
+
+distribution
+
+to
+
+B
+
+buckets
+
+is
+
+(
+
+ln2
+
+(
+
+n B
+
+B
+
+)
+
+).
+
+Proof: We prove the statement by showing a reduction that given a Count-Min sketch CM (k) with hash functions h1, · · · , hk  {h : [n]  [B/k]} constructs a single hash function h : [n]  [B] whose estimation error is less than or equal to the estimation error of CM (k).
+
+For each item i, we define C [i] to be the bucket whose value is returned by CM (k) as the estimate of
+
+fi; C [i] := arg minj[k] C[j, hj(i)]. Since the total number of buckets in CM (k) is B, |{C [i] | i 
+
+[n]}|  B; in other words, we only consider the subset of buckets that CM (k) uses to report the
+
+estimates of {fi | i  [n]} which trivially has size at most B. We define h as follows: h(i) = (j, hj (i)) for each i  [n], where j = arg min C[j, hj(i)]
+
+j[k]
+
+Unlike CM (k), h maps each item to exactly one bucket in {C[ , j] |  [k], j  [B/k]}; hence,
+
+for each item i, C [h(i)]  C[h(i)] = f~i where f~i is the estimate of fi returned by CM (k). Moreover, since for each i, C [h(i)]  fi,
+
+Err(F , F~h )  Err(F , F~CM(k)).
+
+Finally,
+
+by
+
+Theorem
+
+8.3,
+
+the
+
+estimation
+
+error
+
+of
+
+h
+
+is
+
+(
+
+ln2 (n/B ) B
+
+)
+
+which
+
+implies
+
+that
+
+the
+
+estimation
+
+error
+
+of
+
+C
+
+M
+
+(k)
+
+is
+
+(
+
+ln2 (n/B ) B
+
+)
+
+as
+
+well.
+
+19
+
+

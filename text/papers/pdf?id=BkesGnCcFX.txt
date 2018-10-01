@@ -1,0 +1,875 @@
+Under review as a conference paper at ICLR 2019
+LEARNING GOAL-CONDITIONED VALUE FUNCTIONS WITH ONE-STEP PATH REWARDS RATHER THAN GOALREWARDS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Multi-goal reinforcement learning (MGRL) addresses tasks where the desired goal state can change for every trial. State-of-the-art algorithms model these problems such that the reward formulation depends on the goals, to associate them with high reward. This dependence introduces additional goal reward resampling steps in algorithms like Hindsight Experience Replay (HER) that reuse trials in which the agent fails to reach the goal by recomputing rewards as if reached states were psuedo-desired goals. We propose a reformulation of goal-conditioned value functions for MGRL that yields a similar algorithm, while removing the dependence of reward functions on the goal. Our formulation thus obviates the requirement of reward-recomputation that is needed by HER and its extensions. We also extend a closely related algorithm, Floyd-Warshall Reinforcement Learning, from tabular domains to deep neural networks for use as a baseline. Our results are competitive with HER while substantially improving sampling efficiency in terms of reward computation.
+1 INTRODUCTION
+Many tasks in robotics require the specification of a goal for every trial. For example, a robotic arm can be tasked to move an object to an arbitrary goal position on a table (Gu et al., 2017); a mobile robot can be tasked to navigate to an arbitrary goal landmark on a map (Zhu et al., 2017). The adaptation of reinforcement learning to such goal-conditioned tasks where goal locations can change is called Multi-Goal Reinforcement Learning (MGRL) (Plappert et al., 2018). State-of-theart MGRL algorithms (Andrychowicz et al., 2017; Pong et al., 2018) work by estimating goalconditioned value functions (GCVF) which are defined as expected cumulative rewards from start states with specified goals. GCVFs, in turn, are used to compute policies that determine the actions to take at every state.
+State-of-the-art MGRL algorithms use goal-rewards to associate the achievement of goals with high reward. This conditions reward functions on the desired goals. For example, in the Fetch-Push task (Plappert et al., 2018) of moving a block to a given location on a table, every movement incurs a "-1" reward while reaching the desired goal returns a "0" reward. This dependence introduces additional reward resampling steps in algorithms like Hindsight Experience Replay (HER) (Andrychowicz et al., 2017), where trials in which the agent failed to reach the goal are reused by recomputing rewards as if the reached states were pseudo-desired goals. Due to the dependence of the reward function on the goal, the relabelling of every pseudo-goal requires an independent reward-recomputation step, which can be expensive.
+In this paper, we demonstrate that goal-rewards are avoidable. Let us consider an example to motivate this. Consider a student who has moved to a new university. To learn about the campus, the student explores it randomly with no specific goal in mind. The key intuition here is that the student is not incentivized to find specific goal locations (i.e. no goal-rewards) but is aware of the effort required to travel between points around the university. When tasked with finding a goal classroom, the student can chain together these path efforts to find the least-effort path to the classroom. Based on this intuition of least-effort paths, we redefine GCVFs to be the expected path-reward that is learned for all possible start-goal pairs. We introduce a one-step loss that assumes one-step paths
+1
+
+Under review as a conference paper at ICLR 2019
+
+FetchReach
+
+FetchPush
+
+FetchSlide
+
+FetchPickAndPlace
+
+HandReach
+
+HandManipulateBlockRotateXYZ
+
+HandManipulateEggFull
+
+HandManipulatePenRotate
+
+Figure 1: Plappert et al. (2018) introduce challenging tasks on the Fetch robot and the Shadow Dextrous hand. We use these tasks for our experiments. Images are taken from the technical report.
+
+to be the paths of maximum reward between pairs wherein the state and goal are adjacent. Under this interpretation, the Bellman equation chooses and chains together one-step paths to find longer maximum reward paths. Experimentally, we show how this simple reinterpretation, which does not use goal rewards, performs as well as HER while outperforming it in terms of reward computation.
+We also extend a closely related algorithm, Floyd-Warshall Reinforcement Learning (FWRL) (Dhiman et al., 2018) to use parametric function approximators instead of tabular functions. Similar to our re-definition of GCVFs, FWRL learns a goal-conditioned Floyd-Warshall function that represents path-rewards instead of future-rewards. We translate FWRL's compositionality constraints in the space of GCVFs to introduce additional loss terms to the objective. However, these additional loss terms do not show improvement over the baseline. We conjecture that the compositionality constraints are already captured by other loss terms.
+In summary, the contributions of this work are twofold. Firstly, we reinterpret goal-conditioned value functions as expected path-rewards and introduce one-step loss, thereby removing the dependency of GCVFs on goal-rewards and reward resampling. We showcase our algorithm's improved sample efficiency (in terms of reward computation). We thus extend algorithms like HER to domains where reward recomputation is expensive or infeasible. Secondly, we extend the tabular Floyd-Warshal Reinforcement Learning to use deep neural networks.
+2 RELATED WORK
+Goal-conditioned tasks in reinforcement learning have been approached in two ways, depending upon whether the algorithm explicitly separates state and goal representations. The first approach is to use vanilla reinforcement learning algorithms that do not explicitly make this separation (Mirowski et al., 2016; Dosovitskiy & Koltun, 2016; Gupta et al., 2017; Parisotto & Salakhutdinov, 2017; Mirowski et al., 2018). These algorithms depend upon neural network architectures to carry the burden of learning the separated representations.
+The second approach makes this separation explicit via the use of goal-conditioned value functions (Foster & Dayan, 2002; Sutton et al., 2011). Universal Value Function Appoximators (Schaul et al., 2015) propose a network architecture and a factorization technique that separately encodes states and goals, taking advantage of correlations in their representations. Temporal Difference Models combine model-free and model-based RL to gain advantages from both realms by defining and learning a horizon-dependent GCVF. All these works require the use of goal-dependent reward functions and define GCVFs as future-rewards instead of path-rewards, contrasting them from our contribution.
+Unlike our approach, Andrychowicz et al. (2017) propose Hindsight Experience Replay, a technique for resampling state-goal pairs from failed experiences; which leads to faster learning in the presence of sparse rewards. In addition to depending on goal rewards, HER also requires the repeated
+2
+
+Under review as a conference paper at ICLR 2019
+
+recomputation of the reward function. In contrast, we show how removing goal-rewards removes the need for such recomputations. We utilize HER as a baseline in our work.
+Dhiman et al. (2018) also use the structure of the space of GCVFs to learn. This work employs compositionality constraints in the space of these functions to accelerate learning in a tabular domain. While their definition of GCVFs is similar to ours, they still require goal-rewards and do not employ one-step loss. We extend their work to deep neural networks.
+
+3 BACKGROUND
+
+A reinforcement learning (RL) problem is formalized as a Markov Decision Process (MDP) (Sutton
+
+et al., 1998). A MDP is defined by a five tuple (S, A, T, R, ), that governs a sequence of state-
+
+action-reward triples [(s0, a0, r0), . . . , (sT , aT , rT )]. S is the state space, A is the action space, T (s, a) : S × A  S is the system dynamics, R(s, a) : S × A  R is the reward function and  is
+
+the discount factor. In a typical RL problem the transition function T is not given but is known to be
+
+static. In RL, the objective is to find a policy (s) : S  A that maximizes the expected cumulative
+
+reward over time, Rt =
+
+ k=t
+
+k-trk
+
+,
+
+called
+
+the
+
+return.
+
+The
+
+discount
+
+factor, 
+
+<
+
+1,
+
+forces
+
+the
+
+return to be finite for infinite horizons. Reinforcement learning is typically formulated in single-goal
+
+contexts. More recently there has been interest in multi-goal problems (Andrychowicz et al., 2017;
+
+Pong et al., 2018; Plappert et al., 2018), which is the focus of this work.
+
+3.1 DEEP REINFORCEMENT LEARNING
+
+A number of reinforcement learning algorithms use parametric function approximators to estimate the return in the form of an action-value function, Q(s, a):
+
+T
+
+Q(s, a) = E
+
+k-tR(sk, ak) st = s, at = a ,
+
+k=t
+
+(1)
+
+where T is the episode length. When the policy  is optimal, the Q-function satisfies the Bellman equation (Bellman, 1954).
+
+Q(st, at) =
+
+R(st, at) +  maxaA Q(st+1, a) R(sT , aT )
+
+if if
+
+t t
+
+< =
+
+T T
+
+.
+
+(2)
+
+The optimal policy can be computed from Q greedily, (st) = arg maxaA Q(st, a). In Deep Q-Networks (DQN), Mnih et al. (2013) formulate a loss function based on the Bellman equation to approximate the optimal Q-function using a deep neural network, Qm:
+
+L(Qm ) = Eat(st;m ) (Qm(st, at; Qm ) - yt)2 ,
+
+(3)
+
+where yt = R(st, at) + maxa Qtgt(st+1, a; Qtgt ) , is the target and Qtgt is the target network (Mnih et al., 2015a). The target network is a slower-changing copy of the main network that stabilizes
+learning. Mnih et al. (2015a) also employ replay buffers that store transitions from episodes. During
+training, these transitions are sampled out of order to train the networks in an off-policy manner,
+avoiding correlation in the samples and thus leading to faster learning.
+
+In this work, we use an extension of DQN to continuous action spaces called deep determinis-
+tic policy-gradients (DDPG) (Lillicrap et al., 2015). DDPG approximates the policy with a policy network tgt(s; ) that replaces the max operator in yt. The target thus becomes yt = R(st, at) + Qtgt(st+1, tgt(st+1; ); Qtgt ) and the loss function changes accordingly:
+
+L(Q, ) = Eat(st;)[(Qm(st, at; Q) - yt)2].
+
+(4)
+
+3.2 MULTI-GOAL REINFORCEMENT LEARNING
+Multi-Goal Reinforcement Learning (Plappert et al., 2018) focuses on problems where the desired goal state can change for every episode. State-of-the-art MGRL algorithms learn a goal-conditioned
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+value function (GCVF), Q (s, a, g), which is defined similar to the Q-function (5), but with an additional dependence on the desired goal specification g  G :
+
+T
+
+Q (s, a, g) = E
+
+k-tR(sk, ak, g) st = s, at = a .
+
+k=t
+
+(5)
+
+The structure of the goal specification, g  G, can be arbitrary. For example, in a robotic arm experiment, possible goal specifications include the desired position of the end-effector and the
+desired joint angles of the robot. The states and achieved goals are assumed to be an observ-
+able part of the Goal-MDP to enable the agent to learn the correspondences between them, [(s0, a0, g0, r0), . . . , (sT , aT , gT , rT )]. Consequently, this Goal-MDP is fully governed by the six tuple (S, A, G, T, R, ). The reward, R(s, a, g) : S × A × G  R, and policy (s, g) : S × G  A are also in turn conditioned on goal information.
+
+Hindsight Experience Replay HER (Andrychowicz et al., 2017) builds upon this definition of GCVFs (5). The main insight of HER is that there is no valuable feedback from the environment when the agent does not reach the goal. This is further exacerbated when goals are sparse in the state-space. HER solves this problem by reusing these failed experiences for learning. It recomputes a reward for each reached state by relabeling them as pseudo-goals.
+In our experiments, we employ HER's future strategy for pseudo-goal sampling. More specifically, two transitions from the same episode in the replay buffer for times t and t + f are sampled. The achieved goal gt+f is then assumed to be the pseudo-goal. The algorithm generates a new transition for the time step t with the reward re-computed as if gt+f was the desired goal, (st, at, st+1, R(st, at, gt+f )). HER uses this new transition as a sample.
+
+4 PATH REWARD-BASED GCVFS
+
+In our definition of the GCVF, instead of making the reward function depend upon the goal, we count accumulated rewards over a path, path-rewards, only if the goal is reached. This makes the dependence on the goal explicit instead of implicit to the reward formulation. Mathematically,
+
+ l-1
+
+ QP (s, a, g) =  E
+
+k-tRP (sk, ak) s, a, gl = g
+k=t
+
+
+
+ -
+
+if  l such that gl = g (6a)
+
+otherwise,
+
+(6b)
+
+where l is the time step when the agent reaches the goal. If the agent does not reach the goal, the GCVF is defined to be negative infinity. This first term (6a) is the expected cumulative reward over
+paths from a given start state to the goal. This imposes the constraint that cyclical paths in the
+state space must have negative cumulative reward for (6a) to yield finite values. For most practical
+physical problems, this constraints naturally holds if reward is taken to be some measure of negative
+energy expenditure. For example, in the robot arm experiment, moving the arm must expend energy
+(negative reward). Achieving a positive reward cycle would translate to generating infinite energy . In all our experiments with this formulation, we use a constant reward of -1 for all states, RP (s, a) = -1 s, a.
+
+For the cases when the agent does reach the goal at time step l (6a), the Bellman equation takes the following form:
+
+QP (st, at, g) =
+
+RP
+
+(st,
+
+at)
+
++
+
+
+
+max
+aA
+
+QP
+
+(st+1,
+
+a,
+
+g)
+
+RP (sl-1, al-1)
+
+if t < l - 1 if t = l - 1 .
+
+(7a) (7b)
+
+Notice that terminal step in this equation is the step to reach the goal. This differs from Equation (3), where the terminal step is the step at which the episode ends. This formulation is equivalent to the end of episode occuring immediately when the goal is reached. This reformulation does not require goal-rewards, which in turn obviates the requirement for pseudo-goals and reward recomputation.
+
+One-Step Loss To enable algorithms like HER to work under this reformulation we need to recognize when the goal is reached (7b). This recognition is usually done by the reception of high goal
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+reward. Instead, we use (7b) as a one-step loss that serves this purpose which is one of our main
+
+contributions:
+
+Lstep(Q) = (QP (sl-1, al-1, gl; Q) - R(sl-1, al-1))2.
+
+(8)
+
+This loss is based on the assumption that one-step reward is the highest reward between adjacent
+
+start-goal states and allows us to estimate the one-step reward between them. Once learned, it serves
+
+as a proxy for the reward to the last step to the goal (7b). The Bellman equation (7a), serves as a
+
+one-step rollout to combine rewards to find maximum reward paths to the goal.
+
+We modify an implementation of HER to include the step-loss term and disable goal rewards for our experiments. As in HER, we use the DDPG loss Lddpg while using the "future" goal sampling strategy described in the paper. The details of the resulting algorithm are shown as psuedo-code in
+Algorithm 1 in the Appendix.
+
+4.1 DEEP FLOYD-WARSHALL REINFORCEMENT LEARNING
+
+The GCVF redefinition and one step-loss introduced in this paper are inspired by the tabular formulation of Floyd-Warshall Reinforcement Learning (FWRL) (Dhiman et al., 2018). We extend this algorithm for use with deep neural networks. Unfortunately, the algorithm itself does not show significant improvement over the baselines. However, the intuitions gained in its implementation led to the contributions of this paper.
+
+The core contribution of FWRL is a compositionality constraint in the space of GCVFs. This con-
+
+straint states that the optimal Q value from any state st to any goal gt+f is greater than or equal to the sum of optimal Q values via any intermediate state-goal pair (sw, gw):
+
+Q (st, at, gw) + Q (sw, (sw, gt+f ; ), gt+f )  Q (st, at, gt+f ) .
+
+(9)
+
+We translate these constraints into loss terms and add them to the DDPG loss Lddpg and one-step loss Lstep. Taking cue from Mnih et al. (2015b), we do not repeat the the main online network Qm in the loss term. We use a target network Qtgt and split the constraint into two loss terms. One loss term acts as a lower bound Llo and the other acts as an upper bound Lup:
+Llo = ReLU[Qtgt (st, at, gw) + Qtgt (sw, t(sw, gt+f ; ), gt+f ) - Qm (st, at, gt+f )]2 (10)
+Lup = ReLU[Qm (st, at, gw) + Qtgt (sw, t(sw, gt+f ; ), gt+f ) - Qtgt (st, at, gt+f )]2. (11)
+Note that the above terms differ only by choice of the target and main network.
+
+FWRL Sampling We augment HER sampling to additionally get the intermediate state-goal pair
+(sw, gw). Once a transition (st, at, rt, st+1) and a future goal gt+f have been sampled from the same episode, we sample another intermediate state and goal pair (sw, gw) such that t  w  t + f .
+
+5 EXPERIMENTS
+We use the environments introduced in Plappert et al. (2018) for our experiments. Broadly the environments fall in two categories, Fetch and Hand tasks. Our results show that learning is possible across all environments without the requirement of goal-reward.
+The Fetch tasks involve a simulation of the Fetch robot's 7-DOF robotic arm. The four tasks are Reach, Push, Slide and PickAndPlace. In the Reach task the arm's end-effector is tasked to reach the a particular 3D coordinate. In the Push task a block on a table needs to be pushed to a given point on it. In the Slide task a puck must be slid to a desired location. In the PickAndPlace task a block on a table must be picked up and moved to a 3D coordinate.
+The Hand tasks use a simulation of the Shadow's Dexterous Hand to manipulate objects of different shapes and sizes. These tasks are HandReach, HandManipulateBlockRotateXYZ, HandManipulateEggFull and HandManipulatePenRotate. In HandReach the hand's fingertips need to reach a given configuration. In the HandManipulateBlockRotateXYZ, the hand needs to rotate a cubic block to a desired orientation. In HandManipulateEggFull, the hand repeats this orientation task with an egg, and in HandManipulatePenRotate, it does so with a pen.
+Snapshots of all these tasks can be found in Figure 1. Note that these tasks use joint angles, not visual input.
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+Fetch Reach
+Distance from goal (test)
+
+HER HER
+
+0.15
+
+FWRL
+
+0.15
+
+FWRL
+
+Ours Ours
+
+0.10 0.10
+
+0.05 0.05
+
+Fetch Push
+Distance from goal (test)
+
+Fetch Pick And Place Distance from goal (test)
+
+0
+0.175 0.150 0.125 0.100 0.075 0.050
+0
+0.25 0.20 0.15 0.10 0.05
+0
+0.5
+0.4
+0.3
+
+10 20 30 40 50 60 Epoch
+HER FWRL Ours
+
+10 20 30 40 50 60 Epoch
+HER FWRL Ours
+
+50 100 150 Epoch
+
+200
+
+HER FWRL Ours
+
+Distance from goal (test)
+
+Distance from goal (test)
+
+0 50 100 150 200 Reward computes / 1000
+
+0.175 0.150 0.125 0.100 0.075 0.050
+
+HER FWRL Ours
+
+0
+0.25 0.20 0.15
+
+200 400 600 800 Reward computes / 1000
+
+1000
+
+HER FWRL Ours
+
+0.10
+
+0.05 0
+0.5 0.4
+
+500
+
+1000
+
+1500
+
+Reward computes / 1000
+
+HER FWRL Ours
+
+0.3
+
+Distance from goal (test)
+
+Fetch Slide Distance from goal (test)
+
+0.2 0.2
+
+0 50 100 150 200 Epoch
+
+0
+
+1000
+
+2000
+
+3000
+
+Reward computes / 1000
+
+. (a) Distance vs Epochs
+
+(b) Distance vs reward computes
+
+Distance from goal (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+1.0
+
+0.8
+
+0.6
+
+0.4 0.2 0.0
+0
+1.0
+
+10 20 30 40 Epoch
+
+HER FWRL Ours
+50 60
+
+0.8
+
+0.6
+
+0.4 0.2 0.0
+0
+1.0
+
+10 20 30 40 Epoch
+
+HER FWRL Ours
+50 60
+
+0.8
+
+0.6
+
+0.4
+0.2
+0.0 0
+
+HER FWRL Ours
+
+50 100 150 Epoch
+
+200
+
+HER 0.15 FWRL
+Ours 0.10
+
+0.05
+
+0.00 0
+
+50 100 150 Epoch
+
+200
+
+(c) Success rate vs epochs
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+
+HER FWRL Ours
+
+50 100 150 Reward computes / 1000
+
+200
+
+HER FWRL Ours
+
+200 400 600 800 Reward computes / 1000
+
+1000
+
+HER FWRL Ours
+
+500
+
+1000
+
+1500
+
+Reward computes / 1000
+
+HER 0.15 FWRL
+Ours 0.10
+
+0.05
+
+0.00 0
+
+1000
+
+2000
+
+3000
+
+Reward computes / 1000
+
+(d) Success rate vs reward computes
+
+Figure 2: For the Fetch tasks, we compare our method (red) against HER (blue) (Andrychowicz et al., 2016) and FWRL (green) (Dhiman et al., 2018) on the distance-from-goal and success rate metrics. Both metrics are plotted against two progress measures: the number of training epochs and the number of reward computations. Except for the Fetch Slide task, we achieve comparable or better performance across the metrics and progress measures.
+
+5.1 METRICS
+Similar to prior work, we evaluate all experiments on two metrics: the success rate and the average distance to the goal. The success rate is defined as the fraction of episodes in which the agent is able to reach the goal within a pre-defined threshold region. The metric distance of the goal is the euclidean distance between the achieved goal and the desired goal in meters. These metrics are plotted against a standard progress measure, the number of training epochs, showing comparable results of our method to the baselines.
+To emphasize that our method does not require goal-reward and reward re-computation, we plot these metrics against another progress measure, the number of reward computations used during training. This includes both the episode rollouts and the reward recomputations during HER sampling.
+5.2 HYPER-PARAMETERS CHOICES
+Unless specified, all our hyper-parameters are identical to the ones used in the HER implementation (Dhariwal et al., 2017). We note two main changes to HER to make the comparison more fair. Firstly, we use a smaller distance-threshold. The environment used for HER and FWRL returns the goal-reward when the achieved goal is within this threshold of the desired goal. Because of the absence of goal-rewards, the distance-threshold information is not used by our method. We reduce the it to 1cm which is reduction by a factor of 5 compared to HER.
+Secondly, we run all experiments on 6 cores each, while HER uses 19. The batch size used is a function of the number of cores and hence this parameter has a significant effect on learning.
+To ensure fair comparison, all experiments are run with the same hyper-parameters and random seeds to ensure that variations in performance are purely due to differences between the algorithms.
+6
+
+Under review as a conference paper at ICLR 2019
+
+Hand Reach
+Distance from goal (test)
+
+HER HER
+
+0.08
+
+FWRL
+
+0.08
+
+FWRL
+
+Ours Ours
+
+0.06 0.06
+
+0.04 0.04
+
+Distance from goal (test)
+
+Hand Block Rotate Distance from goal (test)
+
+0 1.0 0.8
+
+10 20 30 40 Epoch
+
+50 60
+HER FWRL Ours
+
+0 1.0 0.8
+
+200 400 600 800 Reward computes / 1000
+
+1000
+
+HER FWRL Ours
+
+0.6 0.6
+
+0.4 0
+1.0 0.8
+
+10 20 30 40 50 Epoch
+HER FWRL Ours
+
+0.4 0
+1.0 0.8
+
+200 400 600 Reward computes / 1000
+
+800
+
+HER FWRL Ours
+
+Distance from goal (test)
+
+Hand Egg
+Distance from goal (test)
+
+0.6 0.6
+
+0.4 0
+1.0 0.9
+
+10 20 30 Epoch
+
+40 50
+HER FWRL Ours
+
+0.4 0
+1.0 0.9
+
+200 400 600 Reward computes / 1000
+
+800
+
+HER FWRL Ours
+
+Distance from goal (test)
+
+Hand Pen Rotate
+Distance from goal (test)
+
+0.8 0.8
+
+0.7 0.7
+
+0 10 20 30 40 50 Epoch
+
+0 200 400 600 800 Reward computes / 1000
+
+. (a) Distance on Epochs
+
+(b) Distance on reward computes
+
+Distance from goal (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+0.8
+
+0.6
+
+0.4
+0.2
+0.0 0
+0.6 0.5 0.4 0.3 0.2 0.1 0.0
+0
+0.20
+0.15
+0.10
+
+HER FWRL Ours 10 20 30 40 50 60 Epoch
+HER FWRL Ours
+10 20 30 40 50 Epoch
+HER FWRL Ours
+
+0.05
+
+0.00 0
+
+10 20 30 Epoch
+
+40 50
+
+0.20 HER FWRL
+0.15 Ours
+
+0.10
+
+0.05
+
+0.00 0
+
+10 20 30 40 50 Epoch
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+Success rate (test)
+
+0.8
+0.6
+0.4
+0.2
+0.0 0
+0.6 0.5 0.4 0.3 0.2 0.1 0.0
+0
+0.20 0.15 0.10 0.05 0.00
+0
+0.20 0.15 0.10 0.05 0.00
+0
+
+HER FWRL Ours
+
+200 400 600 800 Reward computes / 1000
+
+1000
+
+HER FWRL Ours
+
+200 400 600 Reward computes / 1000
+
+800
+
+HER FWRL Ours
+
+200 400 600 Reward computes / 1000
+
+800
+
+HER FWRL Ours
+
+200 400 600 Reward computes / 1000
+
+800
+
+(c) Success rate on epochs
+
+(d) Success rate on reward computes
+
+Figure 3: For the hand tasks, we compare our method (red) against HER (blue) (Andrychowicz et al., 2016) and FWRL (green) (Dhiman et al., 2018) for the distance-from-goal and success rate metrics. Furthermore, both metrics are plotted against two progress measures, the number of training epochs and the number of reward computations. Measured by distance from the goal, our method performs comparable to or better than the baselines for both progress measurements. For the success rate, our method underperforms against the baselines.
+
+5.3 RESULTS
+All our experimental results are described below, highlighting the strengths and weaknesses of our algorithm. Across all our experiments, the distance-to-the-goal metric achieves comparable performance to HER without requiring goal-rewards.
+Fetch Tasks The experimental results for Fetch tasks are shown in Figure 2. For the Fetch Reach and Push tasks, our method achieves comparable performance to the baselines across both metrics in terms of training epochs and outperforms them in terms of reward recomputations. Notably, the Fetch Pick and Place task trains in significantly fewer epochs. For the Fetch Slide task the opposite is true. We conjecture that Fetch Slide is more sensitive to the distance threshold information, which our method is unable to use.
+Hand Tasks For the Hand tasks, the distance to the goal and the success rate show different trends. We show the results in Figure 3. When the distance metric is plotted against epochs, we get comparable performance for all tasks; when plotted against reward computations, we outperform all baselines on all tasks except Hand Reach. The baselines perform well enough on this task, leaving less scope for significant improvement. These trends do not hold for the success rate metric, on which our method consistently under-performs compared to the baselines across tasks. This is surprising, as all algorithms average equally on the distance-from-goal metric. We conjecture that this might be the result of high-distance failure cases of the baselines, i.e. when the baselines fail, they do so at larger distances from the goal. In contrast, we assume our method's success and failiure cases are closer together.
+7
+
+Under review as a conference paper at ICLR 2019
+
+Distance from goal (test)
+
+0.175 0.150 0.125 0.100 0.075 0.050
+0
+
+Ours (No step loss) HER Ours
+5 10 15 20 25 30 Epoch
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+
+Ours (No step loss) HER Ours
+5 10 15 20 25 30 Epoch
+
+(a) Do we really need the step-loss?
+
+Success rate (test) Success rate (test) Distance from goal (test)
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+
+HER Ours (goal rewards) Ours
+20 40 60 80 100 Epoch
+
+0.25 0.20 0.15 0.10 0.05
+0
+
+HER Ours (goal rewards) Ours
+20 40 60 80 100 Epoch
+
+(b) Effect of goal-rewards
+
+Figure 4: (a) Effects of removing the step-loss from our methods. Results show that it is a criticial component to learning in the absence of goal-rewards. (b) Adding goal-rewards to our algorithm that does have an effect further displaying how they are avoidable.
+
+Success rate (test)
+
+1.0
+0.8
+0.6 HER, = 0.01 HER, = 0.05
+0.4 HER, = 0.001
+0.2
+0.0 0 5 10 15 20 25 30 Epoch
+
+Success rate (test) Distance from goal (test) Distance from goal (test)
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0
+
+Ours, = 0.01 Ours, = 0.05 Ours, = 0.001
+
+0.175 0.150 0.125 0.100 0.075 0.050
+
+5 10 15 20 25 30 Epoch
+
+0
+
+HER, = 0.01 HER, = 0.05 HER, = 0.001
+
+0.175 0.150 0.125 0.100 0.075 0.050
+
+5 10 15 20 25 30 Epoch
+
+0
+
+Ours, = 0.01 Ours, = 0.05 Ours, = 0.001
+5 10 15 20 25 30 Epoch
+
+(a) Sucesss rate
+
+(b) Distance from goal
+
+Figure 5: We measure the sensitive of HER and our method to the dsitance-threshold ( ) with respect to the success-rate and distance-from-goal metrics. Both algorithms success-rate is senstive the threshold while only HER's distance-from-goal is affected by it.
+
+6 ANALYSIS
+To gain a deeper understanding of the method we perform three additional experiments on different tasks. We ask the following questions: (a) How important is the step loss? (b) What happens when the goal-reward is also available to our method? (c) How sensitive is HER and our method to the distance-threshold?
+How important is the step loss? We choose the Fetch-Push task for this experiment. We run our algorithm with no goal reward and without the step loss on this task. Results show that our algorithm fails to reach the goal when the step-loss is removed (Fig. 4a) showing it's necessity.
+What happens when the goal-reward is also available to our method? We run this experiment on the Fetch PickAndPlace task. We find that goal-rewards do not effect the performance of our algorithm further solidifying the avoidability of goal-reward (Fig 4b).
+How sensitive is HER and our method to the distance-threshold? In the absence of goalrewards, our algorithm is not to able capture distance threshold information that decides whether the agent has reached the goal or not. This information is available to HER. To understand the sensitivity of our algorithm and HER on this parameter, we vary it over 0.05 (the original HER value), 0.01 and 0.001 meters (Fig. 5). Results show that for the success-rate metric, which is itself a function of this parameter, both algorithms are affected equally (Fig. 5a). For the distance-from-goal, only HER is affected (Fig. 5b). This fits our expectations as set up in section 5.2.
+7 CONCLUSION
+In this work we pose a reinterpretation of goal-conditioned value functions and show that under this paradigm learning is possible in the absence of goal reward. This is a suprising result that runs counter to intuitions that underly most reinforcement learning algorithms. In future work, we will augment our method to incorporate the distance-threshold information to make the task easier to learn when the threshold is high. We hope that the experiments and results presented in this paper lead to a broader discussion about the assumptions actually required for learning multi-goal tasks.
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Marcin Andrychowicz, Misha Denil, Sergio Gomez, Matthew W Hoffman, David Pfau, Tom Schaul, Brendan Shillingford, and Nando De Freitas. Learning to learn by gradient descent by gradient descent. In Advances in Neural Information Processing Systems, pp. 3981­3989, 2016.
+Marcin Andrychowicz, Filip Wolski, Alex Ray, Jonas Schneider, Rachel Fong, Peter Welinder, Bob McGrew, Josh Tobin, OpenAI Pieter Abbeel, and Wojciech Zaremba. Hindsight experience replay. In Advances in Neural Information Processing Systems, pp. 5048­5058, 2017.
+Richard Bellman. The theory of dynamic programming. Technical report, RAND Corp Santa Monica CA, 1954.
+Prafulla Dhariwal, Christopher Hesse, Oleg Klimov, Alex Nichol, Matthias Plappert, Alec Radford, John Schulman, Szymon Sidor, Yuhuai Wu, and Peter Zhokhov. Openai baselines. https: //github.com/openai/baselines, 2017.
+Vikas Dhiman, Banerjee, Jeffrey M. Siskind, and Jason J. Corso. Floyd-warshall reinforcement learning: Learning from past experiences to reach new goals. arXiv preprint arXiv:1809.09318, 2018.
+Alexey Dosovitskiy and Vladlen Koltun. Learning to act by predicting the future. arXiv preprint arXiv:1611.01779, 2016.
+David Foster and Peter Dayan. Structure in the space of value functions. Machine Learning, 49 (2-3):325­346, 2002.
+Shixiang Gu, Ethan Holly, Timothy Lillicrap, and Sergey Levine. Deep reinforcement learning for robotic manipulation with asynchronous off-policy updates. In Robotics and Automation (ICRA), 2017 IEEE International Conference on, pp. 3389­3396. IEEE, 2017.
+Saurabh Gupta, James Davidson, Sergey Levine, Rahul Sukthankar, and Jitendra Malik. Cognitive mapping and planning for visual navigation. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), July 2017.
+Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+Piotr Mirowski, Razvan Pascanu, Fabio Viola, Hubert Soyer, Andrew J Ballard, Andrea Banino, Misha Denil, Ross Goroshin, Laurent Sifre, Koray Kavukcuoglu, et al. Learning to navigate in complex environments. arXiv preprint arXiv:1611.03673, 2016.
+Piotr Mirowski, Matthew Koichi Grimes, Mateusz Malinowski, Karl Moritz Hermann, Keith Anderson, Denis Teplyashin, Karen Simonyan, Koray Kavukcuoglu, Andrew Zisserman, and Raia Hadsell. Learning to navigate in cities without a map. arXiv preprint arXiv:1804.00168, 2018.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex Graves, Ioannis Antonoglou, Daan Wierstra, and Martin Riedmiller. Playing atari with deep reinforcement learning. arXiv preprint arXiv:1312.5602, 2013.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015a.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529, 2015b.
+Emilio Parisotto and Ruslan Salakhutdinov. Neural map: Structured memory for deep reinforcement learning. arXiv preprint arXiv:1702.08360, 2017.
+9
+
+Under review as a conference paper at ICLR 2019
+Matthias Plappert, Marcin Andrychowicz, Alex Ray, Bob McGrew, Bowen Baker, Glenn Powell, Jonas Schneider, Josh Tobin, Maciek Chociej, Peter Welinder, et al. Multi-goal reinforcement learning: Challenging robotics environments and request for research. arXiv preprint arXiv:1802.09464, 2018.
+Vitchyr Pong, Shixiang Gu, Murtaza Dalal, and Sergey Levine. Temporal difference models: Modelfree deep rl for model-based control. arXiv preprint arXiv:1802.09081, 2018.
+Tom Schaul, Daniel Horgan, Karol Gregor, and David Silver. Universal value function approximators. In International Conference on Machine Learning, pp. 1312­1320, 2015.
+Richard S Sutton, Andrew G Barto, et al. Reinforcement learning: An introduction. MIT press, 1998.
+Richard S Sutton, Joseph Modayil, Michael Delp, Thomas Degris, Patrick M Pilarski, Adam White, and Doina Precup. Horde: A scalable real-time architecture for learning knowledge from unsupervised sensorimotor interaction. In The 10th International Conference on Autonomous Agents and Multiagent Systems-Volume 2, pp. 761­768. International Foundation for Autonomous Agents and Multiagent Systems, 2011.
+Yuke Zhu, Roozbeh Mottaghi, Eric Kolve, Joseph J Lim, Abhinav Gupta, Li Fei-Fei, and Ali Farhadi. Target-driven visual navigation in indoor scenes using deep reinforcement learning. In Robotics and Automation (ICRA), 2017 IEEE International Conference on, pp. 3357­3364. IEEE, 2017.
+10
+
+Under review as a conference paper at ICLR 2019
+
+8 APPENDIX
+
+Algorithm 1: Path-reward reinforcement learning
+
+/* By default all states are unreachable Initialize networks Qm (si, ai, gj; Q) and (si, sg; ) ; Copy the main network to target network Qtgt (si, ai, gj; Q)  Qm (si, ai, gj; Q) ;
+Initialize replay memory M ; for e  1 to E do
+Sample ge  G ; Set t  0; Observe state st and achieved goal gt ;
+/* Episode rollout for t  1 to T do
+Take action at  -greedy(m(st, g; )) ; Observe st+1, gt+1, rt ; Store (st, gt, at, st+1, gt+1, rt; ge) in memory M [e] ;
+
+*/ */
+
+/* Train for t  1 to T do
+
+*/
+
+HER sample batch
+
+B = [(si, gi, ai, si+1, gi+1, ri; gi+fi ), . . . , (sb, gb, ab, sb+1, gb+1, rb; gb+fb )] from M ; L(. . . ) = 0 ;
+
+for b  1to|B| do
+
+(sb, gb, ab, sb+1, gb+1, rb, gb+fb ) = B[b] ;
+
+/* Step loss
+
+*/
+
+L(. . . )+ = (Qm (sb, ab, gb+1) - rb)2 ;
+
+/* DDPG loss
+
+*/
+
+L(. . . )+ = (Qm (sb, ab, gb+fb ) - rb - Qtgt (sb+1, tgt(sb+1, gb+fb ; ), gb+fb ))2 ;
+
+Update gradients for Qm and m using loss L(. . . );
+
+Result: Qm, m
+
+11
+
+

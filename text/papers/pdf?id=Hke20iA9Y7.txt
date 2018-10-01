@@ -1,0 +1,1846 @@
+Under review as a conference paper at ICLR 2019
+EFFICIENT TRAINING ON VERY LARGE CORPORA VIA GRAMIAN ESTIMATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We study the problem of learning similarity functions over very large corpora using neural network embedding models. These models are typically trained using SGD with random sampling of unobserved pairs, with a sample size that grows quadratically with the corpus size, making it expensive to scale. We propose new efficient methods to train these models without having to sample unobserved pairs. Inspired by matrix factorization, our approach relies on adding a global quadratic penalty and expressing this term as the inner-product of two generalized Gramians. We show that the gradient of this term can be efficiently computed by maintaining estimates of the Gramians, and develop variance reduction schemes to improve the quality of the estimates. We conduct large-scale experiments that show a significant improvement both in training time and generalization performance compared to sampling methods.
+1 INTRODUCTION
+We consider the problem of learning a similarity function h : X × Y  R, that maps each pair of items, represented by their feature vectors (x, y)  X × Y, to a real number h(x, y), representing their similarity. We will refer to x and y as the left and right feature vectors, respectively. Many problems can be cast in this form: In natural language processing, x represents a context (e.g. a bag of words), y represents a candidate word, and the target similarity measures the likelihood to observe y in context x (Mikolov et al., 2013; Pennington et al., 2014; Levy & Goldberg, 2014). In recommender systems, x represents a user query, y represents a candidate item to recommend, and the target similarity is a measure of relevance of item y to query x, e.g. a movie rating (Agarwal & Chen, 2009), or the likelihood to watch a given movie (Hu et al., 2008; Rendle, 2010). Other applications include image similarity, where x and y are pixel-representations of a pair of images (Bromley et al., 1993; Chechik et al., 2010; Schroff et al., 2015), and network embedding models (Grover & Leskovec, 2016; Qiu et al., 2018), where x and y are nodes in a graph and the similarity is wheter an edge
+A popular approach to learning similarity functions is to train an embedding representation of each item, such that items with high similarity are mapped to vectors that are close in the embedding space. A common property of such problems is that only a small subset of all possible pairs X × Y is present in the training set, and those examples typically have high similarity. Training exclusively on observed examples has been demonstrated to yield poor generalization performance. Intuitively, when trained only on observed pairs, the model places the embedding of a given item close to similar items, but does not learn to place it far from dissimilar ones (Shazeer et al., 2016; Xin et al., 2017). Taking into account unobserved pairs is known to improve the embedding quality in many applications, including recommendation (Hu et al., 2008; Yu et al., 2017) and word analogy tasks (Shazeer et al., 2016). This is often achieved by adding a low-similarity prior on all pairs, which acts as a repulsive force between all embeddings. But because it involves a number of terms quadratic in the corpus size, this term is computationally intractable (except in the linear case), and it is typically optimized using sampling: for each observed pair in the training set, a set of random unobserved pairs is sampled and used to compute an estimate of the repulsive term. But as the corpus size increases, the quality of the estimates deteriorates unless the sample size is increased, which limits scalability. In this paper, we address this issue by developing new methods to efficiently estimate the repulsive term.
+1
+
+Under review as a conference paper at ICLR 2019
+
+RELATED WORK
+Our approach is inspired by matrix factorization models, which correspond to the special case of linear embedding functions. They are typically trained using alternating least squares (Hu et al., 2008), or coordinate descent methods (Bayer et al., 2017), which circumvent the computational burden of the repulsive term by writing it as a matrix-inner-product of two Gramians, and computing the left Gramian before optimizing over the right embeddings, and vice-versa. Unfortunately, in non-linear embedding models, each update of the model parameters induces a simulateneous change in all embeddings, making it impractical to recompute the Gramians at each iteration. As a result, the Gramian formulation has been largely ignored in the non-linear setting. Instead, non-linear embedding models are trained using stochastic gradient methods with sampling of unobserved pairs, see Chen et al. (2016). In its simplest variant, the sampled pairs are taken uniformly at random, but more sophisticated schemes have been proposed, such as adaptive sampling (Bengio & Senecal, 2008; Bai et al., 2017), and importance sampling (Bengio & Senecal, 2003; Mikolov et al., 2013) to account for item frequencies. We also refer to Yu et al. (2017) for a comparative study of sampling methods in recommender systems. Vincent et al. (2015) were, to our knowledge, the first to attempt leveraging the Gramian formulation in the non-linear case. They consider a model where only one of the embedding functions is non-linear, and show that the gradient can be computed efficiently in that case. Their result is remarkable in that it allows exact gradient computation, but this unfortunately does not generalize to the case where both embedding functions are non-linear.
+OUR CONTRIBUTIONS
+We propose new methods that leverage the Gramian formulation in the non-linear case, and that, unlike previous approaches, are efficient even when both left and right embeddings are non-linear. Our methods operate by maintaining stochastic estimates of the Gram matrices, and using different variance reduction schemes to improve the quality of the estimates. We perform several experiments that show these methods scale far better than traditional sampling approaches on very large corpora. We start by reviewing preliminaries in Section 2, then derive the Gramian-based methods and analyze them in Section 3. We conduct large-scale experiments on the Wikipedia dataset in Section 4, and provide additional experiments in the appendix. All the proofs are deferred to Appendix A.
+
+2 PRELIMINARIES
+
+2.1 NOTATION AND PROBLEM FORMULATION
+
+We consider models that consist of two embedding functions u : Rd ×X  Rk and v : Rd ×Y  Rk, which map a parameter vector1   Rd and feature vectors x, y to embeddings u(, x), v(, y)  Rk. The output of the model is the dot product2 of the embeddings h(x, y) = u(, x), v(, y) , where ·, · denotes the usual inner-product on Rk. Low-rank matrix factorization is a special case, in which the left and right embedding functions are linear in x and y. Figure 1 illustrates a non-linear model, in which each embedding function is given by a feed-forward neural network.3
+
+We denote the training set by T = {(xi, yi, si)  X × Y × R}i{1,...,n}, where xi, yi are the feature vectors and si is the target similarity for example i. To make notation more compact, we will use ui(), vi() as a shorthand for u(, xi), v(, yi), respectively. As discussed in the introduction, we also assume that we are given a low-similarity prior pij  R for all pairs (i, j)  {1, . . . , n}2. Given a differentiable scalar loss function : R × R  R, the objective function is given by
+
+1n min Rd n i=1
+
+n ( ui(), vi() , si) + n2
+
+n
+( ui(), vj() - pij)2,
+
+i=1 j=1
+
+(1)
+
+where the first term measures the loss on observed data, the second term penalizes deviations from the
+
+prior, and  is a positive hyper-parameter that trades-off the two terms. To simplify the discussion, we
+
+1In many applications, it is desirable for the two embedding functions u, v to share certain parameters, e.g.
+embeddings of categorical features common to left and right items; hence, we use the same  for both. 2This also includes cosine similarity models when the embedding functions u, v are normalized. 3We focus on models with this dot-product structure since they allow efficient retrieval: given x  X , finding
+items y  Y with high similarity to x reduces to a maximum inner-product search problem (MIPS), which can
+be approximated efficiently (Shrivastava & Li, 2014; Neyshabur & Srebro, 2015).
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+· h(x, y) = u(, x), v(, y)
+
+u(, x)  Rk xX
+
+...
+... u(, ·)
+...
+...
+
+...
+... v(, ·)
+...
+...
+
+v(, x)  Rk yY
+
+Figure 1: A dot-product embedding model for a similarity function on X × Y.
+
+will assume a uniform zero prior pij as in (Hu et al., 2008), the general case is treated in Appendix B. To optimize this objective, existing methods rely on sampling to approximate the second term, and are usually referred to as negative sampling or candidate sampling, see Chen et al. (2016); Yu et al. (2017) for a survey. Due to the double sum in (1), the quality of the sampling estimates degrades as the corpus size increases, which can significantly increase training times. This can be alleviated by increasing the sample size, but does not scale to very large corpora.
+
+2.2 GRAMIAN FORMULATION
+
+A different approach to solving (1), widely popular in matrix factorization, is to rewrite the double sum as the inner product of two Gram matrices. Let us denote by U  Rn×k the matrix of all left embeddings such that ui() is the i-th row of U, and similarly for V  Rn×k. Then denoting the matrix inner-product by A, B = i,j AijBij, we can rewrite the double sum in (1) as:
+
+g()
+
+:=
+
+1 n2
+
+n
+
+n
+
+(U V
+
+)2ij
+
+=
+
+1 n2
+
+UV , UV
+
+i=1 j=1
+
+.
+
+(2)
+
+Now, using the adjoint property of the inner product, we have UV , UV = U U, V V , and if we denote by u  u the outer product of a vector u by itself, and define the Gram matrices
+
+11 Gu() := n U U = n
+
+n
+
+ui()  ui(),
+
+i=1
+
+11 Gv() := n V V = n
+
+n
+
+vi()  vi(),
+
+i=1
+
+(3)
+
+the penalty term becomes
+
+g() = Gu(), Gv() .
+
+(4)
+
+The Gramians are k × k PSD matrices, where k, the dimension of the embedding space, is much
+
+smaller than n ­ typically k is smaller than 1000, while n can be arbitrarily large. Thus, the Gramian
+
+formulation (4) has a much lower computational complexity than the double sum formulation (2), and
+
+this reformulation is at the core of alternating least squares and coordinate descent methods (Hu et al.,
+
+2008; Bayer et al., 2017), which operate by computing the exact Gramian for one side, and solving
+
+for the embeddings on the other. However, these methods do not apply in the non-linear setting due
+
+to the implicit dependence on , as a change in the model parameters simultaneously changes all
+
+embeddings on both sides, making it intractable to recompute the Gramians at each iteration, so the
+
+Gramian formulation has not been used when training non-linear models. In the next section, we
+
+show that it can in fact be leveraged in the non-linear case.
+
+3 TRAINING EMBEDDING MODELS USING GRAMIAN ESTIMATES
+
+We start by rewriting the objective function (1) in terms of the Gramians defined in (3). Let
+
+fi() := ( ui(), vi() , si)
+
+(5)
+
+1
+
+gi()
+
+:=
+
+[ 2
+
+ui(), Gv()ui()
+
++
+
+vi(), Gu()vi() ],
+
+(6)
+
+then
+
+(1)
+
+is
+
+equivalent
+
+to
+
+1 n
+
+ni=1[fi() + gi()]. Intuitively, for each example i, -fi() pulls the
+
+embeddings ui and vi close to each other (assuming a high similarity si), while -gi() creates a
+
+repulsive force between ui and all embeddings {vj}j{1,...,n}, and between vi and all {uj}j{1,...,n},
+
+see Appendix C for further discussion, and illustration of the effect of this term.
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+While the Gramians are expensive to recompute at each iteration, we can maintain PSD estimates G^u, G^v of the true Gramians Gu(), Gv(). Then the gradient of g() (equation (2)) can be approximated by the gradient (w.r.t. ) of
+
+g^i(, G^u, G^v) := ui(), G^vui() + vi(), G^uvi() ,
+
+(7)
+
+as stated in the following proposition.
+Proposition 1. If i is drawn uniformly in {1, . . . , n}, and G^u, G^v are unbiased estimates of Gu(), Gv() and independent of i, then g^i(, G^u, G^v) is an unbiased estimate of g().
+
+In a mini-batch setting, one can further average g^i over a batch of examples i  B (which we do in our experiments), but we will omit batches to keep the notation concise. Next, we propose several methods for computing Gramian estimates G^u, G^v, and discuss their tradeoffs.
+
+3.1 STOCHASTIC AVERAGE GRAMIAN
+
+Inspired by variance reduction for Monte Carlo integrals (Hammersley & Handscomb, 1964; Evans
+
+& Swartz, 2000), many variance reduction methods have been developed for stochastic optimization.
+
+In particular, stochastic average gradient methods (Schmidt et al., 2017; Defazio et al., 2014) work
+
+by maintaining a cache of individual gradients, and estimating the full gradient using this cache.
+
+Since each Gramian is a sum of outer-products (see equation (3)), we can apply the same technique
+
+to estimate Gramians. For all i  {1, . . . , n}, let u^i, v^i be a cache of the left and right embeddings
+
+respectively. We will denote by a superscript (t) the value of a variable at iteration t. Let S^u(t) =
+
+1 n
+
+n i=1
+
+u^i(t)
+
+
+
+u^(it),
+
+which
+
+corresponds
+
+to
+
+the
+
+Gramian
+
+computed
+
+with
+
+the
+
+current
+
+caches.
+
+At
+
+each
+
+iteration t, an example i is drawn uniformly at random and the estimate of the Gramian is given by
+
+G^(ut) = S^u(t) + [ui((t))  ui((t)) - u^(it)  u^i(t)],
+
+(8)
+
+and similarly for G^(vt). This is summarized in Algorithm 1, where the model parameters are updated
+
+using SGD (line 10), but this update can be replaced with any first-order method. Here  can take
+
+one
+
+of
+
+the
+
+following
+
+values:
+
+
+
+=
+
+1 n
+
+,
+
+following
+
+SAG (Schmidt
+
+et al., 2017), or 
+
+=
+
+1,
+
+following
+
+SAGA (Defazio et al., 2014). The choice of  comes with trade-offs that we briefly discuss below.
+
+We will denote the cone of positive semi-definite k × k matrices by S+k .
+
+Proposition 2.
+
+Suppose 
+
+=
+
+1 n
+
+in (8).
+
+Then for all t, G^(ut), G^v(t)
+
+ S+k .
+
+Proposition 3. Suppose  = 1 in (8). Then for all t, G^(ut) is an unbiased estimate of Gu((t)).
+
+While taking  = 1 gives an unbiased estimate, note that it does not guarantee that the estimates
+remain in S+k . In practice, this can cause numerical issues, but can be avoided by projecting G^u, G^v on S+k , using their eigenvalue decompositions. The per-iteration cost of maintaining the Gramian
+
+Algorithm 1 SAGram (Stochastic Average Gramian)
+
+1: Input: Training data {(xi, yi, si)}i{1,...,n}, learning rate  > 0.
+
+2: Initialization phase
+
+3: draw  randomly
+
+4: u^i  ui(), v^i  vi() i  {1, . . . , n}
+
+5:
+
+S^u
+
+
+
+1 n
+
+n i=1
+
+u^i
+
+
+
+u^i,
+
+S^v
+
+
+
+1 n
+
+n i=1
+
+v^i
+
+
+
+v^i
+
+6: repeat
+
+7: Update Gramian estimates (i  Uniform(n))
+
+8: G^u  S^u + [ui()  ui() - u^i  u^i], G^v  S^v + [vi()  vi() - v^i  v^i] 9: Update model parameters then update caches (i  Uniform(n))
+
+10:    - [fi() + g^i(, G^u, G^v)]
+
+11: 12:
+
+S^u u^i
+
+ S^u +  ui(),
+
+n1v^[iui(v)i()ui()
+
+-
+
+u^i
+
+
+
+u^i],
+
+S^v
+
+
+
+S^v
+
++
+
+1 n
+
+[vi
+
+()
+
+
+
+vi()
+
+-
+
+v^i
+
+
+
+v^i]
+
+13: until stopping criterion
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+estimates is O(k) to update the caches, O(k2) to update the estimates S^u, S^v, G^u, G^v, and O(k3) for projecting on S+k . Given the small size of the embedding dimension k, O(k3) remains tractable. The memory cost is O(nk), since each embedding needs to be cached (plus a negligible O(k2) for storing
+the Gramian estimates). This makes SAGram much less expensive than applying the original SAG(A) methods, which require maintaining caches of the gradients, this would incur a O(nd) memory cost,
+where d is the number of parameters of the model, and can be orders of magnitude larger than the embedding dimension k. However, O(nk) can still be prohibitively expensive when n is very large.
+In the next section, we propose a different method which does not incur this additional memory cost.
+
+3.2 STOCHASTIC ONLINE GRAMIAN
+
+To derive the second method, we reformulate problem (1) as a two-player game. The first player
+optimizes over the parameters of the model , the second player optimizes over the Gramian estimates G^u, G^v  S+k , and they seek to minimize the respective losses
+
+L1G^u,G^v ()
+
+=
+
+1 n
+
+in=1[fi() + g^i(, G^u, G^v)]
+
+L2(G^u, G^v)
+
+=
+
+1 2
+
+G^u - Gu()
+
+2 F
+
++
+
+1 2
+
+G^v - Gv()
+
+2 F
+
+,
+
+(9)
+
+where g^i is defined in (7), and · F denotes the Frobenius norm. To justify this reformulation, we can characterize its first-order stationary points, as follows.
+
+Proposition 4. (, G^u, G^v)  Rd × S+k × S+k is a first-order stationary point for (9) if and only if  is a first-order stationary point for problem (1) and G^u = Gu(), G^v = Gv().
+
+Several stochastic first-order dynamics can be applied to problem (9), and Algorithm 2 gives a simple
+
+instance where each player implements SGD with a constant learning rate. In this case, the updates of
+the Gramian estimates (line 7) have a particularly simple form, since G^u L2(G^u, G^v) = G^u -Gu() and can be estimated by G^u - ui()  ui(), resulting in the update
+
+G^u(t) = (1 - )G^u(t-1) + ui((t))  ui((t)),
+
+(10)
+
+and similarly for G^v. One advantage of this form is that each update performs a convex combination
+between the current estimate and a rank-1 PSD matrix, thus guaranteeing that the estimates remain in S+k , without the need to project. The per-iteration cost of updating the estimates is O(k2), and the memory cost is O(k2) for storing the Gramians, which are both negligible.
+
+Algorithm 2 SOGram (Stochastic Online Gramian)
+1: Input: Training data {(xi, yi, si)}i{1,...,n}, learning rates  > 0,   (0, 1). 2: Initialization phase 3: draw  randomly, G^u, G^v  0k×k 4: repeat 5: Update Gramian estimates (i  Uniform) 6: G^u  (1 - )G^u + ui()  ui(), G^v  (1 - )G^v + vi()  vi() 7: Update model parameters (i  Uniform) 8:    - [fi() + g^i(, G^u, G^v)] 9: until stopping criterion
+
+The update (10) can also be interpreted as computing an online estimate of the Gramian by averaging
+
+rank-1 terms with decaying weights, thus we call the method Stochastic Online Gramian. Indeed,
+
+we have by induction on t, G^(ut) =
+
+t  =1
+
+(1
+
+-
+
+)t-
+
+ui
+
+(( ) )
+
+
+
+ui
+
+(( ) ).
+
+Intuitively,
+
+averaging
+
+reduces the variance of the estimator but introduces a bias, and the choice of the hyper-parameter 
+
+trades-off bias and variance. The next proposition quantifies this tradeoff under mild assumptions.
+
+Proposition 5. Let G¯(ut) =
+
+t  =1
+
+(1
+
+-
+
+)t-
+
+Gu (( ) ).
+
+Suppose
+
+that
+
+there
+
+exist
+
+,
+
+
+
+>
+
+0
+
+such
+
+that
+
+for all t, Ei
+
+ui((t))
+
+ ui((t)) - Gu((t))
+
+E
+
+G^u(t) - G¯(ut)
+
+2 F
+
+
+
+2 F
+2
+
+ 2 and 
+2-
+
+Gu((t+1)) - Gu((t)) F  . Then t, (11)
+
+G¯u(t) - Gu(t) F  (1/ - 1) + (1 - )t G(ut) F .
+
+(12)
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+The first assumption simply bounds the variance of single-point estimates, while the second bounds the distance between two consecutive Gramians, a reasonable assumption, since in practice the changes in Gramians vanish as the trajectory () converges. In the limiting case  = 1, G^(ut) reduces to a single-point estimate, in which case the bias (12) vanishes and the variance (11) is maximal, while smaller values of  decrease variance and increase bias. This is confirmed in our experiments, as discussed in Section 4.2.
+
+3.3 COMPARISON WITH EXISTING STOCHASTIC METHODS
+
+We conclude this section by showing that candidate sampling methods (see Chen et al. (2016); Yu et al. (2017) for recent surveys) can be reinterpreted in terms of the Gramian formulation (4). These methods work by approximating the double-sum in (1) using a random sample of pairs. Suppose a batch of pairs (i, j)  B × B is sampled, and the double sum is approximated by
+
+1 g~() = |B||B |
+
+µij ui(), vj() 2 ,
+
+iB jB
+
+(13)
+
+where µi, j are the inverse probabilities of sampling i, j respectively (to guarantee that the estimate is unbiased). Then applying a similar transformation to Section 2.2, one can show that
+
+1 g~() = |B|
+
+µiui()
+
+
+
+ui(),
+
+1 |B
+
+|
+
+jvj()  vj() .
+
+iB
+
+jB
+
+(14)
+
+which is equivalent to computing two batch-estimates of the Gramians. Implementing existing
+methods using (14) rather than (13) can decrease their computional complexity in the large batch regime, for the following reason: the double-sum formulation (13) involves a sum of |B||B | dot products of vectors in Rk, thus computing its gradient costs O(k|B||B |). On the other hand, the Gramian formulation (14) is the inner product of two k × k matrices, each involving a sum over the batch, thus computing its gradient costs O(k2 max(|B|, |B |)), which is cheaper when the batch size is larger than the embedding dimension k, a common situation in practice. With this formulation,
+the advantage of SOGram and SAGram becomes clear, as they use more embeddings to estimate
+Gramians (by caching or online averaging) than would be possible using candidate sampling.
+
+4 EXPERIMENTS
+
+In this section, we conduct large-scale experiments on the Wikipedia dataset (Wikimedia Foundation). Additional experiments on MovieLens (Harper & Konstan, 2015) are given in Appendix E.
+
+4.1 EXPERIMENTAL SETUP
+
+Datasets We consider the problem of learning the intra-site links between Wikipedia pages. Given a pair of pages (x, y)  X × X , the target similarity is 1 if there is a link from x to y, and 0 otherwise. Here a page is represented by a feature vector x = (xid, xngrams, xcats), where xid is (a one-hot encoding of) the page URL, xngrams is a bag-of-words representation of the set of n-grams of the page's title, and xcats is a bag-of-words representation of the categories the page belongs to. Note that the left and right feature spaces coincide in this case, but the target similarity is not necessarily
+symmetric (the links are directed edges). We carry out experiments on subsets of the Wikipedia graph
+corresponding to three languages: Simple English, French, and English, denoted respectively by
+simple, fr, and en. These subgraphs vary in size, and Table 1 shows some basic statistics for each
+set. Each set is partitioned into training and validation using a (90%, 10%) split.
+
+language simple fr en
+
+# pages 85K 1.8M 5.3M
+
+# links 4.6M 142M 490M
+
+# ngrams 8.3K
+167.4K 501.0K
+
+# cats 6.1K 125.3K 403.4K
+
+Table 1: Corpus sizes for each training set.
+Models We train non-linear embedding models consisting of a two-tower neural network as in Figure 1, where the left and right embedding functions map, respectively, the source and destination
+
+6
+
+Under review as a conference paper at ICLR 2019
+
+page features. The two embedding networks have the same structure: the input feature embeddings are concatenated then mapped through two hidden layers with ReLU activations. The input embeddings are shared between the two networks, and their dimensions are 50 for simple, 100 for fr, and 120 for en. The sizes of the hidden layers are [256, 64] for simple and [512, 128] for fr and en.
+
+Training methods The model is trained using a squared error loss,
+
+(s, s
+
+)
+
+=
+
+1 2
+
+(s
+
+-
+
+s
+
+)2,
+
+optimized
+
+using SAGram, SOGram, and as baseline, SGD with candidate sampling, using different sampling
+
+strategies. We use a learning rate  = 0.01 and a weight coefficient  = 10 (cross-validated). All
+
+of the methods use a batch size 1024. For SAGram and SOGram, a batch B is used in the Gramian
+
+updates (line 8 in Algorithm 1 and line 7 in Algorithm 2, where we use a sum of rank-1 terms over
+
+the batch), and another batch B is used in the model parameter update. For the sampling baselines,
+
+the double sum is approximated by all pairs in the cross product (i, j)  B × B , and for efficiency,
+
+we implement them using the Gramian formulation as discussed in Section 3.3, since we operate
+
+in a regime where the batch size is an order of magnitude larger than the embedding dimension k.
+
+In the first baseline method, uniform, items are sampled uniformly from the vocabulary (all
+
+pages are sampled with the same probability). The other baseline methods implement importance
+
+sampling similarly to Bengio & Senecal (2003); Mikolov et al. (2013): in linear, the probability is
+
+proportional to the number of occurrences of the page in the training set, and in sqrt, the probability
+
+is proportional to the square root of the number of occurrences.
+
+1.0 |B| = 128
+0.8 0.6
+
+1.0
+
+|B| = 1024
+uniform sampling
+
+1.0
+
+linear sampling
+
+0.8
+
+sqrt sampling SOGram,  = 0. 1
+
+0.8
+
+SAGram,  = 1/n
+
+SAGram,  = 1
+
+0.6 0.6
+
+|B| = 1024 SOGram  = 0. 001 SOGram  = 0. 005 SOGram  = 0. 01 SOGram  = 0. 1
+
+^G(t) - G (t) F/ G (t) F ^G(t) - G (t) F/ G (t) F
+
+0.4 0.4 0.4
+
+0.2 0.2 0.2
+
+0.0 0.0
+0 2 4 hours 6 8 10 0 2 4 hours 6 8 10
+
+0.5 1.0 ho1u.5rs 2.0 2.5 3.0
+
+(a) SAGram, SOGram and SGD with different sampling strategies. (b) SOGram with different averaging rates.
+
+Figure 2: Gramian estimation error on a common trajectory ((t)).
+
+4.2 QUALITY OF GRAMIAN ESTIMATES
+
+In the first set of experiments, we evaluate the quality of the Gramian estimates using each method.
+
+In order to have a meaningful comparison, we fix a trajectory of model parameters ((t))t{1,...,T },
+
+and evaluate how well each method tracks the true Gramians Gu((t)), Gv((t)) on that common
+
+trajectory. This experiment is done on Wikipedia simple (the smallest of the datasets) so that we can
+
+compute the exact Gramians by periodically computing the embeddings ui((t)), vi((t)) on the full
+
+training set at a given time t. We report in Figure 2 the estimation error for each method, measured by
+
+the normalized Frobenius distance
+
+G^ u(t) -Gu ((t) ) Gu((t)) F
+
+F.
+
+In Figure 2a, we can observe that both variants
+
+of SAGram yield the best estimates, and that SOGram yields better estimates than the baselines.
+
+Among the baseline methods, importance sampling (both linear and sqrt) perform better than
+
+uniform. We also vary the batch size to evaluate its impact: increasing the batch size from 128
+
+to 1024 improves the quality of all estimates, as expected, but it is worth noting that the estimates
+
+of SOGram with |B| = 128 have comparable quality to baseline estimates with |B| = 1024. In
+
+Figure 2b, we evaluate the bias-variance tradeoff discussed in Section 3.2, by comparing the estimates
+
+of SOGram with different learning rates . We observe that higher values of  suffer from higher
+
+variance which persists throughout the trajectory. A lower  reduces the variance but introduces a
+
+bias, which is mostly visible during the early iterations.
+
+4.3 IMPACT ON TRAINING SPEED AND GENERALIZATION QUALITY
+In order to evaluate the impact of the Gramian estimation quality on training speed and generalization, we compare the validation performance of SOGram to the sampling baselines, on each dataset (we
+
+7
+
+Under review as a conference paper at ICLR 2019
+
+Batch MAP@10 Batch MAP@10 Batch MAP@10
+
+do not use SAGram due to its prohibitive memory cost for corpus sizes of 1M or more). The models are trained with a fixed time budget of 20 hours for simple, 30 hours for fr and 50 hours for en. We estimate the mean average precision (MAP) at 10, by scoring, every 5 minutes, left items in the validation set against 50K random candidates (exhuastively scoring all candidates is prohibitively expensive at this scale, but this gives a reasonable approximation). The results are reported in Figure 3. Compared to the candidate-sampling baselines, SOGram exhibits faster training and better validation performance across all sampling strategies. Table 2 summarizes the relative improvement of the final validation MAP.
+
+0.032 0.18
+
+0.030 0.11 0.16
+0.028
+0.10 0.026 0.14
+
+0.024 0.09
+
+0.022 0.020 0.018
+
+uniform sampling uniform SOGram ( = 0. 01) sqrt sampling sqrt SOGram ( = 0. 01) linear sampling
+
+0.08 0.07
+
+uniform sampling uniform SOGram ( = 0. 01) sqrt sampling sqrt SOGram ( = 0. 1) linear sampling
+
+0.12 0.10
+
+uniform sampling SOGram uniform ( = 0. 01) sqrt sampling sqrt SOGram ( = 0. 01) linear sampling
+
+0.016 0
+
+5
+
+linear SOGram ( = 0. 1)
+
+ho1u0rs
+
+15
+
+20
+
+0.06 0
+
+5
+
+10
+
+linear SOGram ( = 0. 001)
+
+ho1u5rs
+
+20
+
+25
+
+30
+
+0.08 0
+
+10
+
+SOGram linear ( = 0. 001) 20 hours 30 40 50
+
+Figure 3: Mean average precision at 10 on the validation set, for different methods, on simple (left), fr (middle), and en (right). The dashed lines correspond to the baseline methods, and the solid lines to SOGram. The different colors represent different sampling strategies.
+
+language
+simple fr en
+
+uniform sampling
+0.0255 0.1056 0.1586
+
+uniform SOGram
+0.0266 (+4.2%) 0.1194 (+13.0%) 0.1743 (+9.9%)
+
+sqrt sampling
+0.0247 0.1047 0.1543
+
+sqrt SOGram
+0.0268 (+8.3%) 0.1144 (+9.2%) 0.1723 (+11.7%)
+
+linear sampling
+0.0272 0.1004 0.1504
+
+linear SOGram
+0.0300 (+10.7%) 0.1154 (+15.0%) 0.1797 (19.5%)
+
+Table 2: Final validation MAP on each dataset, and relative improvement compared to the baselines.
+
+The improvement on simple is modest (between 4% and 10%), which can be explained by the relatively small corpus size (85K unique pages), in which case candidate sampling with a large batch size already yields decent estimates. On the larger corpora, we obtain more significant improvements: between 9% and 15% on fr and between 9% and 19% on en. It's interesting to observe that the best performance is consistently achieved by SOGram with linear importance sampling, even though linear performs slightly worse than other strategies in the baseline. SOGram also has a significant impact on training speed: if we measure the time it takes for SOGram to exceed the final validation performance of each baseline method, this time represents a small fraction of the total budget. In our experiments, this fraction is between 10% and 17% for simple, between 23% and 30% for fr, and between 16% and 24% for en. Additional numerical results are provided in Appendix D, where we evaluate the impact of other parameters, such as the effect of batch size and the Gramian learning rate .
+
+5 CONCLUSION
+We showed that the Gramian formulation commonly used in low-rank matrix factorization can be leveraged for training non-linear embedding models, by maintaining estimates of the Gram matrices and using them to estimate the gradient. By applying variance reduction techniques to the Gramians, one can improve the quality of the gradient estimates, without relying on large sample size as is done in traditional sampling methods. This leads to a significant impact on training time and generalization quality, as indicated by our experiments. An important direction of future work is to extend this formulation to a larger family of penalty functions, such as the spherical loss family studied in (Vincent et al., 2015; de Bre´bisson & Vincent, 2016).
+
+8
+
+Under review as a conference paper at ICLR 2019
+REFERENCES
+Deepak Agarwal and Bee-Chung Chen. Regression-based latent factor models. In Proceedings of the 15th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, KDD '09, pp. 19­28, New York, NY, USA, 2009. ACM.
+Yu Bai, Sally Goldman, and Li Zhang. Tapas: Two-pass approximate adaptive sampling for softmax. CoRR, abs/1707.03073, 2017.
+Immanuel Bayer, Xiangnan He, Bhargav Kanagal, and Steffen Rendle. A generic coordinate descent framework for learning from implicit feedback. In Proceedings of the 26th International Conference on World Wide Web, WWW '17, pp. 1341­1350, 2017.
+Yoshua Bengio and Jean-Se´bastien Senecal. Quick training of probabilistic neural nets by importance sampling. In Proceedings of the Ninth International Workshop on Artificial Intelligence and Statistics, AISTATS 2003, Key West, Florida, USA, January 3-6, 2003, 2003.
+Yoshua Bengio and Jean-Se´bastien Senecal. Adaptive importance sampling to accelerate training of a neural probabilistic language model. IEEE Trans. Neural Networks, 19(4):713­722, 2008.
+Jane Bromley, James W. Bentz, Le´on Bottou, Isabelle Guyon, Yann LeCun, Cliff Moore, Eduard Sa¨ckinger, and Roopak Shah. Signature verification using a "siamese" time delay neural network. International Journal of Pattern Recognition and Artificial Intelligence, 7(4):669­688, 1993.
+Gal Chechik, Varun Sharma, Uri Shalit, and Samy Bengio. Large scale online learning of image similarity through ranking. J. Mach. Learn. Res., 11:1109­1135, March 2010.
+Wenlin Chen, David Grangier, and Michael Auli. Strategies for training large vocabulary neural language models. In Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics, ACL 2016, 2016.
+Alexandre de Bre´bisson and Pascal Vincent. An exploration of softmax alternatives belonging to the spherical loss family. CoRR, abs/1511.05042, 2016.
+Aaron Defazio, Francis Bach, and Simon Lacoste-Julien. Saga: A fast incremental gradient method with support for non-strongly convex composite objectives. In Z. Ghahramani, M. Welling, C. Cortes, N. D. Lawrence, and K. Q. Weinberger (eds.), Advances in Neural Information Processing Systems 27, pp. 1646­1654. Curran Associates, Inc., 2014.
+M. Evans and T. Swartz. Approximating Integrals via Monte Carlo and Deterministic Methods. Oxford Statistical Science Series. Oxford University Press, Oxford, 2000.
+Aditya Grover and Jure Leskovec. Node2vec: Scalable feature learning for networks. In Proceedings of the 22Nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, KDD '16, pp. 855­864, New York, NY, USA, 2016. ACM. ISBN 978-1-4503-4232-2.
+J.M. Hammersley and D.C. Handscomb. Monte Carlo Methods. Monographs on Applied Probability and Statistics Series. John Wiley & Sons, Incorporated, 1964.
+F. Maxwell Harper and Joseph A. Konstan. The movielens datasets: History and context. ACM Transactions on Interactive Intelligent Systems, 2015.
+Yifan Hu, Yehuda Koren, and Chris Volinsky. Collaborative filtering for implicit feedback datasets. In Proceedings of the 2008 Eighth IEEE International Conference on Data Mining, ICDM '08, pp. 263­272, 2008.
+Omer Levy and Yoav Goldberg. Neural word embedding as implicit matrix factorization. In Z. Ghahramani, M. Welling, C. Cortes, N. D. Lawrence, and K. Q. Weinberger (eds.), Advances in Neural Information Processing Systems 27, pp. 2177­2185. Curran Associates, Inc., 2014.
+Tomas Mikolov, Kai Chen, Greg Corrado, and Jeffrey Dean. Efficient estimation of word representations in vector space. CoRR, abs/1301.3781, 2013.
+9
+
+Under review as a conference paper at ICLR 2019
+Behnam Neyshabur and Nathan Srebro. On symmetric and asymmetric lshs for inner product search. In Proceedings of the 32Nd International Conference on International Conference on Machine Learning - Volume 37, ICML'15, pp. 1926­1934. JMLR.org, 2015.
+Jeffrey Pennington, Richard Socher, and Christopher D. Manning. Glove: Global vectors for word representation. In Empirical Methods in Natural Language Processing (EMNLP), pp. 1532­1543, 2014.
+Jiezhong Qiu, Yuxiao Dong, Hao Ma, Jian Li, Kuansan Wang, and Jie Tang. Network embedding as matrix factorization: Unifying deepwalk, line, pte, and node2vec. In Proceedings of the Eleventh ACM International Conference on Web Search and Data Mining, WSDM '18, pp. 459­467, New York, NY, USA, 2018. ACM. ISBN 978-1-4503-5581-0.
+Steffen Rendle. Factorization machines. In Proceedings of the 2010 IEEE International Conference on Data Mining, ICDM '10, pp. 995­1000, Washington, DC, USA, 2010. IEEE Computer Society.
+Mark Schmidt, Nicolas Le Roux, and Francis Bach. Minimizing finite sums with the stochastic average gradient. Math. Program., 162(1-2):83­112, March 2017.
+F. Schroff, D. Kalenichenko, and J. Philbin. Facenet: A unified embedding for face recognition and clustering. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 815­823, June 2015.
+Noam Shazeer, Ryan Doherty, Colin Evans, and Chris Waterson. Swivel: Improving embeddings by noticing what's missing. CoRR, abs/1602.02215, 2016.
+Anshumali Shrivastava and Ping Li. Asymmetric lsh (alsh) for sublinear time maximum inner product search (mips). In Proceedings of the 27th International Conference on Neural Information Processing Systems - Volume 2, NIPS'14, pp. 2321­2329, Cambridge, MA, USA, 2014. MIT Press.
+Pascal Vincent, Alexandre de Bre´bisson, and Xavier Bouthillier. Efficient exact gradient update for training deep networks with very large sparse targets. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett (eds.), Advances in Neural Information Processing Systems 28, pp. 1108­1116. Curran Associates, Inc., 2015.
+Wikimedia Foundation. Wikimedia downloads. https://dumps.wikimedia.org/. Doris Xin, Nicolas Mayoraz, Hubert Pham, Karthik Lakshmanan, and John R. Anderson. Folding:
+Why good models sometimes make spurious recommendations. In Proceedings of the Eleventh ACM Conference on Recommender Systems, RecSys '17, pp. 201­209, New York, NY, USA, 2017. ACM. Hsiang-Fu Yu, Mikhail Bilenko, and Chih-Jen Lin. Selection of negative samples for one-class matrix factorization. In Proceedings of the 2017 SIAM International Conference on Data Mining, pp. 363­371, 2017. Xu Zhang, Felix X. Yu, Sanjiv Kumar, and Shih-Fu Chang. Learning spread-out local feature descriptors. In IEEE International Conference on Computer Vision, ICCV 2017, Venice, Italy, October 22-29, 2017, pp. 4605­4613, 2017.
+10
+
+Under review as a conference paper at ICLR 2019
+
+A PROOFS
+
+Proof of Proposition 1. Starting from the expression (6) of g() = Gu(), Gv() , and applying the chain rule, we have
+
+g() =  Gu(), Gv() = Ju()[Gv()] + Jv()[Gu()],
+
+(15)
+
+where Ju() denotes the Jacobian of Gu(), an order-three tensor given by
+
+Ju()l,i,j
+
+=
+
+Gu()i,j , l
+
+l  {1, . . . , d}, i, j  {1, . . . , n},
+
+and Ju()[Gv()] denotes the vector [ i,j Ju()l,i,j Gv()i,j ]l{1,...,d}.
+
+Observing that g^i(, G^u, G^v) = G^u, ui()  ui() + G^v, vi()  vi() , and applying the
+
+chain rule, we have
+
+g^i(, G^u, G^v) = Ju,i()[G^v] + Jv,i()[G^u],
+
+where Ju,i() is the Jacobian of ui()  ui(), and
+
+(16)
+
+iUEniform[Ju,i()]
+
+=
+
+1 n
+
+n
+
+Ju,i() = Ju(),
+
+i=1
+
+an similarly for Jv,i. We conclude by taking expectations in (16) and using assumption that G^u, G^v are independent of i.
+
+Proof of Proposition 2. From (8) and the definition of S^u(t), we have,
+
+G^ u(t)
+
+=
+
+1 n
+
+u^j(t)
+
+
+
+u^j(t)
+
++
+
+1 n
+
+ui((t))
+
+
+
+ui((t)),
+
+j=i
+
+which is a sum of matrices in the PSD cone S+k .
+
+Proof of Proposition 3. Denoting by (Ft)t0 the filtration generated by the sequence ((t))t0, and taking conditional expectations in (8), we have
+
+E[G^(ut)|Ft]
+
+=
+
+S^u(t)
+
++
+
+E [ui((t))
+iUniform
+
+
+
+ui((t))
+
+-
+
+u^(it)
+
+
+
+u^i(t)|Ft]
+
+=
+
+S^u(t)
+
++
+
+1 n
+
+n
+[ui((t))  ui((t)) - u^i  u^i]
+
+i=1
+
+1 =
+n
+
+n
+
+ui((t))  ui((t)) = Gu((t)).
+
+i=1
+
+Proof of Proposition 4. (, G^u, G^v)  Rd × S+k × S+k is a first-order stationary point of the game if and only if
+
+f () + (Ju()[G^v] + Jv()[G^u]) = 0
+
+(17)
+
+G^u - Gu(), G - G^u  0, G  S+k
+
+(18)
+
+G^v - Gv(), G - G^v  0, G  S+k
+
+(19)
+
+The second and third conditions simply states that G^u L2(G^u, G^v) and G^v L2(G^u, G^v) define supporting hyperplanes of S+k at G^u, G^v, respectively.
+Since Gu()  S+k , condition (18) is equivalent to G^u = Gu() (and similarly, (19) is equivalent to G^v = Gv()). Using the expression (15) of g, we get that (17-19) is equivalent to f () + g() = 0.
+
+11
+
+Under review as a conference paper at ICLR 2019
+
+Proof of Proposition 5. We start by proving the first bound (11). As stated in Section 3.2, we have, by
+
+induction on t, G^u(t) =
+
+t  =1
+
+at- ui ((t))
+
+
+
+ui ((t)),
+
+where
+
+a
+
+=
+
+(1 - ) .
+
+And
+
+by
+
+definition
+
+of G¯(t), we have G¯u(t) =
+
+t  =1
+
+at- Gu(()).
+
+Thus,
+
+t
+
+G^u(t) - G¯u(t) =
+
+at- u( )
+
+ =1
+
+where (u) = ui (())  ui (()) - Gu(()) are zero-mean random variables. Thus, taking the second moment, and using the first assumption (which simply states that the variance of u() is bounded by 2), we have
+
+t 2t
+
+E
+
+G^u(t) - G¯u(t)
+
+2 F
+
+=E
+
+at- u( ) =
+
+a2t- E
+
+u( )
+
+2 F
+
+ =1
+
+F  =1
+
+
+
+22
+
+t-1
+(1
+
+-
+
+)2
+
+=
+
+2
+
+2
+
+1 1
+
+- -
+
+(1 (1
+
+- -
+
+)2t )2
+
+ =0
+
+
+
+2
+
+2
+
+ -
+
+
+
+,
+
+which proves the first inequality (11).
+
+To prove the second inequality, we start from the definition of G¯u(t):
+
+G¯(ut) - G(ut) F =
+
+t
+at- (Gu() - Gu(t)) - (1 - )tGu(t) F
+
+ =1
+
+t
+ at- Gu() - Gu(t) F + (1 - )t G(ut) F ,
+
+ =1
+
+(20)
+
+where the first equality uses that fact that
+
+t 
+
+=1
+
+at-
+
+=
+
+1 - (1 - )t.
+
+Focusing on the
+
+first
+
+term,
+
+and bounding G(u) - Gu(t) F  (t -  ) by the triangle inequality, we get
+
+t t t-1
+
+at- G(u) - G(ut)) F   at- (t -  ) =   (1 - )
+
+ =1
+
+ =1
+
+ =0
+
+= (1 - ) d d
+= (1 - ) d d
+
+t-1
+- (1 - )
+ =0
+- 1 - (1 - )t 
+
+
+
+(1
+
+-
+
+)
+
+1 2
+
+.
+
+(21)
+
+Combining (20) and (21), we get the desired inequality (12).
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+B GENERALIZATION TO LOW-RANK PRIORS
+
+So far, we have assumed a uniform zero prior to simplify the notation. In this section, we relax this assumption. Suppose that the prior is given by a low-rank matrix P = QR , where Q, R  Rn×kP . In other words, the prior for a given pair (i, j) is given by the dot product of two vectors pij = qi, rj . In practice, such a low-rank prior can be obtained, for example, by first training a simple low-rank
+matrix approximation of the target similarity matrix.
+
+Given this low-rank prior, the penalty term (2) becomes
+
+gP ()
+
+=
+
+1 n2
+
+n
+
+n
+[UV - QR ]2ij
+
+i=1 j=1
+
+1 = n2
+1 = n2
+
+UV - QR , UV - QR U U, V V - 2 U Q, V R
+
++c ,
+
+where c = Q Q, R R is a constant that does not depend on . Here, we used a superscript P in gP to disambiguate the zero-prior case.
+
+Now, if we define weighted embedding matrices
+
+the penalty term becomes
+
+Hu()
+
+:=
+
+1 n
+
+U
+
+Q
+
+=
+
+1 n
+
+n i=1
+
+ui()
+
+
+
+qi
+
+Hv ()
+
+:=
+
+1 n
+
+V
+
+R
+
+=
+
+1 n
+
+n i=1
+
+vi()
+
+
+
+ri,
+
+gP () = Gu(), Gv() - 2 Hu(), Hv() + c.
+
+Finally, if we maintain estimates H^u, H^v of Hu(), Hv(), respectively (using the methods proposed in Section 3), we can approximate gP () by the gradient of
+
+g^iP (, G^u, G^v, H^u, H^v) := ui(), G^vui() + vi(), G^uvi() - 2 ui(), H^vqi - 2 vi(), H^uri . (22)
+
+Proposition 1 and Algorithms 1 and 2 can be generalized to the low-rank prior case by adding updates for H^u, H^v, and by using expression (22) of g^iP when computing the gradient estimate.
+Proposition 6. If i is drawn uniformly in {1, . . . , n}, and G^u, G^v, H^u, H^v are unbiased estimates of Gu(), Gv(), Hu(), Hv(), respectively, then g^iP (, G^u, G^v, H^u, H^v) is an unbiased estimate of gP ().
+
+Proof. Similar to the proof of Proposition 1.
+
+The generalized versions of SAGram and SOGram are stated below, where the differences compared to the zero prior case are highlighted. Note that, unlike the Gramian matrices, the weighted embedding matrices Hu, Hv are not symmetric, thus we do not project their estimates.
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+Algorithm 3 SAGram (Stochastic Average Gramian) with low-rank prior
+
+1: Input: Training data {(xi, yi, si)}i{1,...,n}, low-rank priors {qi, ri}i{1,...,n}
+
+2: Initialization phase
+
+3: draw  randomly
+
+4: u^i  ui(), v^i  vi() i  {1, . . . , n}
+
+5:
+
+S^u
+
+
+
+1 n
+
+n i=1
+
+u^i
+
+ u^i,
+
+S^v
+
+
+
+1 n
+
+n i=1
+
+v^i
+
+
+
+v^i
+
+6:
+
+T^ u
+
+
+
+1 n
+
+n i=1
+
+u^i
+
+
+
+qi,
+
+T^ v
+
+
+
+1 n
+
+n i=1
+
+v^i
+
+
+
+ri
+
+7: repeat
+
+8: Update Gramian estimates (i  Uniform(n))
+
+9: G^u  S^u + [ui()  ui() - u^i  u^i], G^v  S^v + [vi()  vi() - v^i  v^i]
+
+10: Update weighted embedding estimates
+
+11: H^ u  T^ u + [(ui() - u^i)  qi]
+12: H^ v  T^ v + [(vi() - v^i)  ri] 13: Update model parameters then update caches (i  Uniform(n))
+
+14:    - [fi() + p~g^P (, G^u, G^v, H^u, H^v)]
+
+15:
+
+S^u
+
+
+
+S^u
+
++
+
+1 n
+
+[ui()
+
+
+
+ui()
+
+-
+
+u^i
+
+
+
+u^i],
+
+S^v
+
+
+
+S^v
+
++
+
+1 n
+
+[vi
+
+()
+
+
+
+vi()
+
+-
+
+v^i
+
+
+
+v^i]
+
+16: 17:
+
+T^ u  T^ u + u^i  ui(),
+
+v^n1i[(ui
+
+() - vi()
+
+u^i)
+
+
+
+qi],
+
+T^ v
+
+
+
+T^ v
+
++
+
+1 n
+
+[(vi()
+
+-
+
+v^i)
+
+
+
+ri]
+
+18: until stopping criterion
+
+Algorithm 4 SOGram (Stochastic Online Gramian) with low-rank prior
+1: Input: Training data {(xi, yi, si)}i{1,...,n}, low-rank priors {qi, ri}i{1,...,n} 2: Initialization phase
+3: draw  randomly 4: G^u, G^v  0k×k 5: repeat 6: Update Gramian estimates (i  Uniform(n)) 7: G^u  (1 - )G^u + ui()  ui(), G^v  (1 - )G^v + vi()  vi() 8: Update weighted embedding estimates 9: H^ u  (1 - )H^ u + ui()  qi, H^ v  (1 - )H^ v + vi()  ri 10: Update model parameters (i  Uniform(n)) 11:    - [fi() + p~g^P (, G^u, G^v, H^u, H^v)] 12: until stopping criterion
+
+C INTERPRETATIONS OF THE GRAMIAN PENALTY TERM
+
+In this section, we briefly discuss different interpretations of the Gramian inner-product g(). Starting from the expression (4) of g() and the definition (3) of the Gram matrices, we have
+
+g() = Gu(), Gv() =
+
+1 n
+
+n
+
+ui()  ui(), Gv()
+
+1n =
+n
+
+ui(), Gv()ui() , (23)
+
+i=1 i=1
+
+which is a quadratic form in the left embeddings ui (and similarly for vj, by symmetry). In particular, the partial derivative of the Gramian term with respect to an embedding ui is
+
+
+
+g() ui
+
+=
+
+2 n Gv()ui()
+
+=
+
+2 n
+
+1 n
+
+n
+vj() 
+j=1
+
+vj() ui().
+
+Each term (vj  vj)ui = vj vj, ui is simply the projection of ui on vj (scaled by vj 2). Thus the gradient of g() with respect to ui is an average of scaled projections of ui on each of the right embeddings vj, and moving in the direction of the negative gradient simply moves ui away from regions of the embedding space with a high density of right embeddings. This corresponds to the
+intuition discussed in the introduction: the purpose of the g() term is precisely to push left and right
+
+14
+
+Under review as a conference paper at ICLR 2019
+
+(a)  = 10-2, observed pairs.
+
+(b)  = 10-2, random pairs.
+
+(c)  = 10, observed pairs.
+
+(d)  = 10, random pairs.
+
+Figure 4: Evolution of the inner product distribution ui((t)), vj((t)) in the Wikipedia en model trained with different penalty coefficients , for observed pairs (left) and random pairs (right).
+
+100
+
+10-1
+
+Batch MAP@10
+
+10-2
+
+10-3
+
+10-4  = 10-2  = 100
+
+ = 101
+
+10-5 0
+
+2
+
+4
+
+ = 103 6 hour8s 10 12 14
+
+Figure 5: Mean Average Precision of the Wikipedia en model, trained with different values of the penalty coefficient .
+
+embeddings away from each other, to avoid placing embeddings of dissimilar items near each other, a phenomenon referred to as folding of the embedding space (Xin et al., 2017).
+In order to illustrate the effect of this term on the embedding distributions, we visualize, in Figure 4, the distribution of the inner product ui((t)), vj((t)) , for random pairs (i, j), and for observed pairs (i = j), and how these distributions change as t increases. The plots are generated for the Wikipedia en model described in Section 4, trained with SOGram ( = 0.01), with two different values of the penalty coefficient,  = 10-2 and  = 10. In both cases, the distribution for observed pairs remains concentrated around values close to 1, as one expects (recall that the target similarity is 1 for observed pairs, i.e. pairs of connected pages in the Wikipedia graph). The distributions for random pairs, however, are very different: with  = 10, the distribution quickly concentrates around a value close to 0, while with  = 10-2 the distribution is more flat, and a large proportion of pairs have a high inner-product. This indicates that with a lower , the model is more likely to fold, i.e. place embeddings of unrelated items near each other. This is consistent with the validation MAP,
+15
+
+Under review as a conference paper at ICLR 2019
+
+reported in Figure 5. With  = 10-2, the validation MAP increases very slowly, and remains two orders of magnitude smaller than the model trained with  = 10. The figure also shows that when  is too large, the model is over-regularized and the MAP decreases.
+
+To conclude this section, we note that our methods also apply to a related regularizer introduced
+
+in (Zhang et al., 2017), called Global Orthogonal Regularization. The authors argue that when learn-
+
+ing feature embedding representations, spreading out the embeddings is helpful for generalization, and
+
+propose to match the second moment of each embedding distribution with that of the uniform distribu-
+
+tion. Formally, and using our notation, they use the penalty term max(gu(), 1/k)+max(gv(), 1/k),
+
+where gu()
+
+=
+
+1 n2
+
+n i=1
+
+n j=1
+
+ui, uj
+
+2
+
+(and similarly for
+
+gv ),
+
+and
+
+optimized
+
+it
+
+using
+
+candi-
+
+date sampling. We can also apply the same Gramian transformation as in Section 2.2 to write
+
+gu() = GU (), GU () , and gv() = GV (), GV () , and we can similarly apply SAGram and
+
+SOGram to estimate both Gramians. Formally, the difference here is that one would penalize the
+
+inner-product of each Gramian with itself, instead of the inner-product of the two.
+
+D FURTHER EXPERIMENTS ON WIKIPEDIA
+D.1 EFFECT OF GRAMIAN LEARNING RATE  AND BIAS-VARIANCE TRADEOFF
+In addition to the experiment on Wikipedia simple, reported in Section 4, we also evaluated the effect of the Gramian learning rate  on the quality of the Gramian esimates and generalization performance on Wikipedia en. Figure 6 shows the validation MAP of the SOGram method for different values of  (together with the basline for reference). This reflects the bias-variance tradeoff dicussed in Proposition 5: with a lower , progress is initially slower (due to the bias introduced in the Gramian estimates), but the final performance is better. Given a limited training time budget, this suggests that a higher  can be preferable.
+0.18
+
+0.16
+
+Batch MAP@10
+
+0.14
+
+0.12
+
+0.10
+
+SOGram linear ( = 0. 001) SOGram linear ( = 0. 01)
+
+SOGram linear ( = 0. 1)
+
+linear sampling
+
+0.08 0 10 20 hours 30 40 50
+
+Figure 6: Validation MAP of SOGram and linear importance sampling, on Wikipedia en, for different values of the Gramian learning rates .
+
+We also evaluate the quality of the Gramian estimates on Wikipedia en, but due to the large number of embeddings, computing the exact Gramians is no longer feasible, so we approximate it using a large sample of 1M embeddings. The results are reported in Figure 7, which shows the normalized Frobenius distance between the Gramian estimates G^u and (the large sample approximation of) the true Gramian Gu. The results are similar to the experiment on simple: with a lower , the estimation error is initially high, but decays to a lower value as training progresses, which can be explained by the bias-variance tradeoff discussed in Proposition 5.
+The tradeoff is affected by the trajectory of the true Gramians: smaller changes in the Gramians (captured by the parameter  in Proposition 5) induce a smaller bias. In particular, changing the learning rate  of the main algorithm can affect the performance of the Gramian estimates by affecting the rate of change of the true Gramians. To investiage this effect, we ran the same experiment with two different learning rates,  = 0.01 as in Section 4, and a lower learning rate  = 0.002. The errors
+
+16
+
+Under review as a conference paper at ICLR 2019
+
+converge to similar values in both cases, but the error decay occurs much faster with smaller , which is consistent with our analysis.
+
+1.0
+
+linear SOGRam,  = 0. 001
+
+1.0
+
+linear SOGRam,  = 0. 001
+
+linear SOGRam,  = 0. 01
+
+linear SOGRam,  = 0. 01
+
+linear SOGRam,  = 0. 1
+
+linear SOGRam,  = 0. 1
+
+0.8
+
+linear sampling
+
+0.8
+
+linear sampling
+
+^G - G F/ G F ^G - G F/ G F
+
+0.6 0.6
+
+0.4 0.4
+
+0.2 0.2
+
+0 1 2 3 ho4urs 5 6 7 8
+
+0 1 2 3 ho4urs 5 6 7 8
+
+Figure 7: Gramian estimation error on en, for SOGram with different values of , and different learning rates. The left and right figures correspond respectively to  = 0.01 and  = 0.002.
+
+D.2 EFFECT OF BATCH SIZE AND LEARNING RATE
+In this section, we explore the effect of the batch size |B| and learning rate  on the performance of SOGram compared to the baselines. We ran the same Wikipedia en with different values of these hyperparameters, and report the final validation MAP (after a fixed training budget of 50 hours), in Tables 3 and 4, which correspond to batch size 128 and 512 respectively. We can make several observations. First, the best performance is consistently achieved by SOGram with learning rate  = 0.001. The relative improvement compared to the baseline is, in general, larger for smaller batch sizes. This can be explained intuitively by the fact that because of online averaging, the quality of the Gramian estimates with SOGram suffers less than with the sampling baseline. We can also observe that the final performance also seems relatively robust to the choice of batch size and learning rate, compared to the baseline.
+
+ = 0.02  = 0.01  = 0.005
+
+linear sampling
+0.0896 0.1325 0.1290
+
+linear SOGram ( = 0.1)
+0.1249 (+39.5%) 0.1286 (-2.9%) 0.1300 (+0.8%)
+
+linear SOGram ( = 0.01)
+0.1256 (+40.2%) 0.1301 (-1.8%) 0.1270 (-1.5%)
+
+linear SOGram ( = 0.001)
+0.1683 (+87.9%) 0.1710 (+29.1%) 0.1385 (+7.4%)
+
+Table 3: Final validation MAP on Wikipedia en, with batch size |B| = 128, and using different learning rates.
+
+ = 0.02  = 0.01  = 0.005
+
+linear sampling
+0.0519 0.1371 0.1346
+
+linear SOGram ( = 0.1)
+0.1331 (+156.4%) 0.1329 (-3.0%) 0.1323 (-1.7%)
+
+linear SOGram ( = 0.01)
+0.1198 (+130.7%) 0.1505 (+9.8%) 0.1299 (-3.5%)
+
+linear SOGram ( = 0.001)
+0.1295 (+149.3%) 0.1737 (+26.7%) 0.1569 (+16.6%)
+
+Table 4: Final validation MAP on Wikipedia en, with batch size |B| = 512, and using different learning rates.
+
+17
+
+Under review as a conference paper at ICLR 2019
+
+E EXPERIMENT ON MOVIELENS DATA
+
+In this section, we report experiments on a regression task on MovieLens.
+
+Dataset The MovieLens dataset consists of movie ratings given by a set of users. In our notation, the left features x represent a user, the right features y represent an item, and the target similarity is the rating of movie y by user x. The data is partitioned into a training and a validation set using a (80%-20%) split. Table 5 gives a basic description of the data size. Note that it is comparable to the simple dataset in the Wikipedia experiments.
+
+Dataset
+
+# users # movies # ratings
+
+MovieLens 72K
+
+10K 10M
+
+Table 5: Corpus size of the MovieLens dataset.
+
+Model We train a two-tower neural network model, as described in Figure 1, where each tower consists of an input layer, a hidden layer, and output embedding dimension k = 35. The left tower takes as input a one-hot encoding of a unique user id, and the right tower takes as input one-hot encodings of a unique movie id, the release year of the movie, and a bag-of-words representation of the genres of the movie. These input embeddings are concatenated and used as input to the right tower.
+
+Methods
+
+The model is trained using a squared loss
+
+(s, s )
+
+=
+
+1 2
+
+(s
+
+-
+
+s
+
+)2,
+
+using
+
+SOGram with
+
+different values of , and sampling as a baseline. We use a learning rate  = 0.05, and penalty
+
+coefficient  = 1. We measure mean average precision on the trainig set and validation set, following
+
+the same procedure described in Section 4. The results are given in Figure 8.
+
+Batch MAP@10 Batch MAP@10
+
+0.0100
+
+0.012
+
+0.0095 0.0090
+
+0.011
+
+0.0085 0.0080 0.0075
+
+0.010 0.009
+
+0.0070
+
+0.0065
+
+linear linear
+
+SOGRam, SOGRam,
+
+ 
+
+= =
+
+0. 0.
+
+01 1
+
+0.008
+
+linear SOGRam,  = 0. 01 linear SOGRam,  = 0. 1
+
+0.0060 0
+
+1
+
+linear sampling
+
+2 ho3urs 4
+
+5
+
+6 0.007 0
+
+1
+
+linear sampling
+
+2 ho3urs 4
+
+5
+
+6
+
+Figure 8: Mean average precision at 10 on the training set (left) and the validation set (right), for different methods, on the MovieLens dataset.
+
+Results The results are similar to those reported on the Wikipedia simple dataset, which is comparable in corpus size and number of observations to MovieLens. The best validation mean average precision is achieved by SOGram with  = 0.1 (for an improvement of 2.9% compared to the sampling baseline), despite its poor performance on the training set, which indicates that better estimation of g() induces better regularization. The impact on training speed is also remarkable in this case, SOGram with  = 0.1 achieves a better validation performance in under 1 hour of training than the sampling baseline in 6 hours.
+
+18
+
+

@@ -1,0 +1,1025 @@
+Under review as a conference paper at ICLR 2019
+VARIANCE REDUCTION FOR REINFORCEMENT LEARNING IN INPUT-DRIVEN ENVIRONMENTS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We consider reinforcement learning in input-driven environments, where an exogenous, stochastic input process affects the dynamics of the system. Input processes arise in many applications, including queuing systems, robotics control with disturbances, and object tracking. Since the state dynamics and rewards depend on the input process, the state alone provides limited information for the expected future returns. Therefore, policy gradient methods with standard state-dependent baselines suffer high variance during training. We derive a bias-free, input-dependent baseline to reduce this variance, and analytically show its benefits over state-dependent baselines. We then propose a meta-learning approach to overcome the complexity of learning a baseline that depends on a long sequence of inputs. Our experimental results show that across environments from queuing systems, computer networks, and MuJoCo robotic locomotion, input-dependent baselines consistently improve training stability and result in better eventual policies.
+1 INTRODUCTION
+Deep reinforcement learning (RL) has emerged as a powerful approach to sequential decisionmaking problems, achieving impressive results in domains such as game playing (Mnih et al., 2015; Silver et al., 2017), robotics (Levine et al., 2016), and continuous control (Schulman et al., 2015a; Lillicrap et al., 2015). This paper concerns RL in input-driven environments. Informally, input-driven environments have dynamics that are partially dictated by an exogenous, stochastic input process. Queuing systems (Kleinrock, 1976; Kelly, 2011) are an example; their dynamics is governed by not only the decisions made within the system (e.g., scheduling, load balancing) but also the arrival process that brings work (e.g., jobs, customers, packets) into the system. Input-driven environments also arise naturally in many other domains: network control and optimization (Winstein & Balakrishnan, 2013; Mao et al., 2017), robotics control with stochastic disturbances (Pinto et al., 2017), locomotion in environments with complex terrains and obstacles (Heess et al., 2017), tracking moving targets, and more (see Figure 1).
+We focus on model-free policy gradient RL algorithms (Williams, 1992; Mnih et al., 2016; Schulman et al., 2015a), which have been widely adopted and benchmarked for a variety of RL tasks (Duan et al., 2016; Wu & Tian, 2017). Policy gradient algorithms optimize the policy parameters by estimating the gradient of the expected total reward (or "return") using Monte Carlo techniques (Owen, 2013). An important challenge for these methods is high variance in the gradient estimates, as it increases sample complexity and can impede effective learning altogether when training non-linear neural network policies (Schulman et al., 2015b; Mnih et al., 2016). A standard approach to reduce variance is to subtract a "baseline" from the total reward to estimate the gradient (Weaver & Tao, 2001). The baseline is usually a function of the state. The most common choice is the value function -- the expected return starting from the state. The interpretation of this baseline is to compare the return for an action taken in a particular state to the average return achieved from that state, and increase or decrease the probability of the action based on whether its return is better or worse than average.
+Our main insight is that a state-dependent baseline -- such as the value function -- is a poor choice in input-driven environments, whose state dynamics and rewards are partially driven by the input process. In such environments, comparing the return to the value-function baseline may provide limited information about the quality of actions. A strong action could end up with a lower-thanaverage return if the input sequence following the action is unfavorable; similarly, a poor action might achieve a good return with an advantageous input sequence. Intuitively, a good baseline for policy
+1
+
+Under review as a conference paper at ICLR 2019
+
+Job size Network bandwidth
+
+Load balancer
+
+(a)
+Time
+
+(b) (c) (d) (e)
+Time
+
+720P
+Server 1Server 2 Server k
+Figure 1: Input-driven environments: (a) load-balancing heterogeneous servers (Harchol-Balter & Vesilo, 2010) with stochastic job arrival as input process; (b) adaptive bitrate video streaming (Mao et al., 2017) with stochastic network bandwidth as input process; (c) Walker2d in wind with a stochastic force (wind) applied to the walker as input; (d) HalfCheetah on floating tiles with the stochastic process that controls the buoyancy of the tiles as input; (e) 7-DoF arm tracking moving target with the stochastic target position as input. Environments (c)­(e) use the MuJoCo (Todorov et al., 2012) physics simulator.
+
+gradient estimation should take the specific instance of the input process -- the sequence of input values -- into account. We call such a baseline an input-dependent baseline; it is a function of both the state and the entire future input sequence.
+We formally define input-driven Markov decision processes, and we prove that an input-dependent baseline does not introduce bias in standard policy gradient algorithms such as Advantage Actor Critic (A2C) (Mnih et al., 2016) and Trust Policy Region Optimization (TRPO) (Schulman et al., 2015a) provided that the input process is independent of the states and actions. We derive the optimal input-independent baseline and a simpler one to work with in practice; this takes the form of a conditional value function -- the expected return given the state and the future input sequence.
+Input-dependent baselines are harder to learn than their state-dependent counterparts; they are highdimensional functions of the sequence of input values. To learn input-dependent baselines efficiently, we propose a simple approach based on meta learning (Finn et al., 2017; Vilalta & Drissi, 2002). The idea is to learn a "meta baseline" that can be specialized to a baseline for a specific input instantiation using a small number of training episodes with that input. This approach can be used in applications in which we can repeat an input sequence multiple times during training, such as applications using simulations or experiments with previously-collected input traces for training (McGough et al., 2017).
+We compare our input-dependent baseline to the standard value function baseline for the five tasks illustrated in Figure 1. These tasks are derived from queuing systems (load balancing heterogeneous servers (Harchol-Balter & Vesilo, 2010)), computer networks (bitrate adaptation for video streaming (Mao et al., 2017)), and variants of standard continuous control RL benchmarks in the MuJoCo (Todorov et al., 2012) physics simulator. We adapted three widely-used MuJoCo benchmarks (Duan et al., 2016; Clavera et al., 2018; Heess et al., 2017) to add a stochastic input element that makes these tasks significantly more challenging. For example, we replaced the static target in a 7-DoF robotic arm target-reaching task with a randomly-moving target that the robot aims to track over time. Our results show that input-dependent baselines consistently provide improved training stability and better eventual policies. Input-dependent baselines are applicable to a variety of policy gradient methods, including A2C, TRPO, PPO, and also benefit robust adversarial RL methods such as RARL (Pinto et al., 2017). Videos demonstrations of our experiments are available at https://sites.google.com/view/input-dependent-baseline/.
+
+2 PRELIMINARIES
+
+Notation. We consider a discrete-time Markov decision process (MDP), defined by
+
+(S, A, P, 0, r, ), where S  Rn is a set of n-dimensional states, A  Rm is a set of m-dimensional
+
+actions, P : S × A × S  [0, 1] is the state transition probability distribution, 0 : S  [0, 1] is the
+
+distribution over initial states, r : S × A  R is the reward function, and   (0, 1) is the discount
+
+factor. We denote a stochastic policy as  : S × A  [0, 1], which aims to optimize the expected
+
+return () = at  (at|st),
+
+E [ st+1
+
+ t=0
+
+r(st, at)],
+
+where
+
+
+
+=
+
+(s0, a0, ...) is the trajectory
+
+ P (st+1|st, at). We use V(st) = Eat,st+1,at+1,...
+
+following s0  0,
+
+ l=0
+
+
+
+lr(st+l
+
+,
+
+ar+l
+
+)
+
+to define the value function, and Q(st, at) = Est+1,at+1,...
+
+ l=0
+
+
+
+lr(st+l,
+
+ar+l
+
+)
+
+to define the
+
+2
+
+Under review as a conference paper at ICLR 2019
+
+Pr (action = server 1)
+
+(a)
+Load balancer
+
+(b) (c)
+
+Server 1 Server 2
+Figure 2: Load balancing over two servers. (a) Job sizes follow a Pareto distribution and jobs arrive as a Poisson process; the RL agent observes the queue lengths and picks a server for an incoming job. (b) The input-dependent baseline (blue) results in a 50× lower policy gradient variance (left) and a 33% higher test reward (right) than the standard, state-dependent baseline (green). (c) The probability heatmap of picking server 1 shows that using the input-dependent baseline (left) yields a more precise policy than using the state-dependent baseline (right).
+
+state-action value function. For any sequence (x0, x1, ...), we use x to denote the entire sequence and xi:j to denote (xi, xi+1, ..., xj).
+
+Policy Gradient Methods. Policy gradient methods estimate the gradient of expected return with respect to the policy parameters (Sutton et al., 1999; Kakade, 2002; Gu et al., 2017). To train a policy  parameterized by , the Policy Gradient Theorem (Sutton et al., 1999) states that
+
+() = Eas [ log (a|s)Q (s, a)] ,
+
+(1)
+
+where (s) =
+
+ t=0
+
+[t
+
+Pr(st
+
+=
+
+s)]
+
+denotes
+
+the
+
+discounted
+
+state
+
+visitation
+
+frequency.
+
+Practical
+
+algorithms often use the undiscounted state visitation frequency (i.e.,  = 1 in ), which can make
+
+the estimation slightly biased (Thomas, 2014).
+
+Estimating the policy gradient using Monte Carlo estimation for the Q function suffers from high
+variance (Mnih et al., 2016). To reduce variance, an appropriately chosen baseline b(st) can be subtracted from the Q-estimate without introducing bias (Greensmith et al., 2004). The policy gradient estimation with a baseline in Eq. (1) becomes E, [ log (a|s) (Q (s, a) - b(s))]. While an optimal baseline exists (Greensmith et al., 2004; Wu et al., 2018), it is hard to estimate and
+often replaced by the value function b(st) = V(st) (Sutton & Barto, 1998; Mnih et al., 2016).
+
+Stochastic gradient descent using Eq. (1) does not guarantee consistent policy improvement in
+
+complex control problems. Trust Region Policy Optimization (TRPO) (Schulman et al., 2015a) is
+
+an alternative approach that offers monotonic policy improvements. TRPO maximizes a surrogate
+
+objective, subject to a KL divergence constraint:
+
+maximize
+
+
+Esaoolldd
+
+ (a|s) old(a|s)
+
+Qold
+
+(s,
+
+a)
+
+(2)
+
+subject to Esold [DKL (old(·|s)||(·|s))]  ,
+
+(3)
+
+in which  serves as a step size for policy update. Using a baseline in the TRPO objective, i.e.
+replacing Qold (s, a) with Qold (s, a) - b(s), empirically improves policy performance (Schulman et al., 2015b).
+
+3 MOTIVATING EXAMPLE
+We illustrate the variance introduced into policy gradient methods by an exogenous input process using a simple load balancing example (Figure 2a). Jobs arrive over time and must be sent to one of two servers. The state st = (q1, q2) denotes the current queue lengths at the two servers. The action at  {1, 2} picks which server to enqueue the incoming job at. To minimize average job completion time, the reward rt is - × j, where  is the time elapsed since last action and j is number of enqueued jobs. The servers process jobs at identical rates, the job sizes follow a Pareto distribution (scale xm = 100, shape  = 1.5), and jobs arrive in a Poisson process ( = 55). Intuitively, the optimal policy for this simple example is to join the shortest queue (Daley, 1987). The optimal policy for more general versions of the load balancing problem (e.g., with heterogeneous processing rates) is not known (Harchol-Balter & Vesilo, 2010); we evaluate such cases in §6.2.
+Since the Pareto distribution is heavy-tailed, the queue occupancies and the return over a long time horizon have large variance. We train two A2C agents (Mnih et al., 2016; Dhariwal et al., 2017), one with the standard value function baseline and the other with an input-dependent baseline that is
+
+3
+
+Under review as a conference paper at ICLR 2019
+
+tailored to each specific instantiation of the job arrival process (the details of this baseline are in §4). Figure 2b shows that the input-dependent baseline significantly reduces the variance of the policy gradient. As a result, the learned policy improves compared to the value function baseline. Figure 2c visualizes the policies learned using the two baselines. The optimal policy (pick-shortest-queue) corresponds to a clear divide between the chosen servers at the diagonal. The policy learned with the input-dependent baseline comes much closer to this ideal than with the standard value function baseline, whose fuzzier probability heatmap indicates an unstable, high-variance policy.
+In this example, the value function baseline performs poorly because of the variance caused by the input process. In fact, the variance of the standard baseline can be arbitrarily large: we refer the reader to Appendix A for an analytical example on a 1D grid world.
+
+4 REDUCING VARIANCE FOR INPUT-DRIVEN MDPS
+
+We now formally define input-driven MDPs and derive variance-reducing baselines for policy gradient methods in environments with input processes.
+Definition 1. An input-driven MDP is defined by (S, A, Z, Ps, Pz, 0s, z0, r, ), where Z  Rk is a set of k-dimensional input values, Ps(st+1|st, at, zt) is the transition kernel of the states, Pz(zt+1|zt) is the transition kernel of the input process, z0(z0) is the distribution of the initial input, r(st, at, zt) is the reward function, and S, A, s0,  follow the standard definition in §2.
+
+An input-driven MDP adds an input process, zt, to a standard MDP.
+
+(a)
+
+For simplicity, we consider only Markov input processes, where zt-1 zt zt+1
+
+zt depends only on the previous input value zt-1; generalizing to
+
+non-Markov input processes is straightforward. In an input-driven st-1 st st+1
+
+MDP, the next state st+1 depends on (st, at, zt). The input process
+
+is exogenous in the sense that zt is independent of the processes st and at. We seek to learn policies that maximize cumulative expected
+
+at-1
+
+at
+
+at+1
+
+rewards. We focus on two cases, corresponding to the graphical models shown in Figure 3:
+
+zt-1
+
+zt
+
+(b) zt+1
+
+Case 1: zt is a Markov process, and st and zt are both observed at
+
+time t. The action at can hence depend on both st, zt. Case 2: zt is an i.i.d. process, independent of the states and actions,
+
+st-1
+
+st
+
+st+1
+
+and is not observed at time t. The action at can depend only on st.
+
+at-1 at at+1
+
+Proposition 1. An input-driven MDP satisfying the conditions of
+
+either case 1, or case 2 above, is a fully observable MDP. Proof. See Appendix B.
+
+Figure 3: Graphical model of input-driven MDPs. (a) zt is
+
+Understanding this proposition for case 1 is straightforward. Since Markov. (b) zt is i.i.d.
+
+both st and zt are observed, considering the tuple (st, zt) to be the `state' at time t leads trivially to a standard fully observable MDP. On the other hand, with case 2
+
+we see that even if zt is not observed, we have a fully observable MDP. The intuition for this result
+
+comes by viewing zt as an i.i.d. source of randomness within the state-transition kernel of the MDP.
+
+We now consider policy gradient methods for learning a policy for input-driven MDPs. For the remainder of this paper, we focus on MDPs with the more general structure of case 1 above. Extending our results to case 2 is straightforward.
+
+4.1 VARIANCE REDUCTION
+In input-driven MDPs, the standard input-agnostic baseline is ineffective at reducing variance. We propose to use an input-dependent baseline, of the form b(st, zt:) -- a function of both the current state and the specific future input sequence encountered during each training episode. Using this modified baseline is feasible because the future input sequence zt: is known at training time. Specifically, following any training episode, we can observe the entire sequence of input values, and use them to compute the baseline for each step t. It is important to note that the policy cannot use the future input values. At time t, the policy only depends only on (st, zt).
+We now analyze the effect of using an input-dependent baseline. We show that input-dependent baselines are bias-free, and we derive the optimal input-dependent baseline for variance reduction.
+
+4
+
+Under review as a conference paper at ICLR 2019
+
+We first state two useful lemmas required for our analysis. The first lemma shows that under the input-driven MDP definition, the input sequence is conditionally independent of the actions, while the second lemma states the input-dependent version of the policy gradient theorem.
+
+In the following, we abuse notation and let st denote the joint state (st, zt) which includes the input at time t. Lemma 1. Pr(z, st, at) = Pr(z) Pr(st|z)(at|st), i.e., z - st - at forms a Markov chain.
+Proof. See Appendix C.
+Lemma 2. For an input-driven MDP, the Policy Gradient Theorem (Eq. (1)) can be rewritten as
+
+ () = EszaPz,z  log (a|s)Q(s, a|z) ,
+
+(4)
+
+where ,z(s) =
+
+ t=0
+
+[t
+
+Pr(st
+
+=
+
+s|z)]
+
+denotes
+
+the
+
+discounted
+
+visitation
+
+frequency
+
+of
+
+state
+
+s when conditioned on a particular input sequence z and policy , and Q(st, at|z) =
+
+E
+
+ l=0
+
+lr(st+l,
+
+at+l)
+
+st, at, z
+
+is the state-action value function under z and .
+
+Proof. See Appendix D.
+
+We now show that using an input-dependent baseline to estimate the policy gradient does not introduce bias. This result is due to the conditional independence of the input process and the action at given the state st.
+Theorem 1. An input-dependent baseline b(s, z) does not bias the Policy Gradient, i.e., Ez,,z, [ log (a|s)b(s, z)] = 0.
+Proof. See Appendix E.
+
+Input-dependent baselines are also bias-free for TRPO, as we show in Appendix G. Next, we derive the optimal input-dependent baseline in terms of variance reduction. As the gradient estimates are vectors, we use the trace of the covariance matrix to compute the variance (Greensmith et al., 2004).
+
+Theorem 2. The input-dependent baseline that minimizes variance in Policy Gradient is given by
+
+b(s, z) =
+
+Ea  log (a|s)T  log (a|s)Q(s, a|z) Ea [ log (a|s)T  log (a|s)]
+
+.
+
+Proof. See Appendix F.
+
+(5)
+
+Operationally, for state st at each step t, the input-dependent baseline can take the form b(st, zt:), because (st, zt:) is a sufficient statistic of (st, z) for (st:, at:, zt:). In practice, we use a simpler baseline b(st, zt:) = Eat [Q(st, at|zt:)], which is the value function conditioned on the future input values zt:. We discuss how to estimate input-dependent baselines efficiently in §5.
+Remark. Input-dependent baselines are generally applicable to reduce variance in policy gradient methods in input-driven environments. We apply input-dependent baselines to A2C (§6.2), TRPO (§6.1) and PPO (Appendix K). Also, our technique is complementary and orthogonal to adversarial RL (e.g., RARL (Pinto et al., 2017)) for environments with external disturbances. Those methods improve policy robustness by co-training an "adversary" to generate a worst-case disturbance process, whereas input-dependent baselines improves policy optimization itself in the presence of input processes like disturbances. In fact, input-dependent baselines can be used to improve the policy optimization step in adversarial RL methods. In Appendix L, we empirically show that if an adversary generates high-variance noise, RARL with standard state-based baseline is not adequate to train good controllers, and the input-dependent baseline helps improve the policy performance.
+
+5 LEARNING INPUT-DEPENDENT BASELINES EFFICIENTLY
+
+Input-dependent baselines are functions of the sequence of input values. A natural approach to train such baselines is to use models that operate on sequences (e.g., LSTMs (Gers et al., 1999)). However, learning a sequential mapping in a high-dimensional space can be expensive (Bahdanau et al., 2014). We considered an LSTM approach but ruled it out when initial experiments showed that it requires orders of magnitude more data to train than conventional baselines for our environments.
+Fortunately, we can learn the baseline much more efficiently in applications where we can repeat the same input sequence multiple times during training. Input-repeatability is feasible in many
+
+5
+
+Under review as a conference paper at ICLR 2019
+
+applications. For example, it is straightforward when using simulators for training. It is also applicable to training a real system using previously-collected input traces. For example, consider training a robot in the presence of exogenous forces. We could collect a large set of time-series traces of these forces, and apply them repeatedly to a physical robot for training. We now present two approaches that exploit input-repeatability to learn input-dependent baselines efficiently.
+Multi-value-network approach. A straightforward way to learn b(st, zt:) for different input instantiations z is to train one value network to each particular instantiation of the input process. Specifically, in the training process, we first generate N input sequences {z1, z2, · · · , zN } and restrict training only to those N sequences. To learn a separate baseline function for each input sequence, we use N value networks with independent parameters V1 , V2 , · · · , VN , and single policy network with parameter . During training, we randomly sample an input sequence zi, execute a rollout based on zi with the current policy , and use the (state, action, reward) data to train the value network parameter Vi and the policy network parameter  (details in Appendix H).
+Meta-learning approach. The multi-value-network approach does not scale if the task requires training over a large number of input instantiations to generalize. Ideally, we would like an approach that enables shared learning across different input sequences. We present a different method based on meta learning to maximize the use of information across input sequences. The idea is to use all (potentially infinitely many) inputs sequences to learn a "meta value network" model. For each specific input sequence, we first customize the meta value network for that input sequence, using a few example rollouts with that input sequence. We then compute the actual baseline values for training the policy network parameters, using the customized value network for the specific input sequence. Our implementation uses Model-Agnostic Meta Learning (MAML) (Finn et al., 2017).
+Algorithm 1 Training a meta input-dependent baseline for policy-based methods.
+Require: , : meta value network step size hyperparameters 1: Initialize policy network parameters  and meta value network parameters V 2: while not done do 3: Generate a new input sequence z 4: Sample k rollouts T1, T2, ..., Tk using policy  and input sequence z 5: Adapt V with the first k/2 rollouts: V1 = V - V LT1:k/2 [VV ] 6: Estimate baseline value VV1 (st) for st  Tk/2:k using adapted V1 7: Adapt V with the second k/2 rollouts: V2 = V - V LTk/2:k [VV ] 8: Estimate baseline value VV2 (st) for st  T1:k/2 using adapted V2 9: Update policy with Equation (1) or (2) using the values from line (6) and (8) as baseline
+10: Update meta value network: V  V - V Lk/2:k VV1 - V L1:k/2 VV2 11: end while
+
+The pseudocode in Algorithm 1 depicts the training algorithm. We follow the notation of MAML,
+
+denoting the loss in the value function VV (·) on a rollout T as LT [VV ] = st,rtT VV (st) -
+
+T t =t
+
+t
+
+-trt
+
+2. We perform rollouts k times with the same input sequence z (lines 3 and 4); we use
+
+the first k/2 rollouts to customize the meta value network for this instantiation of z (line 5), and then
+
+apply the customized value network on the states of the other k/2 rollouts to compute the baseline
+
+for those rollouts (line 6); similarly, we swap the two groups of rollouts and repeat the same process
+
+(lines 7 and 8). We do not use the same rollouts to adapt the meta value network and compute the
+
+baseline to avoid introducing extra bias to the baseline. Finally, we use the baseline values computed
+
+for each rollout to update the policy network parameters (line 9), and we apply the MAML (Finn
+
+et al., 2017) gradient step to update the meta value network model (line 10).
+
+6 EXPERIMENTS
+
+Our experiments demonstrate that input-dependent baselines provide consistent performance gains across multiple continuous-action MuJoCo simulated robotic locomotions and discrete-action environments in queuing systems and network control. We conduct experiments for both policy gradient methods and policy optimization methods (see Appendix J for details). The videos for our experiments are available at https://sites.google.com/view/input-dependent-baseline/.
+
+6
+
+Under review as a conference paper at ICLR 2019
+Figure 4: In continuous-action MuJoCo environments, TRPO (Schulman et al., 2015a) with input-dependent baselines achieve 25%­3× better testing reward than that with a standard state-dependent baseline. Learning curves are on 100 testing episodes with unseen input sequences; shaded area spans one standard deviation.
+6.1 SIMULATED ROBOTIC LOCOMOTION
+We use the MuJoCo physics engine (Todorov et al., 2012) in OpenAI Gym (Brockman et al., 2016) to evaluate input-dependent baselines for robotic control tasks with external disturbance. We extend the standard walker-2d, half-cheetah and 7-DoF robotic arm environments, adding a different external input to each (Figure 1). Walker2d with random wind (Figure 1c). A 2D walker is trained with varying wind, which randomly drags the walker backward or forward with different force at each step. The wind vector changes randomly, i.e., the wind forms a random input process. We add a force sensor to the state to enable the agent to quickly adapt. The goal is for the walker to walk forward while keeping balance. HalfCheetah on floating tiles with random buoyancy (Figure 1d). A half-cheetah runs over a series of tiles floating on water (Clavera et al., 2018). Each tile has different damping and friction properties, which moves the half-cheetah up and down and changes its dynamics. This random buoyancy is the external input process; the cheetah needs to learn running forward over varying tiles. 7-DoF arm tracking moving target (Figure 1e). We train a simulated robot arm to track a randomly moving target (a red ball). The robotic arm has seven degrees of freedom and the target is doing a random walk, which forms the external input process. The reward is the negative squared distance between the robot hand (blue square) and the target. Results. We build 10-value networks and a meta-baseline using MAML, both on top of the OpenAI's TRPO implementation (Dhariwal et al., 2017). Figure 4 shows the performance comparison among different baselines with 100 unseen testing input sequences at each training checkpoint. These learning curves show that TRPO with a state-dependent baseline performs worst in all environments. With the input-dependent baseline, by contrast, performance in unseen testing environment improves by up to 3×. The agent is able to learn a policy robust against disturbances. For example, it learns to lean into headwind and quickly place its leg forward to counter the headwind; it learns to apply different force on tiles with different buoyancy to avoid falling over; and it learns to co-adjust multiple joints to keep track of the moving object. The meta-baseline eventually outperforms 10-value networks as it effectively learns from a large number of input processes and hence generalizes better. The input-dependent baseline technique applies generally on top of policy optimization methods. In Appendix K, we show a similar comparison with PPO (Schulman et al., 2017). Also, in Appendix L we show that adversarial RL (e.g., RARL (Pinto et al., 2017)) alone is not adequate to solve the high variance problem, and the input-dependent baseline helps improve the policy performance (Figure 7).
+6.2 DISCRETE-ACTION ENVIRONMENTS
+Our discrete-action environments arise from widely-studied problems in computer systems research: load balancing and bitrate adaptation.1 As these problems often lack closed-form optimal solutions (Grandl et al., 2016; Yin et al., 2015), hand-tuned heuristics abound. Recent work suggests that model-free reinforcement learning can achieve better performance than such human-engineered
+1We considered Atari games often used as benchmark discrete-action RL environments (Mnih et al., 2015). However, Atari games are not applicable to our work, as they lack an exogenous input process: a random seed perturbs the games' initial state, but it does not control the pattern of environmental changes (e.g., in "Seaquest", the ships always come in a fixed pattern).
+7
+
+Under review as a conference paper at ICLR 2019
+b(s, z) = V(s|z) (MAML) b(s, z) = V(s|z) (10 values) b(s) = V(s),z heuristic
+Figure 5: In environments with discrete action spaces, A2C (Mnih et al., 2016) with input-dependent baselines outperform the best heuristic and achieve 25­33% better testing reward than vanilla A2C (Mnih et al., 2016). Learning curves are on 100 test episodes with unseen input sequences; shaded area spans one standard deviation.
+heuristics (Mao et al., 2016; Evans & Gao, 2016; Mao et al., 2017; Mirhoseini et al., 2017). We consider a load balancing environment (similar to the example in §3) and a bitrate adaptation environment in video streaming (Yin et al., 2015). The detailed setup of these environments is in Appendix I.
+Results. We extend OpenAI's A2C implementation (Dhariwal et al., 2017) for our baselines. The learning curves in Figure 5 illustrate that directly applying A2C with a standard value network as the baseline results in unstable test reward and underperforms the traditional heuristic in both environments. Our input-dependent baselines reduce the variance and improve test reward by 25­33%. The meta-baseline performs the best in all environments.
+7 RELATED WORK
+Policy gradient methods compute unbiased gradient estimates, but can experience a large variance (Sutton & Barto, 1998; Weaver & Tao, 2001). Reducing variance for policy-based methods using a baseline has been shown to be effective (Williams, 1992; Sutton & Barto, 1998; Weaver & Tao, 2001; Greensmith et al., 2004; Mnih et al., 2016). Much of this work focuses on variance reduction in a general MDP setting, rather than variance reduction for MDPs with specific stochastic structures. Wu et al. (2018)'s techniques for MDPs with multi-variate independent actions are closest to our work. Their state-action-dependent baseline improves training efficiency and model performance on high-dimensional control tasks by explicitly factoring out, for each action, the effect due to other actions. By contrast, our work exploits the structure of state transitions instead of stochastic policy.
+Recent work has also investigated the bias-variance tradeoff in policy gradient methods. Schulman et al. (2015b) replace the Monte Carlo return with a -weighted return estimation (similar to TD() with value function bootstrap (Tesauro, 1995)), improving performance in high-dimensional control tasks. Other recent approaches use more general control variates to construct variants of policy gradient algorithms. Tucker et al. (2018) compare the recent work, both analytically on a linearquadratic-Gaussian task and empirically on complex robotic control tasks. Analysis of control variates for policy gradient methods is a well-studied topic, and extending such analyses (e.g., Greensmith et al. (2004)) to the input-driven MDP setting could be interesting future work.
+In other contexts, prior work has proposed new RL training methodologies for environments with disturbances. Clavera et al. (2018) adapts the policy to different pattern of disturbance by training the RL agent using meta-learning. RARL (Pinto et al., 2017) improves policy robustness by co-training an adversary to generate a worst-case noise process. Our work is orthogonal and complementary to these work, as we seek to improve policy optimization itself in the presence of inputs like disturbances.
+8 CONCLUSION
+We introduced input-driven Markov Decision Processes in which stochastic input processes influence state dynamics and rewards. In this setting, we demonstrated that an input-dependent baseline can significantly reduce variance for policy gradient methods, improving training stability and the quality of learned policies. Our work provides an important ingredient for using RL successfully in a variety of domains, including queuing networks and computer systems, where an input workload is a fundamental aspect of the system, as well as domains where the input process is more implicit, like robotics control with disturbances or random obstacles.
+We showed that meta-learning provides an efficient way to learn input-dependent baselines for applications where input sequences can be repeated during training. Investigating efficient architectures for input-dependent baselines for cases where the input process cannot be controlled in training is an interesting direction for future work.
+8
+
+Under review as a conference paper at ICLR 2019
+
+REFERENCES
+
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly learning to align and translate. arXiv preprint arXiv:1409.0473, 2014.
+Greg Brockman, Vicki Cheung, Ludwig Pettersson, Jonas Schneider, John Schulman, Jie Tang, and Wojciech Zaremba. Openai gym. https://gym.openai.com/docs/, 2016.
+
+Trishul Chilimbi, Yutaka Suzue, Johnson Apacible, and Karthik Kalyanaraman. Project adam: Building an efficient and scalable deep learning training system. In OSDI, pp. 571­582, Broomfield, CO, October 2014. USENIX Association.
+Ignasi Clavera, Anusha Nagabandi, Ronald S Fearing, Pieter Abbeel, Sergey Levine, and Chelsea Finn. Learning to adapt: Meta-learning for model-based control. arXiv preprint arXiv:1803.11347, 2018.
+DJ Daley. Certain optimality properties of the first-come first-served discipline for g/g/s queues. Stochastic Processes and their Applications, 25:301­308, 1987.
+
+DASH Industry Form. Reference Client 2.4.0. http://mediapm.edgesuite.net/dash/ public/nightly/samples/dash-if-reference-player/index.html, 2016.
+Prafulla Dhariwal, Christopher Hesse, Oleg Klimov, Alex Nichol, Matthias Plappert, Alec Radford, John Schulman, Szymon Sidor, and Yuhuai Wu. Openai baselines. https://github.com/ openai/baselines, 2017.
+Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep reinforcement learning for continuous control. In International Conference on Machine Learning, pp. 1329­1338, 2016.
+
+Richard Evans and Jim Gao.
+
+DeepMind AI Reduces Google Data
+
+Centre Cooling Bill by 40%.
+
+https://deepmind.com/blog/
+
+deepmind-ai-reduces-google-data-centre-cooling-bill-40/, 2016.
+
+Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adaptation of deep networks. In International Conference on Machine Learning, pp. 1126­1135, 2017.
+
+Felix A Gers, Jürgen Schmidhuber, and Fred Cummins. Learning to forget: Continual prediction with lstm. 1999.
+
+Robert Grandl, Srikanth Kandula, Sriram Rao, Aditya Akella, and Janardhan Kulkarni. Graphene: Packing and dependency-aware scheduling for data-parallel clusters. In Proceedings of OSDI, pp. 81­97. USENIX Association, 2016.
+Evan Greensmith, Peter L Bartlett, and Jonathan Baxter. Variance reduction techniques for gradient estimates in reinforcement learning. Journal of Machine Learning Research, 5(Nov):1471­1530, 2004.
+Shixiang Gu, Tim Lillicrap, Richard E Turner, Zoubin Ghahramani, Bernhard Schölkopf, and Sergey Levine. Interpolated policy gradient: Merging on-policy and off-policy gradient estimation for deep reinforcement learning. In Advances in Neural Information Processing Systems, pp. 3849­3858, 2017.
+
+Mor Harchol-Balter and Rein Vesilo. To balance or unbalance load in size-interval task allocation. Probability in the Engineering and Informational Sciences, 24(2):219­244, April 2010.
+Nicolas Heess, Srinivasan Sriram, Jay Lemmon, Josh Merel, Greg Wayne, Yuval Tassa, Tom Erez, Ziyu Wang, Ali Eslami, Martin Riedmiller, et al. Emergence of locomotion behaviours in rich environments. arXiv preprint arXiv:1707.02286, 2017.
+Sham M Kakade. A natural policy gradient. In Advances in neural information processing systems, pp. 1531­1538, 2002.
+
+Frank P Kelly. Reversibility and stochastic networks. Cambridge University Press, 2011.
+
+9
+
+Under review as a conference paper at ICLR 2019
+Leonard Kleinrock. Queueing systems, volume 2: Computer applications, volume 66. wiley New York, 1976.
+Sergey Levine, Chelsea Finn, Trevor Darrell, and Pieter Abbeel. End-to-end training of deep visuomotor policies. Journal of Machine Learning Research, 17(1):1334­1373, January 2016.
+Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+Hongzi Mao, Mohammad Alizadeh, Ishai Menache, and Srikanth Kandula. Resource management with deep reinforcement learning. In Proceedings of the 15th ACM Workshop on Hot Topics in Networks (HotNets), Atlanta, GA, November 2016.
+Hongzi Mao, Ravi Netravali, and Mohammad Alizadeh. Neural adaptive video streaming with pensieve. In Proceedings of the ACM SIGCOMM 2017 Conference. ACM, 2017.
+A Stephen McGough, Noura Al Moubayed, and Matthew Forshaw. Using machine learning in trace-driven energy-aware simulations of high-throughput computing systems. In Proceedings of the 8th ACM/SPEC on International Conference on Performance Engineering Companion, pp. 55­60. ACM, 2017.
+Azalia Mirhoseini, Hieu Pham, Quoc V Le, Benoit Steiner, Rasmus Larsen, Yuefeng Zhou, Naveen Kumar, Mohammad Norouzi, Samy Bengio, and Jeff Dean. Device placement optimization with reinforcement learning. In Proceedings of The 33rd International Conference on Machine Learning, 2017.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A. Rusu, Joel Veness, Marc G. Bellemare, Alex Graves, Martin Riedmiller, Andreas K. Fidjeland, Georg Ostrovski, Stig Petersen, Charles Beattie, Amir Sadik, Ioannis Antonoglou, Helen King, Dharshan Kumaran, Daan Wierstra, Shane Legg, Demis Hassabis Ioannis Antonoglou, Daan Wierstra, and Martin A. Riedmiller. Human-level control through deep reinforcement learning. Nature, 518:529­533, 2015.
+Volodymyr Mnih, Adrià Puigdomènech Badia, Mehdi Mirza, Alex Graves, Tim Harley, Timothy P. Lillicrap, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In Proceedings of the International Conference on Machine Learning, pp. 1928­1937, 2016.
+Vinod Nair and Geoffrey E Hinton. Rectified linear units improve restricted boltzmann machines. In Proceedings of the 27th international conference on machine learning (ICML-10), pp. 807­814, 2010.
+Art B. Owen. Monte Carlo theory, methods and examples. 2013.
+Lerrel Pinto, James Davidson, Rahul Sukthankar, and Abhinav Gupta. Robust adversarial reinforcement learning. In International Conference on Machine Learning, pp. 2817­2826, 2017.
+Haakon Riiser, Paul Vigmostad, Carsten Griwodz, and Pål Halvorsen. Commute Path Bandwidth Traces from 3G Networks: Analysis and Applications. In Proceedings of the 4th ACM Multimedia Systems Conference, MMSys. ACM, 2013.
+John Schulman, Sergey Levine, Philipp Moritz, Michael I Jordan, and Pieter Abbeel. Trust region policy optimization. CoRR, abs/1502.05477, 2015a.
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. High-dimensional continuous control using generalized advantage estimation. arXiv preprint arXiv:1506.02438, 2015b.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of go without human knowledge. Nature, 550(7676):354, 2017.
+10
+
+Under review as a conference paper at ICLR 2019
+R. S. Sutton and A. G. Barto. Reinforcement Learning: An Introduction. MIT Press, 1998. Richard S. Sutton, David A. McAllester, Satinder P. Singh, and Yishay Mansour. Policy gradient
+methods for reinforcement learning with function approximation. In NIPS, volume 99, pp. 1057­ 1063, 1999. Gerald Tesauro. Temporal difference learning and td-gammon. Communications of the ACM, 38(3): 58­68, 1995. Philip Thomas. Bias in natural actor-critic algorithms. In International Conference on Machine Learning, pp. 441­448, 2014. Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control. In Intelligent Robots and Systems (IROS), 2012 IEEE/RSJ International Conference on, pp. 5026­ 5033. IEEE, 2012. George Tucker, Surya Bhupatiraju, Shixiang Gu, Richard E Turner, Zoubin Ghahramani, and Sergey Levine. The mirage of action-dependent baselines in reinforcement learning. arXiv preprint arXiv:1802.10031, 2018. Ricardo Vilalta and Youssef Drissi. A perspective view and survey of meta-learning. Artificial Intelligence Review, 18(2):77­95, 2002. Lex Weaver and Nigel Tao. The optimal reward baseline for gradient-based reinforcement learning. In Proceedings of the Seventeenth conference on Uncertainty in artificial intelligence, pp. 538­545. Morgan Kaufmann Publishers Inc., 2001. Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine learning, 8(3-4):229­256, 1992. Keith Winstein and Hari Balakrishnan. Tcp ex machina: Computer-generated congestion control. In ACM SIGCOMM Computer Communication Review, volume 43, pp. 123­134. ACM, 2013. Cathy Wu, Aravind Rajeswaran, Yan Duan, Vikash Kumar, Alexandre M Bayen, Sham Kakade, Igor Mordatch, and Pieter Abbeel. Variance reduction for policy gradient with action-dependent factorized baselines. In International Conference on Learning Representations, 2018. Yuxin Wu and Yuandong Tian. Training agent for first-person shooter game with actor-critic curriculum learning. In Submitted to International Conference on Learning Representations, 2017. Xiaoqi Yin, Abhishek Jindal, Vyas Sekar, and Bruno Sinopoli. A Control-Theoretic Approach for Dynamic Adaptive Video Streaming over HTTP. In Proceedings of the 2015 ACM Conference on Special Interest Group on Data Communication, SIGCOMM. ACM, 2015.
+11
+
+Under review as a conference paper at ICLR 2019
+
+A ILLUSTRATION OF VARIANCE REDUCTION IN 1D GRID WORLD
+
+Consider a walker in a 1D grid world, where the state st  Z at time t denotes the position of the walker, and action at  {-1, +1} denotes the intent to either move forward or backward. Additionally let zt  {-1, +1} be a uniform i.i.d. "exogenous input" that perturbs the position
+of the walker. For an action at and input zt, the state of the walker in the next step is given by
+st+1 = st + at + zt. The objective of the game is to move the walker forward; hence, the reward is rt = at + zt at each time step.   [0, 1] is a discount factor.
+
+While the optimal policy for this game is clear (at = +1 for all t), consider learning such a policy using policy gradient. For simplicity, let the policy be parametrized as (at = +1|st) = e/(1+e), with  initialized to 0 at the start of training. In the following we evaluate the variance of the policy gradient estimate at the start of training under (i) the standard value function baseline, and (ii) a baseline that is the expected cumulative reward conditioned on all future zt inputs.
+
+Variance under standard baseline. The value function in this case is identically 0 at all states. This
+
+is because E[
+
+ t=0
+
+trt]
+
+=
+
+E[
+
+ t=0
+
+t(at
+
++
+
+zt)]
+
+=
+
+0
+
+since
+
+both
+
+actions
+
+at
+
+and
+
+inputs
+
+zt
+
+are
+
+i.i.d.
+
+with mean 0. Also note that  log (at = +1) = 1/2 and  log (at = -1) = -1/2; hence
+
+ log (at) = at/2. Therefore the variance of the policy gradient estimate can be written as
+
+V1 = Var
+
+
+
+at 2
+
+
+
+t rt
+
+t=0 t =t
+
+= Var
+
+
+
+at 2
+
+
+t (at
+
++ zt )
+
+.
+
+t=0 t =t
+
+(6)
+
+Variance under input-dependent baseline. Now, consider an alternative "input-dependent" baseline
+
+V (st|z) defined as E[
+
+ t=0
+
+trt|z].
+
+Intuitively
+
+this
+
+baseline
+
+captures
+
+the
+
+average
+
+reward
+
+incurred
+
+when experiencing a particular fixed z sequence. We refer the reader to §4 for a formal discussion and
+
+analysis of input-dependent baselines. Evaluating the baseline we get V (st|z) = E[
+
+ t=0
+
+tzt.
+
+Therefore
+
+the
+
+variance
+
+of
+
+the
+
+policy
+
+gradient
+
+estimate
+
+in
+
+this
+
+case
+
+is
+
+ t=0
+
+trt|z]
+
+=
+
+V2 = Var
+
+ at 2
+
+t=0
+
+
+t rt - t zt
+
+t =t
+
+t =t
+
+= Var  at 2
+t=0
+
+
+t at
+t =t
+
+.
+
+(7)
+
+Reduction in variance. To analyze the variance reduction between the two cases (Equations (6)
+
+and (7)), we note that
+
+V1 =V2 + Var
+
+ at 2
+
+t=0
+
+
+t zt
+t =t
+
++ 2Cov  at 2
+t=0
+
+
+t at
+t =t
+
+,  at 2
+t=0
+
+
+t zt
+t =t
+
+(8)
+
+=V2 + Var
+
+ at 2
+
+t=0
+
+
+t zt
+t =t
+
+.
+
+(9)
+
+This follows because
+
+ at E2
+t=0
+
+
+t zt
+t =t
+
+  t = 2 E[atzt ] = 0,
+t=0 t =t
+
+and
+
+E
+
+ at 2
+
+
+t at
+
+t=0 t =t
+
+ at 2
+t=0
+
+
+t zt
+t =t
+
+=
+
+
+E
+t1=0 t1=t1 t2=0 t2=t2
+
+at1 at1 at2 zt2 t1+t2 4
+
+= 0.
+
+Therefore the covariance term in Equation (8) is 0. Hence the variance reduction from Equation (9)
+
+can be written as
+
+V1 - V2 = Var
+
+ at 2
+
+t=0
+
+
+t zt
+t =t
+
+
+=E
+t1=0 t1=t1 t2=0 t2=t2
+
+at1 at2 zt1 zt2 t1+t2 4
+
+
+=E
+t1=0 t1=t1
+
+at21 zt21 2t1 4
+
+=
+
+Var(a0)Var(z0) 4(1 - 2)2
+
+.
+
+12
+
+Under review as a conference paper at ICLR 2019
+
+Thus the input-dependent baseline reduces variance of the policy gradient estimate by an amount
+proportional to the variance of the external input. While in this toy example we have chosen zt to be binary-valued, more generally the variance of zt could be arbitrarily large and be a dominating factor of the overall variance in the policy gradient estimation.
+
+B PROOF OF PROPOSITION 1
+
+Proof. Let (S, A, Z, Ps, Pz, s0, z0, r, ) be an input-driven MDP, defined in Definition 1.
+
+For case 1 (Figure 3a), let s~t := (st, zt) and a~t := at. We seek to show that the process formed by {s~t, a~t}t=0 forms a standard MDP. Clearly s~t  S × Z, and ~0(s~0) = Pr(s0, z0) = s0(s0)z0(z0) Notice that the definition of an input-driven MDP presumes the Markov property
+
+Pr(st+1, zt+1|s0:t, z0:t, a0:t) = Pr(st+1, zt+1|st, zt, at) =Ps(st+1|st, zt, at)Pz(zz+1|zt) t  0.
+As such, the process {s~t, a~t}t=0 is also Markov and satisfies Pr(s~t+1|s~0:t, a~0:t) = Pr(s~t+1|s~t, a~t) t  0.
+Finally to specify the transition kernel for {s~t, a~t}t=0 we have from Equation (11) P~(s~t+1|s~t, a~t) = Pr(st+1, zt+1|st, zt, at) = Ps(st+1|st, zt, at)Pz(zz+1|zt)
+
+(10) (11)
+(12)
+(13)
+
+Therefore, for case 1, (S~, A, P~, ~0, r, ) defines a standard MDP, where S~ = S × Z, P~(st+1, zt+1|st, zt, at) = Ps(st+1|st, at, zt)Pz(zt+1|zt), and ~0(s0, z0) = 0s(s0)0z(z0).
+Similarly, for case 2 (Figure 3b), consider the process {st, at}. Then clearly st  S, at  A and s0  s0.
+
+Now,
+
+Pr(st+1|s0:t, a0:t) = Pr(z0:t) Pr(st+1|s0:t, a0:t, z0:t)
+z0:t
+
+(14)
+
+= Pr(z0:t)Ps(st+1|st, at, zt) (from Equation 11)
+z0:t
+
+(15)
+
+= Ps(st+1|st, at, zt) Pr(zt) Pr(zt-1) . . . (because zt is i.i.d.) (16)
+z0:t
+
+= Ps(st+1|st, at, zt) Pr(zt) Pr(zt-1) Pr(zt-2) . . .
+
+zt
+
+zt-1
+
+zt-2
+
+(17)
+
+= Ps(st+1|st, at, zt) Pr(zt)
+
+(18)
+
+zt
+
+= Pr(st+1|st, at).
+
+(19)
+
+Therefore {st, at}t=0 forms the MDP (S, A, P¯, s0, r, ) with a transition kernel P¯ as given by Equation (18).
+
+C PROOF OF LEMMA 1
+Proof. From the definition of an input-driven MDP (Definition 1), we have
+Pr(z, st, at) = Pr(z0:t, st, at) Pr(zt+1:|z0:t, st, at) = Pr(z0:t) Pr(st|z0:t) Pr(at|st, z0:t) Pr(zt+1:|zt) = Pr(z0:t) Pr(st|z0:t)(at|st) Pr(zt+1:|z0:t) = Pr(z) Pr(st|z0:t)(at|st) = Pr(z) Pr(st|z)(at|st).
+
+13
+
+Under review as a conference paper at ICLR 2019
+
+D PROOF OF LEMMA 2
+Proof. Expanding the Policy Gradient Theorem in Equation (1), we have
+
+
+
+
+
+
+() =E   log (at|st) t r(st , at )
+
+t=0 t t
+
+
+
+
+
+
+= E  log (at|st) t r(st , at )
+
+t=0 t t
+
+
+=
+t=0
+
+Pr(z) Pr(st = s|z)(at = a|s) log (a|s)E
+z,s,a
+
+t r(st , at )|z, st = s, at = a
+t =t
+(20)
+
+
+= Pr(z) Pr(st = s|z)(a|s) log (a|s)tQ(s, a|z)
+t=0 z,s,a
+
+(21)
+
+
+
+=
+
+Pr(z)(a|s) log (a|s)Q(s, a|z)
+
+t Pr(st = s|z)
+
+z,s,a
+
+t=0
+
+= [Pr(z),z(s)(a|s) log (a|s)Q(s, a|z)]
+z,s,a
+
+(22)
+
+=Ez,,z,  log (a|s)Q(s, a|z) ,
+
+where in Equation (20) we have used the fact that the policy is conditionally independent of the input-sequence given the present state (Lemma 1), while Equations (21) and (22) follow from the definitions of the Q-function and state-visitation frequency ,z respectively.
+
+E PROOF OF THEOREM 1
+Proof. For any state s  S, we first note that aA (a|s) =  aA (a|s) = 0. As such, we have
+
+Ez,,z, [ log (a|s)b(s, z)] =Ez E,z,  log (a|s)b(s, z) z
+
+=Ez
+
+,z(s)(a|s) log (a|s)b(s, z)
+
+sa
+
+=Ez
+
+,z(s)b(s, z) (a|s) = 0.
+
+sa
+
+(23)
+
+Notice that the proof above (Equation (23)) again relies on the Markov property of z - st - at. 14
+
+Under review as a conference paper at ICLR 2019
+
+F PROOF OF THEOREM 2
+
+Proof. Let G(s, a) denote  log (a|s)T  log (a|s). For any input-aware baseline b(s, z), the variance of the Policy Gradient estimate is given by
+
+EszaPz,z
+
+ log (a|s) [Q(s, a|z) - b(s, z)] - Ez,,z, [ log (a|s) [Q(s, a|z) - b(s, z)]]
+
+2 2
+
+= Ez,,z, G(s, a) Q(s, a|z) - b(s, z) 2 - Ez,,z,  log (a|s) Q(s, a|z) - b(s, z)
+
+2 2
+
+= Ez,,z, G(s, a) Q(s, a|z) - b(s, z) 2 - Ez,,z,  log (a|s)Q(s, a|z)
+
+2 2
+
+(due to Theorem 1)
+
+= Ez,,z,
+
+G(s, a)Q(s, a|z)2
+
+-
+
+Ez,,z, [ log (a|s)Q(s, a|z)]
+
+2 2
+
++ Ez,,z Ea G(s, a) z, s b(s, z)2 - 2Ea G(s, a)Q(s, a|z) z, s b(s, z) .
+
+Notice that the baseline is only involved in the last term in a quadratic form, where the second
+order term is positive. To minimize the variance, we set baseline to the minimizer of the quadratic equation, i.e., 2Ea G(s, a) z, s b(s, z) - 2Ea G(s, a)Q(s, a|z) z, s = 0 and hence the result follows.
+
+G INPUT-DEPENDENT BASELINE FOR TRPO
+
+We show that the input-dependent baselines are bias-free for TRPO (Schulman et al., 2015a).
+
+Theorem 3. argmaxEsold,aold
+
+ (a|s) old (a|s)
+
+Q^ old
+
+(s,
+
+a)
+
+= argmaxEsold,aold
+
+ (a|s) old (a|s)
+
+Q^old (s, a) - b(s, z)
+
+which means the baseline does not change the optimization objective.
+
+,
+
+Proof.
+
+Esold ,aold
+
+ (a|s) old(a|s)
+
+b(s,
+
+z)
+
+=
+
+old(s) old(a|s)
+sa
+
+ (a|s) old(a|s)
+
+b(s,
+
+z)
+
+= old(s) (a|s)b(s, z)
+sa
+
+= old(s)b(s, z),
+s
+
+which is independent of . Therefore, b(s, z) does not change the optimization objective.
+
+H PSEUDOCODE FOR TRAINING MULTI-VALUE BASELINES
+In §5 we explained the idea of efficiently computing input-dependent baselines (§4.1) using multiple value networks on a fixed set of input sequences. Algorithm 2 depicts the details of this approach.
+Algorithm 2 Training multi-value baselines for policy-based methods.
+Require: pregenerated input seuqnces {z1, z2, · · · , zN }, step sizes ,  1: Initialize value network parameters V1 , V1 , · · · , VN and policy parameters  2: while not done do 3: Sample a input sequence zi 4: Sample k rollouts T1, T2, ..., Tk using policy  and input sequence zi 5: Update policy with Equation (1) or (2) using baseline estimated with Vi 6: Update i-th value network parameters: Vi  Vi - Vi L1:k VVi 7: end while
+
+15
+
+Under review as a conference paper at ICLR 2019
+I SETUP FOR DISCRETE-ACTION ENVIRONMENTS
+Load balancing across servers (Figure 1a). In this environment, an RL agent balances jobs over k servers to minimize the average job completion time. We use the same job size distribution and Poisson arrival process as in the example in §3, but run over 10 simulated servers with different processing rates, ranging linearly from 0.15 to 1.05. In each episode, we generate 500 jobs as the exogenous input process. The problem of minimizing average job completion time does not have a closed-form solution (Harchol-Balter & Vesilo, 2010); the most widely-used heuristic is to join the shortest queue (Daley, 1987). However, understanding the workload pattern can give a better policy; for example, we can reserve some servers for small jobs. In this environment, the observed state is a vector of (j, q1, q2, ..., qk), where j is the size of the incoming job, qi is the amount of work currently in each queue. The action a  {1, 2, ..., k} schedules the incoming job to a specific queue. The reward is the number of active jobs times the negated time elapsed since the last action.
+Bitrate adaptation for video streaming (Figure 1b). Streaming video over variable-bandwidth connections requires the client to adapt the video bitrates to optimize the user experience. This is challenging since the available network bandwidth (the exogenous input process) is hard to predict accurately. We simulate real-world video streaming using public cellular network data (Riiser et al., 2013) and video with seven bitrate levels and 500 chunks (DASH Industry Form, 2016). The reward is a weighted combination of video resolution, time paused for rebuffering, and the number of bitrate changes (Mao et al., 2017). The observed state contains bandwidth history, current video buffer size, and current bitrate. The action is the next video chunk's bitrate. State-of-the-art heuristics for this problem conservatively estimate the network bandwidth and use model predictive control to choose the optimal bitrate over the near-term horizon (Yin et al., 2015).
+J EXPERIMENT DETAILS
+In our discrete-action environments (§6.2), we build 10-value networks and a meta-baseline using MAML (Finn et al., 2017), both on top of the OpenAI A2C implementation (Dhariwal et al., 2017). We use  = 0.995 for both environments. The actor and the critic networks have 2 hidden layers, with 64 and 32 hidden neurons on each. The activation function is ReLU (Nair & Hinton, 2010) and the optimizer is Adam (Chilimbi et al., 2014). We train the policy with 16 (synchronous) parallel agents. The learning rate is 1-3. The entropy factor (Mnih et al., 2016) is decayed linearly from 1 to 0.001 over 10000 training iteration. For meta-baseline, the meta learning rate is 1-3 and the model specification has 5 step updates, each with learning rate 1-4. The model specification step in MAML is performed with vanilla stochastic gradient descent.
+We introduce disturbance into our continuous-action robot control environments (§6.1). For the walker with wind (Figure 1c), we randomly sample a wind force in [-1, 1] initially and add a Gaussian noise sampled from N (0, 1) at each step. The wind is bounded between [-10, 10]. The episode terminates when the walker falls. For the half-cheetah with floating tiles, we extend the number of piers from 10 in the original environment (Clavera et al., 2018) to 50 so that the agent remains on the pathway. We initialize the tiles with damping sampled uniformly in [0, 10]. For the 7-DoF robot arm environments, we initialize the target to randomly appear within (-0.1, -0.2, 0.5), (0.4, 0.2, -0.5) in 3D. The position of the target is perturbed with a Gaussian noise sampled from N (0, 0.1) in each coordinate at each step. We bound the position of the target So that the target is confined within the arm's reach. The episode length of all these environments are capped at 1000.
+We build the multi-value networks and meta-baseline on top of the TRPO implementation by OpenAI (Dhariwal et al., 2017). We turned off the GAE enhancement by using  = 1 for fair comparison. We found that it makes only a small performance difference (within ±5% using  = {0.95, 0.96, 0.97, 0.98, 0.99, 1}) in our environments. We use  = 0.99 for all three environments. The policy network has 2 hidden layers, with 128 and 64 hidden neurons on each. The activation function is ReLU (Nair & Hinton, 2010). The KL divergence constraint  is 0.01. The learning rate for value functions is 1-3. The hyperparameter of training the meta-baseline is the same as the discrete-action case.
+16
+
+Under review as a conference paper at ICLR 2019
+Figure 6: In continuous-action MuJoCo environments (§6.1), PPO (Schulman et al., 2017) with input-dependent baselines achieves 42%­3.5× better testing reward than PPO with a standard state-dependent baseline. Learning curves are on 100 testing episodes with unseen input sequences; shaded area spans one standard deviation.
+TRPO, b(s) = V(s),z RARL, b(s) = V(s),z TRPO, b(s, z) = V(s|z) RARL, b(s, z) = V(s|z)
+Figure 7: The input-dependent baseline technique is complementary and orthogonal to RARL (Pinto et al., 2017). The implementation of input-dependent baseline is MAML (§5). Left: learning curves of testing rewards; shaded area spans one standard deviation; input-dependent baseline improves the policy optimization for both TRPO and RARL, while RARL improves TRPO in the walker2d environment with wind disturbance. Right: CDF of testing performance; RARL improves the policy especially in the low reward region; applying input-dependent baseline boosts the performance for both TRPO and RARL significantly.
+K INPUT-DEPENDENT BASELINES WITH PPO
+Figure 6 shows the results of applying input-dependent baselines on PPO (Schulman et al., 2017) in MuJoCo (Todorov et al., 2012) environments. We make three key observations. First, compared to Figure 4 the best performances of PPO in these environments (blue curves) are better than that of TRPO. This is as expected, because the variances of the reward feedbacks in these environments are generally large; and the reward clipping in PPO helps. Second, input-dependent baselines boost the performance on testing rewards for all environments. In particular, meta-learning approach achieves the best performance, as it is not restricted to a fixed set of input sequences during training (§5). Third, the trend of learning curve is similar to that in TRPO (Figure 4), which shows our inputdependent baseline approach is generally applicable to a range of policy gradient based methods (e.g., A2C (§6.2), TRPO (§6.1), PPO).
+L INPUT-DEPENDENT BASELINES WITH RARL
+Our work is orthogonal and complementary to adversarial and robust reinforcement learning (e.g., RARL (Pinto et al., 2017)). These methods seek to improve policy robustness by co-training an adversary to generate a worst-case noise process, whereas our work improves policy optimization itself in the presence of inputs like noise. Note that if an adversary generates high-variance noise, similar to the inputs we consider in our experiments (§6), techniques such RARL alone are not adequate to train good controllers. To empirically demonstrate this effect, we repeat the walker2d with wind experiment described in §6.1. In this environment, we add a noise (same scale as the original random walk) on the wind and co-train an adversary to control the strength and direction of this noise. We follow the training procedure described in RARL (Pinto et al., 2017, §3.3). Figure 7 depicts the results. With either the standard state-dependent baseline or our input-dependent baseline, RARL generally improves the robustness of the policy, as RARL achieves better testing rewards especially in the low reward region (i.e., compared the yellow curve to green curve, or red curve to blue curve in CDF of Figure 7). Moreover, input-dependent baseline significantly improves
+17
+
+Under review as a conference paper at ICLR 2019 the policy optimization, which boosts the performance of both TRPO and RARL (i.e., compared the blue curve to green curve, and the red curve to yellow curve). Therefore, in this environment we empirically show that the input-dependent baseline generally helps improve the policy optimization methods and is complementary to adversarial RL methods such as RARL.
+18
+
+
