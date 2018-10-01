@@ -54,6 +54,8 @@ def index():
 @app.route("/search/")
 def search(query=None):
     query = query if query else flask.request.args.get('query')
+    if query is None:
+        return flask.redirect(flask.url_for('index'))
     found = []
     for paperid, paper in papers:
         if query.lower() in paper.lower():
